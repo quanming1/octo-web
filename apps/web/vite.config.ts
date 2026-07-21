@@ -138,7 +138,7 @@ export default defineConfig(({ mode }) => {
             env.VITE_SUMMARY_API_URL || apiOrigin || "http://localhost:8080",
           changeOrigin: true,
           secure: false,
-          rewrite: (path: string) => path.replace(/^\/summary/, ""),
+          // The upstream summary service is mounted at /summary/api/v1; preserve the prefix.
         },
         // Matters service API — must be before the general /api/ rule
         // When target is the main gateway (nginx), no rewrite needed — nginx routes /matter/* to todos service.
