@@ -8,6 +8,7 @@ import {
     Tag,
     Modal,
     Popconfirm,
+    Tooltip,
 } from "@douyinfe/semi-ui";
 import { IconEdit, IconMore, IconSend, IconClock, IconTick, IconClose, IconInfoCircle, IconHistory, IconUser, IconPlus, IconMinusCircle, IconExit, IconDelete } from "@douyinfe/semi-icons";
 import { ChevronDown } from "lucide-react";
@@ -3229,87 +3230,70 @@ export default class SummaryDetailPage extends Component<SummaryDetailPageProps,
                             <Button
                                 theme="solid"
                                 type="primary"
+                                size="small"
                                 onClick={this.handleContinueRefine}
                             >
                                 {t("summary.detail.continueRefine")}
                             </Button>
                         )}
                         {this.renderScheduleButton()}
-                        {detail && detail.status === TaskStatus.COMPLETED && (
+                        <Dropdown
+                            trigger="click"
+                            position="bottomRight"
+                            render={
+                                <Dropdown.Menu>
+                                    {detail && detail.status === TaskStatus.COMPLETED && (
+                                        <Dropdown.Item icon={<IconSend />} onClick={this.handleForwardToChat}>
+                                            {t("summary.detail.forwardToChat")}
+                                        </Dropdown.Item>
+                                    )}
+                                    {SHOW_FORWARD_TO_MATTER && detail && detail.status === TaskStatus.COMPLETED && (
+                                        <Dropdown.Item
+                                            icon={<IconExit />}
+                                            onClick={this.handleForwardToMatter}
+                                            disabled={this.state.forwardingToMatter}
+                                        >
+                                            {t("summary.detail.forwardToMatter")}
+                                        </Dropdown.Item>
+                                    )}
+                                    {detail && canRegenerate(detail.status) && detail.trigger_type !== TriggerType.AGENT && (
+                                        <Dropdown.Item icon={<IconHistory />} onClick={this.handleRegenerate}>
+                                            {t("summary.detail.regenerate")}
+                                        </Dropdown.Item>
+                                    )}
+                                    {detail && canCancel(detail.status) && (
+                                        <Dropdown.Item icon={<IconClose />} onClick={this.handleCancel}>
+                                            {t("summary.detail.cancelTask")}
+                                        </Dropdown.Item>
+                                    )}
+                                    {detail && isCreator && (
+                                        <Dropdown.Item
+                                            type="danger"
+                                            icon={<IconDelete />}
+                                            onClick={this.handleDeleteTask}
+                                        >
+                                            {t("summary.common.delete")}
+                                        </Dropdown.Item>
+                                    )}
+                                    {detail && isParticipant && !isCreator && (
+                                        <Dropdown.Item
+                                            type="danger"
+                                            icon={<IconMinusCircle />}
+                                            onClick={this.handleLeaveTask}
+                                        >
+                                            {t("summary.detail.leaveTask")}
+                                        </Dropdown.Item>
+                                    )}
+                                </Dropdown.Menu>
+                            }
+                        >
                             <Button
                                 size="small"
                                 theme="borderless"
                                 type="tertiary"
-                                icon={<IconSend />}
-                                onClick={this.handleForwardToChat}
-                            >
-                                {t("summary.detail.forwardToChat")}
-                            </Button>
-                        )}
-                        {SHOW_FORWARD_TO_MATTER && detail && detail.status === TaskStatus.COMPLETED && (
-                            <Button
-                                size="small"
-                                theme="borderless"
-                                type="tertiary"
-                                icon={<IconSend />}
-                                onClick={this.handleForwardToMatter}
-                                loading={this.state.forwardingToMatter}
-                                disabled={this.state.forwardingToMatter}
-                            >
-                                {t("summary.detail.forwardToMatter")}
-                            </Button>
-                        )}
-                        {detail && canRegenerate(detail.status) && (
-                            <Button
-                                size="small"
-                                theme="borderless"
-                                type="tertiary"
-                                icon={<IconHistory />}
-                                onClick={this.handleRegenerate}
-                            >
-                                {t("summary.detail.regenerate")}
-                            </Button>
-                        )}
-                        {detail && canCancel(detail.status) && (
-                            <Button
-                                size="small"
-                                theme="borderless"
-                                type="tertiary"
-                                icon={<IconClose />}
-                                onClick={this.handleCancel}
-                            >
-                                {t("summary.detail.cancelTask")}
-                            </Button>
-                        )}
-                        {detail && isCreator ? (
-                            <Popconfirm
-                                title={t("summary.summaryCard.deleteTitle")}
-                                content={t("summary.summaryCard.deleteConfirm")}
-                                onConfirm={this.handleDeleteTask}
-                            >
-                                <Button
-                                    size="small"
-                                    theme="borderless"
-                                    type="tertiary"
-                                    icon={<IconDelete />}
-                                    aria-label={t("summary.common.delete")}
-                                />
-                            </Popconfirm>
-                        ) : detail && isParticipant ? (
-                            <Popconfirm
-                                title={t("summary.detail.leaveTask")}
-                                content={t("summary.detail.leaveConfirm")}
-                                onConfirm={this.handleLeaveTask}
-                            >
-                                <Button
-                                    size="small"
-                                    theme="borderless"
-                                    type="tertiary"
-                                    icon={<IconExit />}
-                                    aria-label={t("summary.detail.leaveTask")}
-                                />
-                            </Popconfirm>
-                        ) : null}
+                                icon={<IconMore />}
+                            />
+                        </Dropdown>
                     </div>
                 </div>
                 {this.renderScheduleConfirm()}
