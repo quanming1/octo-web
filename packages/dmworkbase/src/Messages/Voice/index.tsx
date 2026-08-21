@@ -9,6 +9,7 @@ import MessageBase from "../Base"
 import WKApp from "../../App"
 import { MessageContentTypeConst } from "../../Service/Const"
 import { MessageWrap } from "../../Service/Model"
+import { t } from "../../i18n"
 const BenzAMRRecorder = require('benz-amr-recorder');
 
 export class VoiceContent extends MediaMessageContent {
@@ -24,7 +25,7 @@ export class VoiceContent extends MediaMessageContent {
         return MessageContentTypeConst.voice
     }
     get conversationDigest() {
-        return "[语音]"
+        return t("base.message.digest.voice")
     }
 }
 

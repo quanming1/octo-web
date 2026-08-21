@@ -1,6 +1,6 @@
 import { Button, Spin } from "@douyinfe/semi-ui";
 import classNames from "classnames";
-import { Channel, ChannelInfo, WKSDK, Subscriber } from "wukongimjssdk";
+import { Channel, ChannelInfo, Subscriber } from "wukongimjssdk";
 import React from "react";
 import { Component } from "react";
 import WKApp from "../../App";
@@ -10,7 +10,9 @@ import "./index.css"
 import { ChannelSettingVM } from "./vm";
 import RoutePage from "../RoutePage";
 import ConversationContext from "../Conversation/context";
-import { ChannelTypeCustomerService } from "../../Service/Const";
+import { ChannelTypeCommunityTopic, ChannelTypeCustomerService } from "../../Service/Const";
+import { I18nContext } from "../../i18n";
+import { getCurrentImChannelInfo } from "../../im-runtime/currentChannelRuntime";
 
 export interface ChannelSettingProps {
     onClose?: () => void
@@ -19,6 +21,8 @@ export interface ChannelSettingProps {
 }
 
 export default class ChannelSetting extends Component<ChannelSettingProps> {
+    static contextType = I18nContext
+    declare context: React.ContextType<typeof I18nContext>
 
     subscribers(): Subscriber[] {
         return this.vm.subscribers;
@@ -46,12 +50,18 @@ export default class ChannelSetting extends Component<ChannelSettingProps> {
 
            let  memberCount = vm.subscribers.length
 
-            const channelInfo = WKSDK.shared().channelManager.getChannelInfo(channel)
+            const channelInfo = getCurrentImChannelInfo(channel)
             if(channelInfo?.orgData?.member_count) {
                 memberCount = channelInfo.orgData.member_count
             }
+
+            const title = vm.channel.channelType === ChannelTypeCommunityTopic
+                ? this.context.t("base.channelSetting.threadTitle")
+                : vm.channel.channelType === ChannelTypeCustomerService
+                    ? this.context.t("base.channelSetting.title")
+                    : this.context.t("base.channelSetting.titleWithCount", { values: { count: memberCount } })
            
-            return <RoutePage title={ vm.channel.channelType === ChannelTypeCustomerService?"聊天信息":`聊天信息（${memberCount}）`} onClose={() => {
+            return <RoutePage className="wk-channelsetting" title={title} onClose={() => {
                 if (onClose) {
                     onClose()
                 }

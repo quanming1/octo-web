@@ -1,4 +1,5 @@
 import React from 'react'
+import { useI18n } from '../../../i18n'
 import './index.css'
 
 export interface AvatarProps {
@@ -31,9 +32,11 @@ export default function Avatar({
   size = 32,
   isOnline,
   showOnlineDot,
-  alt = '头像',
+  alt,
   onClick,
 }: AvatarProps) {
+  const { t } = useI18n()
+  const resolvedAlt = alt ?? t('base.message.avatar.alt')
   return (
     <div
       className="wk-msg-avatar"
@@ -42,7 +45,7 @@ export default function Avatar({
     >
       <img
         src={src}
-        alt={alt}
+        alt={resolvedAlt}
         className="wk-msg-avatar-img"
       />
       {showOnlineDot && isOnline && (

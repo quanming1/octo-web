@@ -5,6 +5,17 @@ import { MessageContentTypeConst, MessageReasonCode, OrderFactor } from "./Const
 import { DefaultEmojiService } from "./EmojiService"
 import { TypingManager } from "./TypingManager"
 import { getSpaceFilteredLastMessage, SYSTEM_BOTS } from "./SpaceService"
+import { isMessageContinuation } from "./messageContinuity"
+import {
+    MENTION_LABEL_AIS,
+    MENTION_LABEL_HUMANS,
+    MENTION_UID_AIS,
+    MENTION_UID_HUMANS,
+    MENTION_UID_LEGACY_ALL,
+    mentionUidStateFromRobot,
+    type MentionUidState,
+} from "../Utils/mentionRender"
+import { getImChannelInfo, getImChannelSubscribers } from "../im-runtime/channelRuntime"
 
 export class ConversationWrap {
     conversation: Conversation
@@ -53,9 +64,6 @@ export class ConversationWrap {
     }
 
     public get unread() {
-        const rawUnread = this.conversation.unread
-        if (rawUnread === 0) return 0
-
         const currentSpaceId = WKApp.shared.currentSpaceId
 
         // 后端 per-Space 未读计数：Person 频道优先使用 space_unread
@@ -64,6 +72,9 @@ export class ConversationWrap {
             && this.conversation.extra?.spaceUnread !== undefined) {
             return this.conversation.extra.spaceUnread
         }
+
+        const rawUnread = this.conversation.unread
+        if (rawUnread === 0) return 0
 
         // 系统 Bot（如 BotFather）在 Space 模式下清零未读
         if (currentSpaceId
@@ -106,11 +117,21 @@ export class ConversationWrap {
     }
 
     public get isMentionMe(): boolean {
-        // 优先用 reminders（覆盖历史未读 @ 场景，含子区）
-        // 兜底用 SDK 的 isMentionMe（基于 lastMessage.mention）
+        // 权威来源：server-side reminders（Plan X 下 ais-only 不建 reminder，
+        // 且 filterChannelLevelByPublisher 已排除 sender 自通知）
         const hasReminderMention = (this.conversation.reminders?.length ?? 0) > 0
             && this.conversation.reminders!.some(r => r.reminderType === ReminderType.ReminderTypeMentionMe && !r.done)
-        return hasReminderMention || (this.conversation.isMentionMe ?? false)
+        if (hasReminderMention) return true
+
+        // 实时兜底：只信 per-uid mention（不信 SDK 的 broadcast 判断）
+        // Plan X: mention.all=1 不再代表人类通知，SDK 的 isMentionMe 对 broadcast 不可靠
+        const mention = this.conversation.lastMessage?.content?.mention
+        const myUid = WKSDK.shared().config.uid
+        if (mention?.uids && Array.isArray(mention.uids) && myUid && mention.uids.includes(myUid)) {
+            return true
+        }
+
+        return false
     }
 
     public set isMentionMe(isMentionMe: boolean | undefined) {
@@ -201,7 +222,7 @@ export class MessageWrap {
     public locateRemind?: boolean // 定位到消息后是否需要提醒
     constructor(message: Message) {
         this.message = message
-        this.order = message.messageSeq * OrderFactor
+        this.order = message.messageSeq > 0 ? message.messageSeq * OrderFactor : 0
     }
     private _parts?: Array<Part>
 
@@ -260,7 +281,7 @@ export class MessageWrap {
 
 
     public get from(): ChannelInfo | undefined {
-        return WKSDK.shared().channelManager.getChannelInfo(new Channel(this.fromUID, ChannelTypePerson))
+        return getImChannelInfo(WKSDK.shared(), new Channel(this.fromUID, ChannelTypePerson))
     }
 
     public get channel() {
@@ -352,39 +373,28 @@ export class MessageWrap {
 
     public get bubblePosition(): BubblePosition {
 
-        if (!this.preIsSamePerson && this.nextIsSamePerson) {
+        if (!this.isContinueFromPrevious && this.isContinueToNext) {
             return BubblePosition.first
         }
-        if (this.preIsSamePerson && this.nextIsSamePerson) {
+        if (this.isContinueFromPrevious && this.isContinueToNext) {
             return BubblePosition.middle
         }
 
-        if (this.preIsSamePerson && !this.nextIsSamePerson) {
+        if (this.isContinueFromPrevious && !this.isContinueToNext) {
             return BubblePosition.last
         }
-        if (!this.preIsSamePerson && !this.nextIsSamePerson) {
+        if (!this.isContinueFromPrevious && !this.isContinueToNext) {
             return BubblePosition.single
         }
         return BubblePosition.unknown
     }
 
-    private get preIsSamePerson(): boolean {
-        if (this.preMessage?.content.contentType === MessageContentTypeConst.time) {
-            return false
-        }
-        if (this.preMessage?.revoke) {
-            return false
-        }
-        return this.preMessage?.fromUID === this.fromUID
+    public get isContinueFromPrevious(): boolean {
+        return isMessageContinuation(this.preMessage, this)
     }
-    private get nextIsSamePerson(): boolean {
-        if (this.nextMessage?.content.contentType === MessageContentTypeConst.time) {
-            return false
-        }
-        if (this.nextMessage?.revoke) {
-            return false
-        }
-        return this.nextMessage?.fromUID === this.fromUID
+
+    public get isContinueToNext(): boolean {
+        return isMessageContinuation(this, this.nextMessage)
     }
 
     // 解析@
@@ -425,7 +435,12 @@ export class MessageWrap {
         }
 
         if (mention.uids && Array.isArray(mention.uids) && mention.uids.length > 0) {
-            return this.parseMentionLegacy(text, mention.uids)
+            const mentionAny = mention as any
+            const hasAisBroadcast = !!(mentionAny.ais || this.content.contentObj?.mention?.ais)
+            const legacyUids = hasAisBroadcast
+                ? mention.uids.slice(0, this.getLegacyMentionUidLimitForAis(mention.uids))
+                : mention.uids
+            return this.parseMentionLegacy(text, legacyUids)
         }
 
         // mention.all：把文本中的 @所有人/@all 替换成 uid="all" 的 mention Part
@@ -500,9 +515,13 @@ export class MessageWrap {
                 continue
             }
 
-            // Defensive check: @all / @所有人 should not have personal entity
-            const mentionName = mentionText.slice(1)
-            if (mentionName.toLowerCase() === 'all' || mentionName === '所有人') {
+            // Broadcast entities use sentinel uids. Do not suppress by visible
+            // label alone: a real member can be named "所有AI" / "所有人".
+            if (
+                entity.uid === MENTION_UID_LEGACY_ALL ||
+                entity.uid === MENTION_UID_HUMANS ||
+                entity.uid === MENTION_UID_AIS
+            ) {
                 parts.push(new Part(PartType.text, mentionText))
                 cursor = entity.offset + entity.length
                 continue
@@ -531,8 +550,12 @@ export class MessageWrap {
             const matchText = match[0]
             const mentionName = matchText.slice(1)
 
-            // Skip @all / @所有人 — these correspond to mentionAll, not individual uid
-            if (mentionName.toLowerCase() === 'all' || mentionName === '所有人') {
+            // Skip @all / @所有人 / @所有AI — these correspond to broadcast
+            // flags (mentionAll / humans / ais), not individual uid mentions.
+            // @所有AI was added for GH#100: client-side bot UID expansion puts
+            // routing UIDs into mention.uids, but the broadcast text token must
+            // not bind to any of them.
+            if (mentionName.toLowerCase() === 'all' || mentionName === MENTION_LABEL_HUMANS || mentionName === MENTION_LABEL_AIS) {
                 continue
             }
 
@@ -561,6 +584,60 @@ export class MessageWrap {
         }
 
         return parts
+    }
+
+    private getLegacyMentionUidLimitForAis(uids: string[]): number {
+        const subscriberState = this.getSubscriberMentionUidState(uids)
+        let trailingBotCount = 0
+
+        for (let idx = uids.length - 1; idx >= 0; idx--) {
+            const uid = uids[idx]
+            const state = subscriberState.get(uid) ?? this.getChannelInfoMentionUidState(uid)
+
+            if (state === "bot") {
+                trailingBotCount++
+                continue
+            }
+            if (state === "user") {
+                return uids.length - trailingBotCount
+            }
+
+            // Unknown metadata means we cannot separate real direct mentions
+            // from all-AI routing UIDs. Fail closed rather than binding a
+            // routing UID to unrelated raw @text.
+            return 0
+        }
+
+        return 0
+    }
+
+    private getSubscriberMentionUidState(uids: string[]): Map<string, MentionUidState> {
+        const state = new Map<string, MentionUidState>()
+        const uidSet = new Set(uids)
+        try {
+            const subscribers = getImChannelSubscribers(WKSDK.shared(), this.channel)
+            for (const sub of subscribers as any[]) {
+                if (sub?.uid && uidSet.has(sub.uid)) {
+                    const uidState = mentionUidStateFromRobot(sub.orgData?.robot)
+                    if (uidState !== "unknown") {
+                        state.set(sub.uid, uidState)
+                    }
+                }
+            }
+        } catch {
+            // Fall through with whatever state was collected before failure.
+        }
+        return state
+    }
+
+    private getChannelInfoMentionUidState(uid: string): MentionUidState {
+        try {
+            const info = getImChannelInfo(WKSDK.shared(), new Channel(uid, ChannelTypePerson))
+            if (!info) return "unknown"
+            return mentionUidStateFromRobot(info.orgData?.robot)
+        } catch {
+            return "unknown"
+        }
     }
     // 解析emoji
     parseEmoji(parts: Array<Part>): Array<Part> {

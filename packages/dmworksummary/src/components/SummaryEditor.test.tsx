@@ -1,9 +1,10 @@
 import React from "react";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render as rtlRender, screen, fireEvent, waitFor } from "@testing-library/react";
+import { vi } from "vitest";
 import SummaryEditor from "./SummaryEditor";
 import * as api from "../api/summaryApi";
 
-jest.mock("@douyinfe/semi-ui", () => ({
+vi.mock("@douyinfe/semi-ui", () => ({
     Button: ({ children, onClick, disabled, loading, theme, ...rest }: any) => (
         <button
             onClick={onClick}
@@ -16,27 +17,31 @@ jest.mock("@douyinfe/semi-ui", () => ({
         </button>
     ),
     Toast: {
-        success: jest.fn(),
-        error: jest.fn(),
-        warning: jest.fn(),
+        success: vi.fn(),
+        error: vi.fn(),
+        warning: vi.fn(),
     },
 }));
 
-jest.mock("../api/summaryApi");
+vi.mock("../api/summaryApi");
 
-const mockApi = api as jest.Mocked<typeof api>;
+const mockApi = vi.mocked(api);
+
+function render(ui: React.ReactElement, options?: any) {
+    return rtlRender(ui, { legacyRoot: true, ...options });
+}
 
 describe("SummaryEditor", () => {
     const defaultProps = {
         taskId: 1,
         baseResultId: 456,
         initialContent: "Original content",
-        onSave: jest.fn(),
-        onCancel: jest.fn(),
+        onSave: vi.fn(),
+        onCancel: vi.fn(),
     };
 
     beforeEach(() => {
-        jest.clearAllMocks();
+        vi.clearAllMocks();
     });
 
     it("renders textarea with initial content", () => {
@@ -84,7 +89,7 @@ describe("SummaryEditor", () => {
         error.status = 409;
         mockApi.editSummary.mockRejectedValue(error);
 
-        const { Toast } = require("@douyinfe/semi-ui");
+        const { Toast } = await import("@douyinfe/semi-ui");
         render(<SummaryEditor {...defaultProps} />);
 
         const textarea = screen.getByRole("textbox");
@@ -102,7 +107,7 @@ describe("SummaryEditor", () => {
         error.status = 500;
         mockApi.editSummary.mockRejectedValue(error);
 
-        const { Toast } = require("@douyinfe/semi-ui");
+        const { Toast } = await import("@douyinfe/semi-ui");
         render(<SummaryEditor {...defaultProps} />);
 
         const textarea = screen.getByRole("textbox");

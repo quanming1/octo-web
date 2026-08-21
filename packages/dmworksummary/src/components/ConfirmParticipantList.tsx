@@ -1,9 +1,11 @@
 import React from "react";
 import { List, Tag } from "@douyinfe/semi-ui";
 import { IconTickCircle, IconClock, IconClose } from "@douyinfe/semi-icons";
+import { useI18n } from "@octo/base";
 import type { Participant } from "../types/summary";
 import { ParticipantStatus } from "../types/summary";
-import { formatDate } from "../utils/summaryHelpers";
+import { formatDate, getParticipantStatusLabel } from "../utils/summaryHelpers";
+import "./SummarySelectors.css";
 
 interface ConfirmParticipantListProps {
     participants: Participant[];
@@ -12,20 +14,16 @@ interface ConfirmParticipantListProps {
 function statusIcon(status: number) {
     switch (status) {
         case ParticipantStatus.CONFIRMED:
-            return <IconTickCircle style={{ color: "var(--semi-color-success)" }} />;
+            return <span className="summary-confirm-participant-icon summary-confirm-participant-icon--confirmed"><IconTickCircle /></span>;
         case ParticipantStatus.DECLINED:
-            return <IconClose style={{ color: "var(--semi-color-danger)" }} />;
+            return <span className="summary-confirm-participant-icon summary-confirm-participant-icon--declined"><IconClose /></span>;
         default:
-            return <IconClock style={{ color: "var(--semi-color-warning)" }} />;
+            return <span className="summary-confirm-participant-icon summary-confirm-participant-icon--pending"><IconClock /></span>;
     }
 }
 
 function statusLabel(status: number): string {
-    switch (status) {
-        case ParticipantStatus.CONFIRMED: return "已确认";
-        case ParticipantStatus.DECLINED: return "已拒绝";
-        default: return "等待确认";
-    }
+    return getParticipantStatusLabel(status);
 }
 
 function statusColor(status: number): string {
@@ -39,18 +37,22 @@ function statusColor(status: number): string {
 const ConfirmParticipantList: React.FC<ConfirmParticipantListProps> = ({
     participants,
 }) => {
+    const { t } = useI18n();
+
     return (
         <List
             dataSource={participants}
+            className="summary-confirm-participant-list"
             renderItem={(p: Participant) => (
                 <List.Item
                     key={p.user_id}
+                    className="summary-confirm-participant-item"
                     header={statusIcon(p.status ?? 0)}
                     main={
                         <div>
-                            <span style={{ fontWeight: 500 }}>{p.user_name || `用户 ${p.user_id}`}</span>
+                            <span className="summary-confirm-participant-name">{p.user_name || t("summary.common.userFallback", { values: { id: p.user_id } })}</span>
                             {p.confirmed_at && (
-                                <span style={{ color: "var(--semi-color-text-2)", marginLeft: 8, fontSize: 12 }}>
+                                <span className="summary-confirm-participant-time">
                                     {formatDate(p.confirmed_at)}
                                 </span>
                             )}

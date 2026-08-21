@@ -1,5 +1,6 @@
 import React, { useMemo, useCallback } from "react";
 import { List } from "lucide-react";
+import { useI18n } from "../../../i18n";
 import "./MarkdownToc.css";
 
 export interface TocItem {
@@ -113,6 +114,7 @@ const MarkdownToc: React.FC<MarkdownTocProps> = ({
   onItemClick,
   activeId,
 }) => {
+  const { t } = useI18n();
   // 提取目录项
   const tocItems = useMemo(() => extractTocItems(content), [content]);
 
@@ -136,7 +138,7 @@ const MarkdownToc: React.FC<MarkdownTocProps> = ({
         <div className="wk-markdown-toc">
           <div className="wk-markdown-toc__header">
             <List size={14} />
-            <span>目录</span>
+            <span>{t("base.filePreview.toc.title")}</span>
           </div>
           <nav className="wk-markdown-toc__nav">
             <ul className="wk-markdown-toc__list">

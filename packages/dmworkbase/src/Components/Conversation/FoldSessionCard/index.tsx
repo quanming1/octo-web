@@ -1,6 +1,7 @@
 import classNames from "classnames";
 import React, { HTMLProps, ReactNode } from "react";
 import Checkbox from "../../Checkbox";
+import { useI18n } from "../../../i18n";
 import "./index.css";
 
 export interface FoldSessionCardParticipant {
@@ -24,6 +25,7 @@ export interface FoldSessionCardProps extends HTMLProps<HTMLDivElement> {
   summaryId?: string;
   summarySender?: string;
   summaryTime?: string;
+  summaryShowMeta?: boolean;
   summaryContent?: ReactNode;
   summaryIcon?: ReactNode;
 
@@ -45,13 +47,14 @@ const FoldSessionCard: React.FC<FoldSessionCardProps> = ({
   isExpanded,
   appearing,
   flash,
-  tagLabel = "AI 协作",
-  statusLabel = "进行中",
+  tagLabel,
+  statusLabel,
   showSummary,
   highlightSummary,
   summaryId,
   summarySender,
   summaryTime,
+  summaryShowMeta = true,
   summaryContent,
   summaryIcon,
   expandedContent,
@@ -63,6 +66,9 @@ const FoldSessionCard: React.FC<FoldSessionCardProps> = ({
   onSummaryContextMenu,
   ...rest
 }) => {
+  const { t } = useI18n();
+  const displayTagLabel = tagLabel ?? t("base.foldSessionCard.aiCollaboration");
+  const displayStatusLabel = statusLabel ?? t("base.foldSessionCard.inProgress");
   // participantLabel 保留计算,供外层 Conversation 使用
   const participantLabel = participants
     .map((participant) => participant.name)
@@ -109,9 +115,11 @@ const FoldSessionCard: React.FC<FoldSessionCardProps> = ({
             />
           ) : null}
           {isActive ? (
-            <span className="wk-fold-session-card-status">{statusLabel}</span>
+            <span className="wk-fold-session-card-status">{displayStatusLabel}</span>
           ) : null}
-          <span className="wk-fold-session-card-count">{count} 条</span>
+          <span className="wk-fold-session-card-count">
+            {t("base.foldSessionCard.count", { values: { count } })}
+          </span>
           <button
             type="button"
             data-testid="fold-session-toggle"
@@ -126,7 +134,9 @@ const FoldSessionCard: React.FC<FoldSessionCardProps> = ({
               }
             }}
             aria-expanded={isExpanded}
-            aria-label={isExpanded ? "收起 AI 协作会话" : "展开 AI 协作会话"}
+            aria-label={isExpanded
+              ? t("base.foldSessionCard.collapse")
+              : t("base.foldSessionCard.expand")}
           >
             <svg viewBox="0 0 24 24">
               <polyline points="6 9 12 15 18 9" />
@@ -155,7 +165,14 @@ const FoldSessionCard: React.FC<FoldSessionCardProps> = ({
             highlightSummary && "wk-fold-session-card-summary-highlight"
           )}
           onAnimationEnd={onSummaryAnimationEnd}
-          onContextMenu={selectionMode ? undefined : onSummaryContextMenu}
+          onContextMenu={
+            selectionMode
+              ? (event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                }
+              : onSummaryContextMenu
+          }
         >
           <div
             className={classNames(
@@ -202,15 +219,16 @@ const FoldSessionCard: React.FC<FoldSessionCardProps> = ({
             <div
               className="wk-fold-session-card-summary-main"
               style={{
-                pointerEvents:
-                  selectionMode && summarySelectable ? "none" : undefined,
+                pointerEvents: selectionMode ? "none" : undefined,
               }}
             >
               {/* 折叠状态显示完整消息:姓名tag + 时间 + 内容 */}
-              <div className="wk-fold-msg-head">
-                <span className="wk-fold-msg-name">{summarySender}</span>
-                <span className="wk-fold-msg-time">{summaryTime}</span>
-              </div>
+              {summaryShowMeta ? (
+                <div className="wk-fold-msg-head">
+                  <span className="wk-fold-msg-name">{summarySender}</span>
+                  <span className="wk-fold-msg-time">{summaryTime}</span>
+                </div>
+              ) : null}
               {summaryContent ? (
                 <div className="wk-fold-msg-text">
                   {summaryContent}

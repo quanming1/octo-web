@@ -7,6 +7,8 @@ import { MessageCell } from "../MessageCell";
 import MessageRow from "../../ui/message/MessageRow";
 import VideoContentUI from "../../ui/message/VideoContent"
 import { getMessageRow } from "../../bridge/message/useMessageRow"
+import { isMessageSelectable } from "../../Service/messageSelection"
+import { I18nContext, t } from "../../i18n"
 import "./index.css"
 
 const SMALL_FILE_THRESHOLD = 1024 * 1024 // 1MB 以下不显示进度覆盖层
@@ -34,7 +36,7 @@ export class VideoContent extends MessageContent {
 
 
     get conversationDigest() {
-        return "[小视频]"
+        return t("base.video.digest")
     }
 
 }
@@ -51,6 +53,9 @@ interface VideoCellState {
 }
 
 export class VideoCell extends MessageCell<any, VideoCellState> {
+    static contextType = I18nContext
+    declare context: React.ContextType<typeof I18nContext>
+
     private _task?: RestartableTask
 
     private _taskListener = (task: Task) => {
@@ -136,6 +141,8 @@ export class VideoCell extends MessageCell<any, VideoCellState> {
         const useNewUI = true
         if (useNewUI) {
             const rowProps = getMessageRow(message)
+            const selectionMode = context.editOn()
+            const selectable = isMessageSelectable(message)
             const src = WKApp.dataSource.commonDataSource.getFileURL(content.url)
             const coverSrc = WKApp.dataSource.commonDataSource.getImageURL(content.cover)
             const isUploading =
@@ -150,9 +157,10 @@ export class VideoCell extends MessageCell<any, VideoCellState> {
                     {...rowProps}
                     onContextMenu={(event) => context.showContextMenus(message, event)}
                     isActive={context.isContextMenuOpen(message.message)}
-                    showCheckbox={context.editOn()}
-                    isSelected={!!message.checked}
-                    onSelect={(selected) => context.checkeMessage(message.message, selected)}
+                    selectionMode={selectionMode}
+                    showCheckbox={selectionMode && selectable}
+                    isSelected={selectable && !!message.checked}
+                    onSelect={selectable ? (selected) => context.checkeMessage(message.message, selected) : undefined}
                     onAvatarClick={(e) => context.onTapAvatar(message.fromUID, e)}
                     onSenderNameClick={() => context.showUser(message.fromUID)}
                 >
@@ -190,13 +198,13 @@ export class VideoCell extends MessageCell<any, VideoCellState> {
                             }} onClick={(e) => {
                                 e.stopPropagation()
                                 if (!this._task) {
-                                    Toast.warning('上传任务已失效，请重新发送文件')
+                                    Toast.warning(this.context.t("base.messageFile.uploadTaskExpired"))
                                     return
                                 }
                                 this._task.restart()
                             }}>
                                 <span style={{ color: "#fff", fontSize: 22 }}>⚠️</span>
-                                <span style={{ color: "#fff", fontSize: 11 }}>上传失败，点击重试</span>
+                                <span style={{ color: "#fff", fontSize: 11 }}>{this.context.t("base.video.uploadFailedRetry")}</span>
                             </div>
                         )}
                     </div>
@@ -257,13 +265,13 @@ export class VideoCell extends MessageCell<any, VideoCellState> {
                     }} onClick={(e) => {
                         e.stopPropagation()
                         if (!this._task) {
-                            Toast.warning('上传任务已失效，请重新发送文件')
+                            Toast.warning(this.context.t("base.messageFile.uploadTaskExpired"))
                             return
                         }
                         this._task.restart()
                     }}>
                         <span style={{ color: "#fff", fontSize: 22 }}>⚠️</span>
-                        <span style={{ color: "#fff", fontSize: 11 }}>上传失败，点击重试</span>
+                        <span style={{ color: "#fff", fontSize: 11 }}>{this.context.t("base.video.uploadFailedRetry")}</span>
                     </div>
                 )}
             </div>

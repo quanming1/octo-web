@@ -2,12 +2,13 @@ import { UnknownContent } from "wukongimjssdk";
 import React from "react";
 import MessageBase from "../Base";
 import { MessageCell } from "../MessageCell";
+import { t } from "../../i18n";
 
 
 export class UnknownCell  extends MessageCell {
      render()  {
          const {message,context} = this.props
         const content = message.content as UnknownContent
-        return <MessageBase context={context} message={message}>[此消息不支持查看，请至手机端查看详情({content.realContentType})]</MessageBase>
+        return <MessageBase context={context} message={message}>{t("base.message.unknown.unsupportedWithType", { values: { type: content.realContentType } })}</MessageBase>
     }
 }

@@ -1,4 +1,5 @@
 import React from 'react'
+import { useI18n } from '../../../i18n'
 import './index.css'
 
 export interface SystemTagProps {
@@ -22,6 +23,7 @@ export default function SystemTag({
   avatarUrl,
   onClose
 }: SystemTagProps) {
+  const { t } = useI18n()
   return (
     <div className="wk-msg-system-tag">
       {avatarUrl && (
@@ -36,7 +38,7 @@ export default function SystemTag({
         <button
           className="wk-msg-system-tag-close"
           onClick={onClose}
-          aria-label="关闭"
+          aria-label={t("base.common.close")}
         >
           ×
         </button>

@@ -1,6 +1,7 @@
 import React, { useMemo } from "react";
 import SyntaxHighlighter from "react-syntax-highlighter";
 import { formatFileSize, getRenderMode } from "../config";
+import { useI18n } from "../../../i18n";
 import "./MarkdownSourceView.css";
 import "./code-highlight.css";
 
@@ -26,6 +27,7 @@ const MarkdownSourceView: React.FC<MarkdownSourceViewProps> = ({
   content,
   contentSize: externalContentSize,
 }) => {
+  const { t } = useI18n();
   // 计算内容大小
   const contentSize = useMemo(() => {
     if (externalContentSize !== undefined) return externalContentSize;
@@ -38,7 +40,9 @@ const MarkdownSourceView: React.FC<MarkdownSourceViewProps> = ({
   if (!content || content.trim() === "") {
     return (
       <div className="wk-markdown-source-view wk-markdown-source-view--empty">
-        <span className="wk-markdown-source-view__message">暂无内容</span>
+        <span className="wk-markdown-source-view__message">
+          {t("base.filePreview.empty")}
+        </span>
       </div>
     );
   }
@@ -48,7 +52,9 @@ const MarkdownSourceView: React.FC<MarkdownSourceViewProps> = ({
     return (
       <div className="wk-markdown-source-view">
         <div className="wk-markdown-source-view__plain-hint">
-          文件较大（{formatFileSize(contentSize)}），已禁用语法高亮以提升性能
+          {t("base.filePreview.largeFilePlainHintPerf", {
+            values: { size: formatFileSize(contentSize) },
+          })}
         </div>
         <pre className="wk-markdown-source-view__plain-source">
           <code>{content}</code>

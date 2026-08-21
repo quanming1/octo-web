@@ -1,6 +1,7 @@
 import React, { useRef, useState, useEffect } from "react";
 import { X, ChevronLeft, ChevronRight } from "lucide-react";
 import ConversationContext from "../Conversation/context";
+import { useI18n } from "../../i18n";
 import "./index.css";
 
 // 文件类型图标
@@ -57,6 +58,7 @@ const AttachmentPreview: React.FC<AttachmentPreviewProps> = ({
   conversationContext,
   files,
 }) => {
+  const { t } = useI18n();
   const listRef = useRef<HTMLDivElement>(null);
   const [showLeftArrow, setShowLeftArrow] = useState(false);
   const [showRightArrow, setShowRightArrow] = useState(false);
@@ -127,7 +129,7 @@ const AttachmentPreview: React.FC<AttachmentPreviewProps> = ({
                   onClick={() =>
                     conversationContext.removePendingAttachment(index)
                   }
-                  title="移除"
+                  title={t("base.messageInput.attachment.remove")}
                   type="button"
                 >
                   <X size={16} />

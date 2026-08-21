@@ -1,7 +1,19 @@
 import React, { Component } from "react";
-import WKSDK, { Channel, ChannelInfo, ChannelInfoListener, ChannelTypePerson } from "wukongimjssdk";
+import WKSDK, {
+    Channel,
+    ChannelInfo,
+    ChannelInfoListener,
+    ChannelTypeGroup,
+    ChannelTypePerson,
+} from "wukongimjssdk";
 import ConversationContext from "../Components/Conversation/context";
 import { MessageWrap } from "../Service/Model";
+import {
+    addImChannelInfoListener,
+    addImSubscriberChangeListener,
+    fetchImChannelInfo,
+    getImChannelInfo,
+} from "../im-runtime/channelRuntime";
 
 
 export interface MessageBaseCellProps {
@@ -21,6 +33,9 @@ export class MessageBaseCell<P extends MessageBaseCellProps = MessageBaseCellPro
 
 export class MessageCell<P extends MessageBaseCellProps = MessageBaseCellPropsImp, S = {}> extends MessageBaseCell<P, S> {
     private _channelInfoListener!: ChannelInfoListener
+    private _subscriberChangeListener?: (channel: Channel) => void
+    private _unsubscribeChannelInfoListener?: () => void
+    private _unsubscribeSubscriberChangeListener?: () => void
 
     componentDidMount() {
         const { message } = this.props
@@ -49,13 +64,13 @@ export class MessageCell<P extends MessageBaseCellProps = MessageBaseCellPropsIm
                 this.setState({})
             }
         }
-        WKSDK.shared().channelManager.addListener(this._channelInfoListener)
+        this._unsubscribeChannelInfoListener = addImChannelInfoListener(WKSDK.shared(), this._channelInfoListener)
 
         // 没有缓存时主动拉取 sender Person channelInfo
         if (message.fromUID) {
             const channel = new Channel(message.fromUID, ChannelTypePerson)
-            if (!WKSDK.shared().channelManager.getChannelInfo(channel)) {
-                WKSDK.shared().channelManager.fetchChannelInfo(channel)
+            if (!getImChannelInfo(WKSDK.shared(), channel)) {
+                void fetchImChannelInfo(WKSDK.shared(), channel)
             }
         }
 
@@ -70,14 +85,28 @@ export class MessageCell<P extends MessageBaseCellProps = MessageBaseCellPropsIm
             convChannel.channelType === ChannelTypePerson &&
             !(message.fromUID && convChannel.channelID === message.fromUID)
         ) {
-            if (!WKSDK.shared().channelManager.getChannelInfo(convChannel)) {
-                WKSDK.shared().channelManager.fetchChannelInfo(convChannel)
+            if (!getImChannelInfo(WKSDK.shared(), convChannel)) {
+                void fetchImChannelInfo(WKSDK.shared(), convChannel)
             }
+        }
+
+        // class + MessageRow 渲染路径依赖 group subscribers 解析群昵称/实名标。
+        // 群成员列表异步到达时需要主动刷新，对齐旧 MessageBase 行为。
+        if (message.channel?.channelType === ChannelTypeGroup) {
+            this._subscriberChangeListener = (channel: Channel) => {
+                if (message.channel?.isEqual(channel)) {
+                    this.setState({})
+                }
+            }
+            this._unsubscribeSubscriberChangeListener = addImSubscriberChangeListener(WKSDK.shared(), this._subscriberChangeListener)
         }
     }
 
     componentWillUnmount() {
-        WKSDK.shared().channelManager.removeListener(this._channelInfoListener)
+        this._unsubscribeChannelInfoListener?.()
+        this._unsubscribeChannelInfoListener = undefined
+        this._unsubscribeSubscriberChangeListener?.()
+        this._unsubscribeSubscriberChangeListener = undefined
     }
 
     render() {

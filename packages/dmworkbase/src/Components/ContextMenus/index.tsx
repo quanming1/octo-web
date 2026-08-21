@@ -1,4 +1,5 @@
 import classNames from "classnames";
+import type { LucideIcon } from "lucide-react";
 import React, { HTMLProps } from "react";
 import { Component, ReactNode } from "react";
 
@@ -25,8 +26,8 @@ export interface ContextMenusContext {
 export class ContextMenusData {
     title!: string
     onClick?: () => void
-    /** SVG path 字符串，例如 'M3 6h18...' */
-    icon?: string
+    /** Lucide 图标组件 */
+    icon?: LucideIcon
     /** 危险操作（红色） */
     danger?: boolean
     /** 分隔线（此项时其他字段无效） */
@@ -35,15 +36,17 @@ export class ContextMenusData {
     children?: ContextMenusData[]
     /** 选中态（子菜单项右侧显示主题色 ✓） */
     checked?: boolean
+    /**
+     * 测试锚点（kebab-case），渲染到 <li> 的 data-testid，供埋点规则命中。
+     * 仅用于叶子项:有 children 的父项点击只展开子菜单(stopPropagation + return,不触发 onClick),
+     * 给父项挂 testid 会让埋点规则在「仅展开」时误命中。父项请勿设 testid,把它挂到实际执行动作的叶子项上。
+     */
+    testid?: string
 }
 
 // ── 内部：渲染单个图标 ──
-function CtxIcon({ path }: { path: string }) {
-    return (
-        <svg className="ctx-icon" viewBox="0 0 24 24">
-            <path d={path} />
-        </svg>
-    )
+function CtxIcon({ icon: Icon }: { icon: LucideIcon }) {
+    return <Icon aria-hidden="true" className="ctx-icon" />
 }
 
 // ── 内部：箭头图标 ──
@@ -57,6 +60,7 @@ function ArrowIcon() {
 
 export default class ContextMenus extends Component<ContextMenusProps, ContextMenusState> implements ContextMenusContext {
     private static _instances: Set<ContextMenus> = new Set()
+    private static _documentContextMenuGuardAttached = false
     private _rafId?: number
 
     static hideAll() {
@@ -65,6 +69,34 @@ export default class ContextMenus extends Component<ContextMenusProps, ContextMe
                 instance.hide()
             }
         })
+    }
+
+    private static _hasOpenInstance(): boolean {
+        for (const instance of ContextMenus._instances) {
+            if (instance.isShow()) return true
+        }
+        return false
+    }
+
+    private static _handleDocumentContextMenu(event: MouseEvent) {
+        if (!ContextMenus._hasOpenInstance()) {
+            ContextMenus._syncDocumentContextMenuGuard()
+            return
+        }
+        event.preventDefault()
+    }
+
+    private static _syncDocumentContextMenuGuard() {
+        if (typeof document === "undefined") return
+
+        const shouldAttach = ContextMenus._hasOpenInstance()
+        if (shouldAttach && !ContextMenus._documentContextMenuGuardAttached) {
+            document.addEventListener("contextmenu", ContextMenus._handleDocumentContextMenu, true)
+            ContextMenus._documentContextMenuGuardAttached = true
+        } else if (!shouldAttach && ContextMenus._documentContextMenuGuardAttached) {
+            document.removeEventListener("contextmenu", ContextMenus._handleDocumentContextMenu, true)
+            ContextMenus._documentContextMenuGuardAttached = false
+        }
     }
 
     _gHandleClick!: () => void
@@ -87,7 +119,9 @@ export default class ContextMenus extends Component<ContextMenusProps, ContextMe
     }
 
     hide(): void {
-        this.setState({ showContextMenus: false })
+        this.setState({ showContextMenus: false }, () => {
+            ContextMenus._syncDocumentContextMenuGuard()
+        })
         this.props.onHide?.()
     }
 
@@ -133,7 +167,9 @@ export default class ContextMenus extends Component<ContextMenusProps, ContextMe
             // 子菜单宽度估算 160px（min-width），靠近右侧时翻转
             const SUBMENU_W = 160
             const flipSubmenu = (screenW - left - rootW) < SUBMENU_W + MARGIN
-            this.setState({ contextOrigin, showContextMenus: true, flipSubmenu })
+            this.setState({ contextOrigin, showContextMenus: true, flipSubmenu }, () => {
+                ContextMenus._syncDocumentContextMenuGuard()
+            })
         })
     }
 
@@ -149,6 +185,18 @@ export default class ContextMenus extends Component<ContextMenusProps, ContextMe
         if (this._rafId !== undefined) {
             cancelAnimationFrame(this._rafId)
         }
+        ContextMenus._syncDocumentContextMenuGuard()
+    }
+
+    _handleContextMenu(event: React.MouseEvent<HTMLElement>) {
+        event.preventDefault()
+        event.stopPropagation()
+    }
+
+    _handleMaskContextMenu(event: React.MouseEvent<HTMLDivElement>) {
+        event.preventDefault()
+        event.stopPropagation()
+        ContextMenus.hideAll()
     }
 
     _renderItem(m: ContextMenusData, i: number): ReactNode {
@@ -161,6 +209,7 @@ export default class ContextMenus extends Component<ContextMenusProps, ContextMe
         return (
             <li
                 key={i}
+                data-testid={m.testid}
                 className={classNames(m.danger && "wk-ctx-danger")}
                 onClick={(e) => {
                     if (hasChildren) {
@@ -171,7 +220,7 @@ export default class ContextMenus extends Component<ContextMenusProps, ContextMe
                     if (m.onClick) m.onClick()
                 }}
             >
-                {m.icon && <CtxIcon path={m.icon} />}
+                {m.icon && <CtxIcon icon={m.icon} />}
                 <span style={{ flex: 1 }}>{m.title}</span>
                 {hasChildren && (
                     <>
@@ -190,7 +239,7 @@ export default class ContextMenus extends Component<ContextMenusProps, ContextMe
                                             if (child.onClick) child.onClick()
                                         }}
                                     >
-                                        {child.icon && <CtxIcon path={child.icon} />}
+                                        {child.icon && <CtxIcon icon={child.icon} />}
                                         <span style={{ flex: 1 }}>{child.title}</span>
                                         {child.checked && (
                                             <span style={{
@@ -220,6 +269,7 @@ export default class ContextMenus extends Component<ContextMenusProps, ContextMe
                     className={classNames("wk-contextmenus", showContextMenus && "wk-contextmenus-open", flipSubmenu && "wk-contextmenus-flip-submenu")}
                     ref={ref => { this.contextMenusRef = ref }}
                     style={{ transformOrigin: `-3px ${contextOrigin}px` }}
+                    onContextMenuCapture={this._handleContextMenu}
                 >
                     <ul>
                         {menus && menus.map((m, i) => this._renderItem(m, i))}
@@ -229,6 +279,7 @@ export default class ContextMenus extends Component<ContextMenusProps, ContextMe
                     className="wk-contextmenus-mask"
                     style={{ visibility: showContextMenus ? "visible" : "hidden" }}
                     onClick={() => ContextMenus.hideAll()}
+                    onContextMenuCapture={this._handleMaskContextMenu}
                 />
             </>
         )

@@ -1,5 +1,6 @@
 import React, { useState, useRef } from 'react';
 import DOMPurify from 'dompurify';
+import { useI18n } from '../../i18n';
 import './FileViewer.css';
 
 /** 文件分组 */
@@ -79,6 +80,7 @@ export default function FileViewer({
   defaultFile,
   height = '480px',
 }: FileViewerProps) {
+  const { t } = useI18n();
   const [activePath, setActivePath] = useState<string>(
     defaultFile || groups[0]?.files[0]?.path || ''
   );
@@ -110,7 +112,7 @@ export default function FileViewer({
         name: path,
         size: '—',
         mtime: '—',
-        content: '## 加载失败\n\n无法获取文件内容',
+        content: t('base.fileViewer.loadFailedContent'),
       });
     } finally {
       if (requestId === currentRequestIdRef.current) {
@@ -139,11 +141,16 @@ export default function FileViewer({
     });
   };
 
+  const renderCenteredMessage = (message: string) =>
+    `<div style="color:var(--t3);padding:24px;text-align:center">${message}</div>`;
+
   return (
     <div className="files-layout" data-testid="file-viewer" style={{ height }}>
       {/* 左侧目录 */}
       <div className="files-sidebar" data-testid="file-sidebar">
-        <div className="files-sidebar-head">核心文件 · {groups.length} 类</div>
+        <div className="files-sidebar-head">
+          {t('base.fileViewer.sidebarTitle', { values: { count: groups.length } })}
+        </div>
         <div className="files-sidebar-body">
           {groups.map((group, gIdx) => (
             <div className="files-group" key={gIdx} data-testid={`file-group-${gIdx}`}>
@@ -206,7 +213,7 @@ export default function FileViewer({
               <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
               <path d="M7 11V7a5 5 0 0 1 10 0v4" />
             </svg>
-            只读
+            {t('base.fileViewer.readonly')}
           </span>
           <span className="fvh-meta" data-testid="file-viewer-meta">
             {fileContent ? `${fileContent.size} · ${fileContent.mtime}` : '—'}
@@ -217,10 +224,10 @@ export default function FileViewer({
           data-testid="file-viewer-body"
           dangerouslySetInnerHTML={{
             __html: loading
-              ? '<div style="color:var(--t3);padding:24px;text-align:center">加载中...</div>'
+              ? renderCenteredMessage(t('base.fileViewer.loading'))
               : fileContent
               ? renderMarkdown(fileContent.content)
-              : '<div style="color:var(--t3);padding:24px;text-align:center">请选择文件</div>',
+              : renderCenteredMessage(t('base.fileViewer.selectFile')),
           }}
         />
       </div>

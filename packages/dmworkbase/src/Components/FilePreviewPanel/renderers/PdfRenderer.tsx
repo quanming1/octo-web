@@ -27,6 +27,7 @@ import "@react-pdf-viewer/bookmark/lib/styles/index.css";
 import "@react-pdf-viewer/zoom/lib/styles/index.css";
 import "@react-pdf-viewer/page-navigation/lib/styles/index.css";
 import "./PdfRenderer.css";
+import { useI18n } from "../../../i18n";
 
 export interface PdfRendererProps extends BaseRendererProps {}
 
@@ -35,9 +36,9 @@ type SidebarTab = "thumbnails" | "bookmarks";
 
 // 缩放选项（移除 300%，保留 50%~200%）
 const ZOOM_OPTIONS = [
-  { label: "适应宽度", value: "PageWidth" },
-  { label: "适应页面", value: "PageFit" },
-  { label: "实际大小", value: "ActualSize" },
+  { labelKey: "base.filePreview.pdf.fitWidth", value: "PageWidth" },
+  { labelKey: "base.filePreview.pdf.fitPage", value: "PageFit" },
+  { labelKey: "base.filePreview.pdf.actualSize", value: "ActualSize" },
   { label: "50%", value: "0.5" },
   { label: "75%", value: "0.75" },
   { label: "100%", value: "1" },
@@ -59,6 +60,7 @@ const ZOOM_OPTIONS = [
  * 6. 默认适应宽度
  */
 const PdfRenderer: React.FC<PdfRendererProps> = ({ file, onError }) => {
+  const { t } = useI18n();
   // 文件大小检查（超过 20MB 不渲染）- 必须在所有 hooks 之前
   const isTooLarge = file.size && isFileTooLarge(file.size);
 
@@ -259,11 +261,11 @@ const PdfRenderer: React.FC<PdfRendererProps> = ({ file, onError }) => {
 
   // 获取当前缩放显示文本
   const getZoomDisplayText = useCallback(() => {
-    if (currentZoomMode === "PageFit") return "适应页面";
-    if (currentZoomMode === "PageWidth") return "适应宽度";
-    if (currentZoomMode === "ActualSize") return "实际大小";
+    if (currentZoomMode === "PageFit") return t("base.filePreview.pdf.fitPage");
+    if (currentZoomMode === "PageWidth") return t("base.filePreview.pdf.fitWidth");
+    if (currentZoomMode === "ActualSize") return t("base.filePreview.pdf.actualSize");
     return `${Math.round(currentScale * 100)}%`;
-  }, [currentZoomMode, currentScale]);
+  }, [currentZoomMode, currentScale, t]);
 
   // PDF Worker URL - 使用本地路径避免 CSP 阻止外部 CDN
   const workerUrl = "/pdfjs/pdf.worker.min.js";
@@ -282,7 +284,7 @@ const PdfRenderer: React.FC<PdfRendererProps> = ({ file, onError }) => {
   if (!file.url) {
     return (
       <div className="wk-file-preview-pdf-renderer__error">
-        <span>无法加载 PDF 文件</span>
+        <span>{t("base.filePreview.pdf.loadUnavailable")}</span>
       </div>
     );
   }
@@ -298,7 +300,9 @@ const PdfRenderer: React.FC<PdfRendererProps> = ({ file, onError }) => {
         <div className="wk-file-preview-pdf-renderer__toolbar">
           {/* 左侧：侧边栏切换按钮 */}
           <Tooltip
-            content={isSidebarOpen ? "隐藏侧边栏" : "显示侧边栏"}
+            content={isSidebarOpen
+              ? t("base.filePreview.pdf.hideSidebar")
+              : t("base.filePreview.pdf.showSidebar")}
             position="top"
             showArrow
           >
@@ -317,7 +321,7 @@ const PdfRenderer: React.FC<PdfRendererProps> = ({ file, onError }) => {
             {/* 页码导航 */}
             <div className="wk-file-preview-pdf-renderer__page-nav">
               <span className="wk-file-preview-pdf-renderer__page-label">
-                第
+                {t("base.filePreview.pdf.pagePrefix")}
               </span>
               <input
                 type="text"
@@ -326,10 +330,12 @@ const PdfRenderer: React.FC<PdfRendererProps> = ({ file, onError }) => {
                 onChange={handlePageInputChange}
                 onKeyDown={handlePageInputKeyDown}
                 onBlur={handlePageInputBlur}
-                title="跳转到页面"
+                title={t("base.filePreview.pdf.jumpToPage")}
               />
               <span className="wk-file-preview-pdf-renderer__page-label">
-                /{totalPages || "-"}页
+                {t("base.filePreview.pdf.pageTotal", {
+                  values: { total: totalPages || "-" },
+                })}
               </span>
             </div>
 
@@ -342,7 +348,7 @@ const PdfRenderer: React.FC<PdfRendererProps> = ({ file, onError }) => {
                     <button
                       className="wk-file-preview-pdf-renderer__zoom-btn"
                       onClick={props.onClick}
-                      title="缩小"
+                      title={t("base.filePreview.pdf.zoomOut")}
                     >
                       <IconMinus />
                     </button>
@@ -356,7 +362,7 @@ const PdfRenderer: React.FC<PdfRendererProps> = ({ file, onError }) => {
                     <button
                       className="wk-file-preview-pdf-renderer__zoom-btn"
                       onClick={props.onClick}
-                      title="放大"
+                      title={t("base.filePreview.pdf.zoomIn")}
                     >
                       <IconPlus />
                     </button>
@@ -372,9 +378,9 @@ const PdfRenderer: React.FC<PdfRendererProps> = ({ file, onError }) => {
                     : ""
                 }`}
                 onClick={() => handleZoomChange("PageWidth")}
-                title="适应宽度"
+                title={t("base.filePreview.pdf.fitWidth")}
               >
-                适应宽度
+                {t("base.filePreview.pdf.fitWidth")}
               </button>
             </div>
           </div>
@@ -394,10 +400,10 @@ const PdfRenderer: React.FC<PdfRendererProps> = ({ file, onError }) => {
                       : ""
                   }`}
                   onClick={() => setActiveTab("thumbnails")}
-                  title="缩略图"
+                  title={t("base.filePreview.pdf.thumbnails")}
                 >
                   <Image size={16} />
-                  <span>缩略图</span>
+                  <span>{t("base.filePreview.pdf.thumbnails")}</span>
                 </button>
                 <button
                   className={`wk-file-preview-pdf-renderer__sidebar-tab ${
@@ -411,10 +417,12 @@ const PdfRenderer: React.FC<PdfRendererProps> = ({ file, onError }) => {
                   }`}
                   onClick={() => hasBookmarks && setActiveTab("bookmarks")}
                   disabled={!hasBookmarks}
-                  title={hasBookmarks ? "书签目录" : "此 PDF 无书签"}
+                  title={hasBookmarks
+                    ? t("base.filePreview.pdf.bookmarkDirectory")
+                    : t("base.filePreview.pdf.noBookmarksShort")}
                 >
                   <List size={16} />
-                  <span>目录</span>
+                  <span>{t("base.filePreview.pdf.directory")}</span>
                 </button>
               </div>
 
@@ -432,7 +440,7 @@ const PdfRenderer: React.FC<PdfRendererProps> = ({ file, onError }) => {
                 )}
                 {activeTab === "bookmarks" && !hasBookmarks && (
                   <div className="wk-file-preview-pdf-renderer__no-bookmarks">
-                    <span>此 PDF 文件没有书签</span>
+                    <span>{t("base.filePreview.pdf.noBookmarks")}</span>
                   </div>
                 )}
               </div>
@@ -444,7 +452,7 @@ const PdfRenderer: React.FC<PdfRendererProps> = ({ file, onError }) => {
             {isLoading && (
               <div className="wk-file-preview-pdf-renderer__loading">
                 <div className="wk-file-preview-pdf-renderer__spinner" />
-                <span>加载中...</span>
+                <span>{t("base.filePreview.loading")}</span>
               </div>
             )}
             <Viewer
@@ -460,9 +468,9 @@ const PdfRenderer: React.FC<PdfRendererProps> = ({ file, onError }) => {
               }}
               renderError={(error) => (
                 <div className="wk-file-preview-pdf-renderer__error">
-                  <span>PDF 加载失败</span>
+                  <span>{t("base.filePreview.pdf.loadFailed")}</span>
                   <span className="wk-file-preview-pdf-renderer__error-detail">
-                    {error.message || "请检查文件是否有效"}
+                    {error.message || t("base.filePreview.pdf.invalidFileHint")}
                   </span>
                 </div>
               )}

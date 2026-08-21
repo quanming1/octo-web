@@ -7,9 +7,11 @@ import {
   IconClose,
   IconDropdown,
 } from "./icons";
-import { getFileIcon as getFileIconUrl } from "../MessageInput/AttachmentNode";
+import { getFileIcon as getFileIconUrl } from "../../Utils/fileIcon";
+import { downloadFile } from "../../Utils/download";
 import { FilePreviewInfo } from "./types";
 import { isImageType } from "./config";
+import { useI18n } from "../../i18n";
 import "./FilePreviewHeader.css";
 
 /** 对话内文件项 */
@@ -193,6 +195,7 @@ const FilePreviewHeader: React.FC<FilePreviewHeaderProps> = ({
   const dropdownRef = useRef<HTMLDivElement>(null);
   const dropdownListRef = useRef<HTMLDivElement>(null);
   const hoverTimeoutRef = useRef<number | null>(null);
+  const { t } = useI18n();
 
   const fileList = conversationFiles;
   const hasFiles = fileList.length > 0;
@@ -284,14 +287,7 @@ const FilePreviewHeader: React.FC<FilePreviewHeaderProps> = ({
     if (onDownload) {
       onDownload();
     } else {
-      // 默认下载行为
-      const a = document.createElement("a");
-      a.href = file.url;
-      a.download = file.name || "file";
-      a.target = "_blank";
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
+      void downloadFile(file.url, file.name || "file");
     }
   };
 
@@ -315,7 +311,7 @@ const FilePreviewHeader: React.FC<FilePreviewHeaderProps> = ({
           <button
             className="wk-file-preview-header__btn wk-file-preview-header__btn--back"
             onClick={onBack}
-            title="返回子区"
+            title={t("base.filePreview.backToThread")}
           >
             <ArrowLeft size={16} />
           </button>
@@ -375,7 +371,7 @@ const FilePreviewHeader: React.FC<FilePreviewHeaderProps> = ({
                 {/* 加载更多状态 */}
                 {loadingMoreFiles && (
                   <div className="wk-file-preview-header__dropdown-loading">
-                    加载中...
+                    {t("base.filePreview.loading")}
                   </div>
                 )}
                 {/* 没有更多数据（仅在加载过至少一页后显示） */}
@@ -383,7 +379,7 @@ const FilePreviewHeader: React.FC<FilePreviewHeaderProps> = ({
                   fileList.length > 0 &&
                   (currentFilesPage ?? 1) >= 1 && (
                     <div className="wk-file-preview-header__dropdown-no-more">
-                      没有更多了
+                      {t("base.filePreview.noMore")}
                     </div>
                   )}
               </div>
@@ -406,7 +402,7 @@ const FilePreviewHeader: React.FC<FilePreviewHeaderProps> = ({
                 }`}
                 onClick={() => onViewModeChange("preview")}
               >
-                预览
+                {t("base.filePreview.preview")}
               </button>
               <button
                 className={`wk-file-preview-header__view-toggle-btn ${
@@ -416,7 +412,7 @@ const FilePreviewHeader: React.FC<FilePreviewHeaderProps> = ({
                 }`}
                 onClick={() => onViewModeChange("source")}
               >
-                源码
+                {t("base.filePreview.source")}
               </button>
             </div>
             <span className="wk-file-preview-header__sep" />
@@ -430,7 +426,11 @@ const FilePreviewHeader: React.FC<FilePreviewHeaderProps> = ({
               isTocOpen ? "wk-file-preview-header__btn--active" : ""
             }`}
             onClick={onTocToggle}
-            title={isTocOpen ? "收起目录" : "展开目录"}
+            title={
+              isTocOpen
+                ? t("base.filePreview.collapseToc")
+                : t("base.filePreview.expandToc")
+            }
           >
             <List size={12} />
           </button>
@@ -441,7 +441,7 @@ const FilePreviewHeader: React.FC<FilePreviewHeaderProps> = ({
           <button
             className="wk-file-preview-header__btn"
             onClick={handleOpenExternal}
-            title="新标签打开"
+            title={t("base.filePreview.openInNewTab")}
           >
             <IconLaunch />
           </button>
@@ -452,7 +452,7 @@ const FilePreviewHeader: React.FC<FilePreviewHeaderProps> = ({
           <button
             className="wk-file-preview-header__btn"
             onClick={onReply}
-            title="回复"
+            title={t("base.filePreview.reply")}
           >
             <IconMessage />
           </button>
@@ -462,7 +462,7 @@ const FilePreviewHeader: React.FC<FilePreviewHeaderProps> = ({
         <button
           className="wk-file-preview-header__btn"
           onClick={handleDownload}
-          title="下载"
+          title={t("base.filePreview.download")}
         >
           <IconDownload />
         </button>
@@ -474,7 +474,7 @@ const FilePreviewHeader: React.FC<FilePreviewHeaderProps> = ({
         <button
           className="wk-file-preview-header__btn wk-file-preview-header__btn--close"
           onClick={onClose}
-          title="关闭"
+          title={t("base.filePreview.close")}
         >
           <IconClose />
         </button>

@@ -1,11 +1,14 @@
+import { webOrigin } from "../../Utils/docLink";
 import React, { Component } from "react";
 import { IconPlus, IconSearch, IconLink } from "@douyinfe/semi-icons";
 import { Spin, Toast, Tooltip } from "@douyinfe/semi-ui";
 import WKModal from "../WKModal";
 import { Space, SpaceService } from "../../Service/SpaceService";
+import WKApp from "../../App";
 import SpaceItem from "../SpaceItem";
 import ActionListItem from "../ActionListItem";
 import JoinSpaceModalConnected from "../JoinSpaceModal/JoinSpaceModalConnected";
+import { I18nContext } from "../../i18n";
 import "./index.css";
 
 export interface SpaceListProps {
@@ -28,6 +31,10 @@ interface SpaceListState {
 }
 
 export default class SpaceList extends Component<SpaceListProps, SpaceListState> {
+    static contextType = I18nContext;
+    declare context: React.ContextType<typeof I18nContext>;
+    private unsubscribeRemoteConfig?: () => void;
+
     constructor(props: SpaceListProps) {
         super(props);
         this.state = {
@@ -43,6 +50,13 @@ export default class SpaceList extends Component<SpaceListProps, SpaceListState>
 
     componentDidMount() {
         this.loadSpaces();
+        this.unsubscribeRemoteConfig = WKApp.remoteConfig.addConfigChangeListener(() => {
+            this.forceUpdate();
+        });
+    }
+
+    componentWillUnmount() {
+        this.unsubscribeRemoteConfig?.();
     }
 
     loadSpaces = async (): Promise<Space[]> => {
@@ -72,21 +86,21 @@ export default class SpaceList extends Component<SpaceListProps, SpaceListState>
                 inviteLoading: "",
             });
         } catch {
-            Toast.error("生成邀请链接失败");
+            Toast.error(this.context.t("base.spaceList.createInviteFailed"));
             this.setState({ inviteLoading: "" });
         }
     };
 
     copyInviteCode = () => {
         navigator.clipboard.writeText(this.state.inviteCode).then(() => {
-            Toast.success("邀请码已复制");
+            Toast.success(this.context.t("base.spaceList.inviteCodeCopied"));
         });
     };
 
     copyInviteLink = () => {
-        const link = `${window.location.origin}/join/${this.state.inviteCode}`;
+        const link = `${webOrigin()}/join/${this.state.inviteCode}`;
         navigator.clipboard.writeText(link).then(() => {
-            Toast.success("邀请链接已复制");
+            Toast.success(this.context.t("base.spaceList.inviteLinkCopied"));
         });
     };
 
@@ -94,10 +108,12 @@ export default class SpaceList extends Component<SpaceListProps, SpaceListState>
         const { selectedSpaceId, onSelect, onCreateClick, onJoinClick } = this.props;
         const { spaces, loading, showJoinModal, showInviteModal, inviteCode,
                 inviteSpaceName, inviteLoading } = this.state;
+        const { t } = this.context;
 
         const selectedSpace = spaces.find(s => s.space_id === selectedSpaceId);
-        const headerLabel = selectedSpace ? selectedSpace.name : "Space";
+        const headerLabel = selectedSpace ? selectedSpace.name : t("base.navRail.spaceSwitcher.switch");
         const handleJoinEntry = onJoinClick ?? (() => this.setState({ showJoinModal: true }));
+        const canCreateSpace = !WKApp.remoteConfig.disableUserCreateSpace;
 
         return (
             <div className="wk-spacelist">
@@ -118,18 +134,22 @@ export default class SpaceList extends Component<SpaceListProps, SpaceListState>
 
                 {/* 邀请他人弹窗 */}
                 <WKModal
-                    title={`邀请加入「${inviteSpaceName}」`}
+                    title={t("base.spaceList.inviteTitle", { values: { name: inviteSpaceName } })}
                     visible={showInviteModal}
                     onCancel={() => this.setState({ showInviteModal: false, inviteCode: "" })}
                 >
                     <div className="wk-spacelist-invite-modal">
                         <div className="wk-spacelist-invite-row">
-                            <span className="wk-spacelist-invite-label">邀请码</span>
+                            <span className="wk-spacelist-invite-label">
+                                {t("base.spaceList.inviteCode")}
+                            </span>
                             <code className="wk-spacelist-invite-code">{inviteCode}</code>
-                            <button className="wk-spacelist-invite-btn" onClick={this.copyInviteCode}>复制</button>
+                            <button className="wk-spacelist-invite-btn" onClick={this.copyInviteCode}>
+                                {t("base.spaceList.copy")}
+                            </button>
                         </div>
                         <button className="wk-spacelist-invite-btn wk-spacelist-invite-btn-full" onClick={this.copyInviteLink}>
-                            📋 复制邀请链接
+                            {t("base.spaceList.copyInviteLink")}
                         </button>
                     </div>
                 </WKModal>
@@ -146,12 +166,16 @@ export default class SpaceList extends Component<SpaceListProps, SpaceListState>
                                 name={space.name}
                                 logo={space.logo}
                                 meta={space.max_users > 0
-                                    ? `${space.member_count}/${space.max_users} 人`
-                                    : `${space.member_count} 人`}
+                                    ? t("base.spaceList.memberLimit", {
+                                        values: { count: space.member_count, max: space.max_users },
+                                    })
+                                    : t("base.spaceList.memberCount", {
+                                        values: { count: space.member_count },
+                                    })}
                                 selected={selectedSpaceId === space.space_id}
                                 onClick={() => onSelect(space)}
                                 actions={
-                                    <Tooltip content="邀请成员" position="right">
+                                    <Tooltip content={t("base.spaceList.inviteMembers")} position="right">
                                         <div
                                             className="wk-spacelist-item-action"
                                             onClick={(e) => this.handleInvite(space, e)}
@@ -172,18 +196,20 @@ export default class SpaceList extends Component<SpaceListProps, SpaceListState>
                 <div className="wk-spacelist-footer-actions">
                     <ActionListItem
                         icon={<IconSearch />}
-                        label="加入 Space"
-                        desc="通过邀请码或链接加入"
+                        label={t("base.spaceList.joinSpace")}
+                        desc={t("base.spaceList.joinSpaceDesc")}
                         variant="join"
                         onClick={handleJoinEntry}
                     />
-                    <ActionListItem
-                        icon={<IconPlus />}
-                        label="创建 Space"
-                        desc="新建你自己的工作空间"
-                        variant="create"
-                        onClick={onCreateClick}
-                    />
+                    {canCreateSpace && (
+                        <ActionListItem
+                            icon={<IconPlus />}
+                            label={t("base.spaceList.createSpace")}
+                            desc={t("base.spaceList.createSpaceDesc")}
+                            variant="create"
+                            onClick={onCreateClick}
+                        />
+                    )}
                 </div>
             </div>
         );

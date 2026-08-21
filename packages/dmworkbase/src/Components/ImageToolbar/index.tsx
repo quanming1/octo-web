@@ -24,6 +24,7 @@ export default class ImageToolbar extends Component<ImageToolbarProps> {
         // 通过比较焦点所在的 .wk-messageinput-box 和当前 toolbar 所在的 .wk-messageinput-box
         // 确保只有焦点所在的输入框响应粘贴，避免重复上传。
         this.pasteListen = (event: any) => {
+            if (event.defaultPrevented) return
             const activeBox = document.activeElement?.closest?.('.wk-messageinput-box')
             const myBox = this.containerRef.current?.closest?.('.wk-messageinput-box')
             if (!activeBox || !myBox || activeBox !== myBox) return
@@ -32,16 +33,18 @@ export default class ImageToolbar extends Component<ImageToolbarProps> {
             const images = files.filter(f => f.type && f.type.startsWith('image/'))
             if (images.length > 0) {
                 event.preventDefault()
-                const err = conversationContext.addPendingAttachments(images)
-                if (err) Toast.error(err)
+                void conversationContext.addPendingAttachments(images).then((err) => {
+                    if (err) Toast.error(err)
+                })
             }
         }
         document.addEventListener('paste', this.pasteListen)
 
         // 拖拽图片 → 入队（#52 fix 的图片路径统一入队）
         conversationContext.setDragFileCallback((file: File) => {
-            const err = conversationContext.addPendingAttachments([file])
-            if (err) Toast.error(err)
+            void conversationContext.addPendingAttachments([file]).then((err) => {
+                if (err) Toast.error(err)
+            })
         })
     }
 
@@ -57,8 +60,9 @@ export default class ImageToolbar extends Component<ImageToolbarProps> {
         const { conversationContext } = this.props
         const files: File[] = Array.from(this.$fileInput.files || [])
         if (files.length === 0) return
-        const err = conversationContext.addPendingAttachments(files)
-        if (err) Toast.error(err)
+        void conversationContext.addPendingAttachments(files).then((err) => {
+            if (err) Toast.error(err)
+        })
     }
 
     chooseFile = () => {

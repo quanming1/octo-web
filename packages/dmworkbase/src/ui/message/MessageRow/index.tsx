@@ -3,7 +3,9 @@ import classNames from 'classnames'
 import Avatar from '../Avatar'
 import Timestamp from '../Timestamp'
 import AiBadge from '../../../Components/AiBadge'
+import WebhookBadge from '../../../Components/WebhookBadge'
 import RealnameVerifiedBadge from '../../../Components/RealnameVerifiedBadge'
+import { useI18n } from '../../../i18n'
 import './index.css'
 
 export interface MessageRowProps {
@@ -63,12 +65,22 @@ export interface MessageRowProps {
   
   /** 是否显示多选 Checkbox */
   showCheckbox?: boolean
+
+  /** 会话是否处于多选模式（即使当前消息不可选） */
+  selectionMode?: boolean
   
   /** 右键菜单事件 */
   onContextMenu?: (event: React.MouseEvent) => void
 
   /** 行点击事件（多选模式整行可点） */
   onClick?: () => void
+
+  /** 消息正文点击事件，不覆盖头像、Header 与整行空白。 */
+  onBodyClick?: (event: React.MouseEvent) => void
+
+  /** 消息正文中键(auxclick)事件：桌面端中键点击默认会走浏览器"新标签/裸跳"，
+   * 需在此拦截 webhook fleet 链接以保持应用内预览语义。 */
+  onBodyAuxClick?: (event: React.MouseEvent) => void
 
   /** 右键菜单打开时保持 hover 高亮 */
   isActive?: boolean
@@ -81,6 +93,9 @@ export interface MessageRowProps {
 
   /** 发送者是否为 bot（AI），名称后显示 AI 标识 */
   isBot?: boolean
+
+  /** 发送者是否为群入站 Webhook，名称后显示 Webhook 标识 */
+  isWebhook?: boolean
 }
 
 /**
@@ -102,6 +117,7 @@ export default function MessageRow({
   avatarUrl,
   senderName,
   isBot,
+  isWebhook,
   timestamp,
   timeOnly,
   isOnline,
@@ -112,12 +128,37 @@ export default function MessageRow({
   onSelect,
   children,
   showCheckbox = false,
+  selectionMode = false,
   onContextMenu,
   onClick,
+  onBodyClick,
+  onBodyAuxClick,
   isActive,
   onAvatarClick,
   onSenderNameClick,
 }: MessageRowProps) {
+  const { t } = useI18n()
+  const isSelecting = selectionMode || showCheckbox
+  const handleRowClick = isSelecting || onClick
+    ? () => {
+        if (isSelecting) {
+          if (showCheckbox) {
+            onSelect?.(!isSelected)
+          }
+          return
+        }
+        onClick?.()
+      }
+    : undefined
+  const handleContextMenu = (event: React.MouseEvent) => {
+    if (isSelecting) {
+      event.preventDefault()
+      event.stopPropagation()
+      return
+    }
+    onContextMenu?.(event)
+  }
+
   return (
     <div
       className={classNames(
@@ -126,10 +167,11 @@ export default function MessageRow({
         isContinue && 'wk-msg-row--continue',
         isSelected && 'wk-msg-row--selected',
         showCheckbox && 'wk-msg-row--selecting',
+        isSelecting && 'wk-msg-row--selection-mode',
         isActive && 'wk-msg-row--active',
       )}
-      onContextMenu={onContextMenu}
-      onClick={onClick}
+      onContextMenu={handleContextMenu}
+      onClick={handleRowClick}
     >
       {/* 多选 Checkbox */}
       {showCheckbox && (
@@ -162,13 +204,13 @@ export default function MessageRow({
             isOnline={isOnline}
             showOnlineDot
             alt={senderName}
-            onClick={onAvatarClick}
+            onClick={isSelecting || isWebhook ? undefined : onAvatarClick}
           />
         )}
         {/* 连续消息：头像占位,hover 时显示时间戳 */}
         {!showAvatar && isContinue && (
           <div className="wk-msg-row-avatar-placeholder">
-            {isEdit && <span className="wk-msg-row-edited">已编辑</span>}
+            {isEdit && <span className="wk-msg-row-edited">{t("base.message.edited")}</span>}
             <span className="wk-msg-row-timestamp-hover">{timeOnly ?? timestamp}</span>
           </div>
         )}
@@ -181,8 +223,8 @@ export default function MessageRow({
           <div className="wk-msg-row-header">
             <span
               className="wk-msg-row-sender"
-              style={{ cursor: onSenderNameClick ? 'pointer' : undefined }}
-              onClick={onSenderNameClick}
+              style={{ cursor: !isSelecting && !isWebhook && onSenderNameClick ? 'pointer' : undefined }}
+              onClick={isSelecting || isWebhook ? undefined : onSenderNameClick}
             >{senderName}</span>
             {/* Epic dmwork-web#1169 Phase A: 实名徽章紧贴作者名右侧，
                 只 variant="icon" 迷你形态，已实名才渲染。*/}
@@ -206,14 +248,25 @@ export default function MessageRow({
               </span>
             )}
             {isBot && <AiBadge size="small" />}
-            {isEdit && <span className="wk-msg-row-edited">已编辑</span>}
+            {isWebhook && <WebhookBadge />}
+            {isEdit && <span className="wk-msg-row-edited">{t("base.message.edited")}</span>}
             <span className="wk-msg-row-timestamp">{timestamp}</span>
           </div>
         )}
         
         {/* 消息体 */}
         <div className="wk-msg-row-body">
-          {children}
+          {!isSelecting && (onBodyClick || onBodyAuxClick) ? (
+            <div
+              className="wk-msg-row-body-hitarea"
+              onClick={onBodyClick}
+              onAuxClick={onBodyAuxClick}
+            >
+              {children}
+            </div>
+          ) : (
+            children
+          )}
         </div>
       </div>
     </div>

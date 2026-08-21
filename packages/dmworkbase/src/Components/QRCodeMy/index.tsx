@@ -5,6 +5,7 @@ import WKViewQueueHeader from "../WKViewQueueHeader";
 import "./index.css"
 import { QRCodeSVG } from 'qrcode.react';
 import { Spin, Toast } from "@douyinfe/semi-ui";
+import { I18nContext } from "../../i18n";
 
 interface QRCodeMyState {
     qrcode?: string
@@ -16,6 +17,9 @@ export interface QRCodeMyProps {
 }
 
 export default class QRCodeMy extends Component<QRCodeMyProps, QRCodeMyState> {
+    static contextType = I18nContext
+    declare context: React.ContextType<typeof I18nContext>
+
     constructor(props:QRCodeMyProps) {
         super(props)
         this.state = {}
@@ -41,7 +45,7 @@ export default class QRCodeMy extends Component<QRCodeMyProps, QRCodeMyState> {
         return <div className="wk-qrcodemy">
 
             {
-                !disableHeader? <WKViewQueueHeader title="我的二维码" onBack={() => {
+                !disableHeader? <WKViewQueueHeader title={this.context.t("base.qrCodeMy.title")} onBack={() => {
                     WKApp.routeLeft.pop()
                 }}></WKViewQueueHeader>:undefined
             }
@@ -65,7 +69,7 @@ export default class QRCodeMy extends Component<QRCodeMyProps, QRCodeMyState> {
                             }
                         </div>
                         <div className="wk-qrcodemy-content-tip">
-                            扫一扫上面的二维码图案，加我{WKApp.config.appName}
+                            {this.context.t("base.qrCodeMy.scanToAdd", { values: { appName: WKApp.config.appName } })}
                         </div>
                     </div>
                 </div>

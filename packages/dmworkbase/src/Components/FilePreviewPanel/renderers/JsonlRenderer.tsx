@@ -14,6 +14,7 @@ import {
 } from "./json-utils";
 import { formatFileSize } from "../config";
 import CodeRendererBase from "./CodeRendererBase";
+import { useI18n } from "../../../i18n";
 import "./JsonlRenderer.css";
 import "./code-highlight.css";
 
@@ -31,6 +32,7 @@ export interface JsonlRendererProps extends BaseRendererProps {}
  * - > 20MB: 不渲染，提示下载
  */
 const JsonlRenderer: React.FC<JsonlRendererProps> = ({ file, onError }) => {
+  const { t } = useI18n();
   const { loading, error, reload, renderMode, content, fileSize, contentSize } =
     useCodeRenderer(file, {
       language: "json",
@@ -76,9 +78,10 @@ const JsonlRenderer: React.FC<JsonlRendererProps> = ({ file, onError }) => {
 
   // 渲染单元格内容
   const renderCellContent = (value: unknown): string => {
-    if (value === null || value === undefined) return "-";
+    if (value === null || value === undefined || value === "") return "-";
     if (typeof value === "object") return JSON.stringify(value);
-    return String(value);
+    const str = String(value);
+    return str.trim() === "" ? "-" : str;
   };
 
   // 复用 CodeRendererBase 处理边界状态（too-large / loading / error）
@@ -103,7 +106,7 @@ const JsonlRenderer: React.FC<JsonlRendererProps> = ({ file, onError }) => {
   if (content === null || tableData.length === 0) {
     return (
       <div className="wk-file-preview-jsonl-renderer wk-file-preview-jsonl-renderer--empty">
-        <span>暂无内容或 JSONL 格式错误</span>
+        <span>{t("base.filePreview.jsonl.emptyOrInvalid")}</span>
       </div>
     );
   }
@@ -116,7 +119,9 @@ const JsonlRenderer: React.FC<JsonlRendererProps> = ({ file, onError }) => {
         <div className="wk-file-preview-jsonl-renderer__info">
           <span className="wk-file-preview-jsonl-renderer__badge">JSONL</span>
           <span className="wk-file-preview-jsonl-renderer__stats">
-            {lineCount} 行 · {tableData.length} 条有效记录
+            {t("base.filePreview.jsonl.stats", {
+              values: { lines: lineCount, records: tableData.length },
+            })}
           </span>
         </div>
         <div className="wk-file-preview-jsonl-renderer__view-switcher">
@@ -128,7 +133,9 @@ const JsonlRenderer: React.FC<JsonlRendererProps> = ({ file, onError }) => {
             }`}
             onClick={() => handleViewModeChange("table")}
             disabled={!canShowTable}
-            title={canShowTable ? "表格视图" : "无法提取表格数据"}
+            title={canShowTable
+              ? t("base.filePreview.jsonl.tableView")
+              : t("base.filePreview.jsonl.cannotExtractTable")}
           >
             <svg
               className="wk-file-preview-jsonl-renderer__icon"
@@ -143,7 +150,7 @@ const JsonlRenderer: React.FC<JsonlRendererProps> = ({ file, onError }) => {
               <line x1="9" y1="3" x2="9" y2="21" />
               <line x1="15" y1="3" x2="15" y2="21" />
             </svg>
-            <span>表格</span>
+            <span>{t("base.filePreview.jsonl.table")}</span>
           </button>
           <button
             className={`wk-file-preview-jsonl-renderer__view-btn ${
@@ -152,7 +159,7 @@ const JsonlRenderer: React.FC<JsonlRendererProps> = ({ file, onError }) => {
                 : ""
             }`}
             onClick={() => handleViewModeChange("code")}
-            title="代码视图"
+            title={t("base.filePreview.jsonl.codeView")}
           >
             <svg
               className="wk-file-preview-jsonl-renderer__icon"
@@ -164,7 +171,7 @@ const JsonlRenderer: React.FC<JsonlRendererProps> = ({ file, onError }) => {
               <polyline points="16 18 22 12 16 6" />
               <polyline points="8 6 2 12 8 18" />
             </svg>
-            <span>代码</span>
+            <span>{t("base.filePreview.jsonl.code")}</span>
           </button>
         </div>
       </div>
@@ -203,7 +210,9 @@ const JsonlRenderer: React.FC<JsonlRendererProps> = ({ file, onError }) => {
           {/* 底部信息栏 */}
           <div className="wk-file-preview-jsonl-renderer__footer">
             <span className="wk-file-preview-jsonl-renderer__row-count">
-              共 {tableData.length} 行
+              {t("base.filePreview.rowsCount", {
+                values: { count: tableData.length },
+              })}
             </span>
           </div>
         </div>
@@ -223,7 +232,9 @@ const JsonlRenderer: React.FC<JsonlRendererProps> = ({ file, onError }) => {
           ) : (
             <>
               <div className="wk-file-preview-jsonl-renderer__plain-hint">
-                文件较大（{formatFileSize(contentSize)}），已禁用语法高亮
+                {t("base.filePreview.largeFilePlainHint", {
+                  values: { size: formatFileSize(contentSize) },
+                })}
               </div>
               <pre className="wk-file-preview-jsonl-renderer__pre">
                 <code className="wk-file-preview-jsonl-renderer__code">
@@ -238,12 +249,12 @@ const JsonlRenderer: React.FC<JsonlRendererProps> = ({ file, onError }) => {
       {/* 表格视图不可用时的提示 */}
       {viewMode === "table" && !canShowTable && (
         <div className="wk-file-preview-jsonl-renderer__empty-content">
-          <span>无法从 JSONL 数据中提取表格结构</span>
+          <span>{t("base.filePreview.jsonl.cannotExtractStructure")}</span>
           <button
             className="wk-file-preview-jsonl-renderer__switch-btn"
             onClick={() => handleViewModeChange("code")}
           >
-            切换到代码视图
+            {t("base.filePreview.jsonl.switchToCode")}
           </button>
         </div>
       )}

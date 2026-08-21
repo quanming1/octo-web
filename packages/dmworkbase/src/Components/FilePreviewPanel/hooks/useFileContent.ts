@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { t } from "../../../i18n";
 
 export type ResponseType = "text" | "arraybuffer";
 
@@ -89,7 +90,7 @@ export function useFileContent<T extends ResponseType = "text">(
       if (err instanceof Error && err.name === "AbortError") {
         return;
       }
-      const message = err instanceof Error ? err.message : "加载失败";
+      const message = err instanceof Error ? err.message : t("base.filePreview.loadFailed");
       setError(message);
       setContent(null);
     } finally {

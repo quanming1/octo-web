@@ -1,8 +1,15 @@
-import { Modal } from "@douyinfe/semi-ui";
+import { Modal, Toast } from "@douyinfe/semi-ui";
 import WKModal from "../WKModal";
-import WKSDK, { Channel, ChannelTypePerson } from "wukongimjssdk";
+import { Channel, ChannelTypePerson, MessageText } from "wukongimjssdk";
 import React, { Component, HTMLProps, ReactNode } from "react";
 import ConversationSelect from "../ConversationSelect";
+import type { ConversationSelectGrant } from "../ConversationSelect";
+import type { DocForwardOpen, ForwardGrant } from "../ForwardModal/grant";
+import { buildForwardMessageText } from "../ForwardModal/forwardMessageText";
+import { DocumentShareCardContent } from "../../Messages/DocumentShareCard/DocumentShareCardContent";
+import { isConversationDisbanded } from "../../Utils/groupDisband";
+import { ForwardService } from "../../Service/ForwardService";
+import { interpretForwardResult } from "../../Service/forwardResultToast";
 import UserInfo from "../UserInfo";
 import BotDetailModal from "../BotDetailModal";
 import WKApp from "../../App";
@@ -14,6 +21,12 @@ import {
   ExternalViewerGate,
   UserInfoRouter,
 } from "./userInfoRouter";
+import { I18nContext } from "../../i18n";
+import { isIncomingWebhookSender } from "../../Service/IncomingWebhook";
+import {
+  getCurrentImChannelSubscribers,
+  syncCurrentImChannelSubscribers,
+} from "../../im-runtime/currentChannelRuntime";
 import "./index.css";
 
 /**
@@ -42,11 +55,8 @@ export function createDefaultExternalViewerGate(): ExternalViewerGate {
     isExternal: (uid, fromChannel, channelInfo) => {
       // 1) Group subscriber orgData (primary source, matches UserInfoVM step 1).
       if (fromChannel && fromChannel.channelType !== ChannelTypePerson) {
-        const subscribers =
-          (WKSDK.shared().channelManager.getSubscribes(fromChannel) as
-            | { uid?: string; orgData?: ChannelInfoOrgDataLike }[]
-            | null
-            | undefined) ?? [];
+        const subscribers = getCurrentImChannelSubscribers(fromChannel) as
+          { uid?: string; orgData?: ChannelInfoOrgDataLike }[];
         const sub = subscribers.find((s) => s && s.uid === uid);
         const org = sub?.orgData;
         if (org) {
@@ -88,6 +98,8 @@ export interface WKBaseState {
   showBotDetail?: boolean;
   showConversationSelect?: boolean;
   conversationSelectTitle?: string;
+  conversationSelectKey?: number;
+  conversationSelectGrant?: ConversationSelectGrant;
   showAlert?: boolean;
   alertContent?: string;
   alertTitle?: string;
@@ -120,9 +132,14 @@ export interface WKBaseProps {
 
 export interface WKBaseContext {
   // 显示最近会话选择
+  //
+  // feature #511：新增可选第 3 参 `forward`。传入时渲染授权区，并由 host 侧编排
+  // 「先授权后发」：展开目标频道成员 uid 快照 → await 授权 → 发普通 Text 消息 → 部分失败 Toast。
+  // 既有调用方只传 (onFinished, title)，第 3 参缺省 → 行为完全不变。
   showConversationSelect(
     onFinished?: (channels: Channel[]) => void,
-    title?: string
+    title?: string,
+    forward?: DocForwardOpen
   ): void;
 
   // 显示用户信息
@@ -144,6 +161,9 @@ export default class WKBase
   extends Component<WKBaseProps, WKBaseState>
   implements WKBaseContext
 {
+  static contextType = I18nContext;
+  declare context: React.ContextType<typeof I18nContext>;
+
   // PR#1113 review: bot-vs-human routing + stale-request guard are
   // delegated to a React-free production helper (UserInfoRouter). The helper
   // tracks a monotonically-increasing token so that a late-resolving async
@@ -169,6 +189,12 @@ export default class WKBase
     this.state = {};
   }
   showUserInfo(uid: string, fromChannel?: Channel, vercode?: string): void {
+    // 群入站 Webhook 发送者（uid = iwh_*）不是真实用户，没有个人资料页：
+    // 强制不打开资料卡（否则会出现「设置备注 / 发送消息」等无效操作）。
+    // 集中在此入口拦截，覆盖头像点击 / 名字点击 / 上下文菜单等所有调用方。
+    if (isIncomingWebhookSender(uid)) {
+      return;
+    }
     // GH#1112: 统一的 "查看用户资料" 入口。机器人（robot === 1）必须走
     // BotDetailModal，这样 bot owner 才能继续编辑头像/简介，与通讯录 bot 卡片一致。
     // 此前只有 Contacts / Subscribers / GlobalSearch 等少数调用方手动区分 isBot，
@@ -217,13 +243,157 @@ export default class WKBase
 
   showConversationSelect(
     onFinished?: (channels: Channel[]) => void,
-    title?: string
+    title?: string,
+    forward?: DocForwardOpen
   ) {
-    this.setState({
+    // feature #511: stash the forward payload so the finished handler can run the host-side
+    // "先授权后发" orchestration. Cleared on cancel/close so a later plain forward isn't affected.
+    this.docForward = forward;
+    this.setState((prev) => ({
       showConversationSelect: true,
       conversationSelectFinished: onFinished,
       conversationSelectTitle: title,
-    });
+      conversationSelectGrant: forward
+        ? {
+            canGrant: forward.canGrant,
+            disabledReason: forward.disabledReason,
+            defaultRole: forward.defaultRole ?? "reader",
+            spaceId: forward.spaceId,
+          }
+        : undefined,
+      // 每次打开递增 key，强制 ConversationSelect 重新挂载，
+      // 让 useForwardModal 用当前 spaceId 重新拉数据，避免切 Space 后列表陈旧。
+      conversationSelectKey: (prev.conversationSelectKey ?? 0) + 1,
+    }));
+  }
+
+  /** feature #511: active doc-forward payload (host-side orchestration), null for plain forwards. */
+  private docForward?: DocForwardOpen;
+
+  /**
+   * Expand the selected target channels into a de-duplicated uid snapshot at forward time
+   * (contract 2): a group → its current subscriber uids (syncSubscribes → getSubscribes),
+   * a person channel → the peer uid (channelID). Failures on one channel are skipped, never fatal.
+   * Bots are NOT attached here — the forwarder picks them explicitly in the 授权区 Bot expander and
+   * they arrive via `grant.botUids`, so nothing is granted silently.
+   */
+  private async collectForwardUids(channels: Channel[]): Promise<string[]> {
+    const uids = new Set<string>();
+    for (const ch of channels) {
+      if (ch.channelType === ChannelTypePerson) {
+        if (ch.channelID) uids.add(ch.channelID);
+        continue;
+      }
+      try {
+        await syncCurrentImChannelSubscribers(ch);
+      } catch {
+        // best-effort: fall back to whatever is already cached
+      }
+      const subs = getCurrentImChannelSubscribers(ch) as { uid?: string }[];
+      for (const s of subs) {
+        if (s?.uid) uids.add(s.uid);
+      }
+    }
+    return [...uids];
+  }
+
+  /** feature #511: host-side "先授权后发" — grant (opt-in) then send `**title**\n[title](link)`. */
+  private async runDocForward(
+    channels: Channel[],
+    grant: ForwardGrant | undefined,
+    forward: DocForwardOpen
+  ): Promise<void> {
+    const { t } = this.context;
+    let grantFailures: string[] | undefined;
+    let grantRejections: string[] | undefined;
+
+    // 0) disband guard 提前一次，仅为 grant 阶段决定是否有可授权目标。真正的 send 阶段
+    // disband 计入交给 ForwardService（它同样过滤 disband 并计入 failedTargets）。
+    const sendable = channels.filter((ch) => !isConversationDisbanded(ch));
+    if (sendable.length === 0) {
+      Toast.error(t("base.forwardModal.grant.sendFailed"));
+      forward.onResult?.({ sent: 0, failed: channels.length, grantFailures: undefined, grantRejections: undefined });
+      return;
+    }
+
+    // 1) grant first (先授权后发). Only when the switch is on AND docs injected an executor.
+    if (grant && forward.grantAccess) {
+      try {
+        const humanUids = await this.collectForwardUids(sendable);
+        // Merge the explicitly-kept Bot uids from the 授权区 expander onto the human snapshot.
+        // Bots the forwarder cancelled are absent from grant.botUids, so nothing is granted silently.
+        const uids = [...new Set([...humanUids, ...(grant.botUids ?? [])])];
+        if (uids.length > 0) {
+          const res = await forward.grantAccess(uids, grant.role);
+          if (res.failed > 0) grantFailures = res.failures;
+          if (res.rejected && res.rejected.length > 0) grantRejections = res.rejected;
+        }
+      } catch {
+        // A grant failure must not block sending the message — the receiver can still
+        // request access (screen 4c). Surface it as a non-fatal warning.
+        Toast.warning(t("base.forwardModal.grant.grantFailed"));
+      }
+    }
+
+    // 2) send the message to each target via ForwardService (统一 disband 守卫、
+    // space_id / mention 注入、错误隔离)。原先手写的 encodeJSON monkey-patch
+    // 由 wrapSendContentForInjection + opts.spaceId 代替。
+    //
+    // 只有**文档分享转发**（startDocForward，显式 shareAsCard=true）才发文档卡片
+    // （DocumentShareCardContent=18）。其它复用同一转发通道但语义不同的流程——尤其
+    // html-doc「让 AI 处理」的**指令转发**（带 docId + 专属锚点链接）——绝不能因带 docId
+    // 被误转成卡片而丢失指令链接/锚点，一律回退纯文本 markdown（Jerry-Xin blocker）。
+    const contentFactory = forward.shareAsCard
+      ? () => {
+          const card = new DocumentShareCardContent();
+          card.docId = forward.docId ?? "";
+          // 严格用文档自身 space：绝不回退到发送者当前 space（文档可能不在该 space），
+          // 否则接收端预览会带错 X-Space-Id 触发 ACL/403。缺失时留空，让后端按 docId 解析。
+          card.spaceId = forward.spaceId ?? "";
+          card.kind = forward.kind ?? "doc";
+          card.title = forward.messageTitle;
+          card.ownerName = forward.ownerName ?? "";
+          card.updatedAt = forward.updatedAt ?? "";
+          card.url = forward.link;
+          card.permission = grant?.role ?? forward.defaultRole ?? "reader";
+          return card;
+        }
+      : () => new MessageText(buildForwardMessageText(forward.messageTitle, forward.link));
+    const result = await ForwardService.send(
+      channels,
+      contentFactory,
+      { spaceId: WKApp.shared.currentSpaceId },
+    );
+
+    // 3) partial-failure Toast (reuse the dmworksummary范式). 分母维度用 targets，
+    // 保留旧的用户可见语义（原代码 total=channels.length，即 result.targets）。
+    const state = interpretForwardResult(result, "targets");
+    if (state.kind === "all-failed") {
+      Toast.error(t("base.forwardModal.grant.sendFailed"));
+    } else if (state.kind === "partial") {
+      Toast.error(
+        t("base.forwardModal.grant.partialSendFailed", {
+          values: { failed: state.failed, total: state.total },
+        })
+      );
+    } else if (grantRejections && grantRejections.length > 0) {
+      Toast.warning(
+        t("base.forwardModal.grant.grantRejected", {
+          values: { failed: grantRejections.length },
+        })
+      );
+    } else if (grantFailures && grantFailures.length > 0) {
+      Toast.warning(
+        t("base.forwardModal.grant.partialGrantFailed", {
+          values: { failed: grantFailures.length },
+        })
+      );
+    } else {
+      Toast.success(t("base.forwardModal.grant.forwarded"));
+    }
+
+    const sent = state.total - state.failed;
+    forward.onResult?.({ sent, failed: state.failed, grantFailures, grantRejections });
   }
 
   hideUserInfo() {
@@ -292,6 +462,8 @@ export default class WKBase
       vercode,
       showConversationSelect,
       conversationSelectTitle,
+      conversationSelectKey,
+      conversationSelectGrant,
       conversationSelectFinished,
       onAlertOk,
       alertContent,
@@ -358,25 +530,40 @@ export default class WKBase
         <WKModal
           className="wk-base-modal wk-base-modal-forward"
           visible={showConversationSelect}
-          options={{ mask: false, width: 625 }}
+          width={625}
+          options={{ mask: false }}
           onCancel={() => {
+            this.docForward = undefined;
             this.setState({
               showConversationSelect: false,
+              conversationSelectGrant: undefined,
             });
           }}
         >
           <ConversationSelect
-            onFinished={(channels: Channel[]) => {
+            key={conversationSelectKey}
+            grant={conversationSelectGrant}
+            onFinished={(channels: Channel[], grant) => {
+              const forward = this.docForward;
+              this.docForward = undefined;
               this.setState({
                 showConversationSelect: false,
+                conversationSelectGrant: undefined,
               });
+              if (forward) {
+                // feature #511: host owns "先授权后发" + send + partial-failure Toast.
+                void this.runDocForward(channels, grant, forward);
+                return;
+              }
               if (conversationSelectFinished) {
                 conversationSelectFinished(channels);
               }
             }}
             onCancel={() => {
+              this.docForward = undefined;
               this.setState({
                 showConversationSelect: false,
+                conversationSelectGrant: undefined,
               });
             }}
             title={conversationSelectTitle}
@@ -395,7 +582,7 @@ export default class WKBase
             },
           }}
         >
-          {alertContent}
+          <p className="wk-modal-confirm-text">{alertContent}</p>
         </WKModal>
         <Modal
           closable={this.state.globalModalOptions?.closable}
@@ -410,7 +597,7 @@ export default class WKBase
         {/* 加入组织 */}
         <WKModal
           visible={showJoinOrgInfo}
-          title="加入组织"
+          title={this.context.t("base.wkBase.joinOrganization")}
           className="wk-base-modal-join-org"
           options={{ mask: false }}
           onCancel={() => {

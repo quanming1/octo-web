@@ -1,14 +1,21 @@
 import React, { Component } from "react";
 import { Modal, Input, Checkbox, Button, Spin, Empty, Avatar } from "@douyinfe/semi-ui";
 import { IconSearch } from "@douyinfe/semi-icons";
+import { I18nContext } from "@octo/base";
+import { Dap } from "@octo/base";
 import type { MemberCandidate } from "../types/summary";
 import * as api from "../api/summaryApi";
+import "./SummarySelectors.css";
 
 interface Props {
     visible: boolean;
     selected: MemberCandidate[];
     onConfirm: (selected: MemberCandidate[]) => void;
     onCancel: () => void;
+    /** 需排除的 user_id（如已是任务成员），不出现在候选列表中。 */
+    excludedUserIds?: string[];
+    /** 提交中：确认按钮 loading、取消/确认 disabled，防重复提交。 */
+    confirmLoading?: boolean;
 }
 
 interface State {
@@ -19,6 +26,9 @@ interface State {
 }
 
 export default class MemberSelectorModal extends Component<Props, State> {
+    static contextType = I18nContext;
+    declare context: React.ContextType<typeof I18nContext>;
+
     private searchTimer: ReturnType<typeof setTimeout> | null = null;
 
     state: State = {
@@ -64,6 +74,8 @@ export default class MemberSelectorModal extends Component<Props, State> {
         if (existing) {
             this.setState({ localSelected: localSelected.filter((s) => s.user_id !== item.user_id) });
         } else {
+            // 仅「选中」(add)一沿采集,取消勾选不计;原先误用 GET /summary-member-candidates 列表加载推断。
+            Dap.shared.track("smart_summary_scope_participant_selected", {});
             this.setState({ localSelected: [...localSelected, item] });
         }
     };
@@ -73,74 +85,74 @@ export default class MemberSelectorModal extends Component<Props, State> {
     };
 
     render() {
-        const { visible, onCancel } = this.props;
+        const { visible, onCancel, confirmLoading, excludedUserIds } = this.props;
         const { keyword, candidates, loading, localSelected } = this.state;
+        const { t } = this.context;
+        const excludeSet = new Set(excludedUserIds || []);
+        const visibleCandidates = candidates.filter((c) => !excludeSet.has(c.user_id));
 
         const footer = (
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%" }}>
-                <span style={{ fontSize: 13, color: "var(--semi-color-text-2)" }}>
-                    已选 {localSelected.length} 人
+            <div className="summary-selector-footer">
+                <span className="summary-selector-footer-count">
+                    {t("summary.common.selectedPeopleCount", { values: { count: localSelected.length } })}
                 </span>
-                <div>
-                    <Button onClick={onCancel} style={{ marginRight: 8 }}>取消</Button>
-                    <Button theme="solid" onClick={this.handleConfirm}>确定</Button>
+                <div className="summary-selector-footer-actions">
+                    <Button onClick={onCancel} disabled={confirmLoading}>{t("summary.common.cancel")}</Button>
+                    <Button theme="solid" loading={confirmLoading} disabled={confirmLoading} onClick={this.handleConfirm}>{t("summary.common.confirm")}</Button>
                 </div>
             </div>
         );
 
         return (
             <Modal
-                title="添加成员"
+                title={t("summary.memberSelector.title")}
                 visible={visible}
                 onCancel={onCancel}
                 footer={footer}
                 width={480}
                 bodyStyle={{ padding: "0 24px" }}
+                className="summary-selector-modal"
             >
-                <Input
-                    prefix={<IconSearch />}
-                    placeholder="搜索成员"
-                    value={keyword}
-                    onChange={this.handleKeywordChange}
-                    showClear
-                    style={{ marginBottom: 12 }}
-                />
-                <div style={{ minHeight: 240, maxHeight: 360, overflowY: "auto" }}>
-                    {loading ? (
-                        <div style={{ textAlign: "center", paddingTop: 60 }}><Spin /></div>
-                    ) : candidates.length === 0 ? (
-                        <Empty description="暂无成员" style={{ paddingTop: 40 }} />
-                    ) : (
-                        candidates.map((item) => {
-                            const checked = !!localSelected.find((s) => s.user_id === item.user_id);
-                            return (
-                                <div
-                                    key={item.user_id}
-                                    onClick={() => this.handleToggle(item)}
-                                    style={{
-                                        display: "flex",
-                                        alignItems: "center",
-                                        padding: "10px 0",
-                                        borderBottom: "1px solid var(--semi-color-border)",
-                                        cursor: "pointer",
-                                    }}
-                                >
-                                    <Checkbox checked={checked} style={{ marginRight: 10 }} />
-                                    <Avatar size="small" style={{ marginRight: 10, background: "var(--semi-color-primary)" }}>
-                                        {item.name.slice(0, 1)}
-                                    </Avatar>
-                                    <div style={{ flex: 1 }}>
-                                        <div style={{ fontSize: 14 }}>{item.name}</div>
-                                        {item.department && (
-                                            <div style={{ fontSize: 12, color: "var(--semi-color-text-2)" }}>
-                                                {item.department}
-                                            </div>
-                                        )}
+                <div className="summary-selector-modal-body">
+                    <Input
+                        prefix={<IconSearch />}
+                        placeholder={t("summary.memberSelector.searchPlaceholder")}
+                        value={keyword}
+                        onChange={this.handleKeywordChange}
+                        showClear
+                        className="summary-selector-search"
+                    />
+                    <div className="summary-selector-list">
+                        {loading ? (
+                            <div className="summary-selector-loading"><Spin /></div>
+                        ) : visibleCandidates.length === 0 ? (
+                            <Empty description={t("summary.memberSelector.empty")} className="summary-selector-empty" />
+                        ) : (
+                            visibleCandidates.map((item) => {
+                                const checked = !!localSelected.find((s) => s.user_id === item.user_id);
+                                return (
+                                    <div
+                                        key={item.user_id}
+                                        onClick={() => this.handleToggle(item)}
+                                        className={`summary-selector-item${checked ? " summary-selector-item--selected" : ""}`}
+                                    >
+                                        <Checkbox checked={checked} />
+                                        <Avatar size="small" className="summary-selector-item-avatar">
+                                            {item.name.slice(0, 1)}
+                                        </Avatar>
+                                        <div className="summary-selector-item-main">
+                                            <div className="summary-selector-item-title">{item.name}</div>
+                                            {item.department && (
+                                                <div className="summary-selector-item-meta">
+                                                    {item.department}
+                                                </div>
+                                            )}
+                                        </div>
                                     </div>
-                                </div>
-                            );
-                        })
-                    )}
+                                );
+                            })
+                        )}
+                    </div>
                 </div>
             </Modal>
         );

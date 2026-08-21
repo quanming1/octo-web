@@ -1,5 +1,6 @@
 import React from "react";
 import { Toast } from "@douyinfe/semi-ui";
+import { t } from "../../i18n";
 import "./index.css";
 
 export interface JoinSuccessToastOptions {
@@ -59,10 +60,10 @@ export function showJoinSuccessToast(opts: JoinSuccessToastOptions): void {
         // - 其他场景沿用原有语义。
         Toast.success({
             content: isGroup
-                ? `✅ 已加入「${entityName}」群聊`
+                ? t("base.joinSuccessToast.groupJoined", { values: { name: entityName } })
                 : sameName
-                ? `✅ 已加入「${spaceName}」空间`
-                : `✅ 已加入「${entityName}」`,
+                ? t("base.joinSuccessToast.spaceJoined", { values: { name: spaceName } })
+                : t("base.joinSuccessToast.joined", { values: { name: entityName } }),
             duration: duration ?? 3,
         });
         return;
@@ -76,7 +77,7 @@ export function showJoinSuccessToast(opts: JoinSuccessToastOptions): void {
             <div className="wk-join-success-toast" data-testid="join-success-toast-cross-space">
                 <div className="wk-join-success-toast__row">
                     <span className="wk-join-success-toast__line">
-                        ✅ 已加入「{spaceName}」空间
+                        {t("base.joinSuccessToast.spaceJoined", { values: { name: spaceName } })}
                     </span>
                     <button
                         type="button"
@@ -90,18 +91,18 @@ export function showJoinSuccessToast(opts: JoinSuccessToastOptions): void {
                             }
                         }}
                     >
-                        切换过去 →
+                        {t("base.joinSuccessToast.switch")}
                     </button>
                 </div>
             </div>
         ) : (
             <div className="wk-join-success-toast" data-testid="join-success-toast-cross-space">
                 <div className="wk-join-success-toast__line">
-                    ✅ 已加入「{entityName} 群聊」
+                    {t("base.joinSuccessToast.groupJoined", { values: { name: entityName } })}
                 </div>
                 <div className="wk-join-success-toast__row">
                     <span className="wk-join-success-toast__line wk-join-success-toast__line--muted">
-                        📍 位于「{spaceName} 空间」
+                        {t("base.joinSuccessToast.locatedInSpace", { values: { name: spaceName } })}
                     </span>
                     <button
                         type="button"
@@ -116,7 +117,7 @@ export function showJoinSuccessToast(opts: JoinSuccessToastOptions): void {
                             }
                         }}
                     >
-                        切换过去 →
+                        {t("base.joinSuccessToast.switch")}
                     </button>
                 </div>
             </div>

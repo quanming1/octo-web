@@ -5,13 +5,18 @@ import MessageBase from "../Base";
 import WKApp from "../../App";
 import { FileContent } from "./FileContent";
 import { downloadFile } from "../../Utils/download";
-import { WKSDK, Task, TaskStatus } from "wukongimjssdk";
-import { Toast } from "@douyinfe/semi-ui";
+import { WKSDK, Task, TaskStatus, MessageStatus } from "wukongimjssdk";
+import { Toast, Tooltip } from "@douyinfe/semi-ui";
 import WKModal from "../../Components/WKModal";
 import MarkdownContent from "../Text/MarkdownContent";
 import MessageRow from "../../ui/message/MessageRow";
 import { getFileMessageUI } from "../../bridge/message/useFileMessageUI";
+import { isMessageSelectable } from "../../Service/messageSelection";
 import { isSafeUrl } from "../../Utils/security";
+import { isDriveTransferSupportedChannel, imDriveTransferSourceKey, stripSpacePrefix } from "../../Service/SpacePrefix";
+import { resolveCardActionChannelId } from "../InteractiveCard/cardAction";
+import { ChannelTypePerson } from "wukongimjssdk";
+import { I18nContext } from "../../i18n";
 
 export { FileContent } from "./FileContent";
 
@@ -274,15 +279,44 @@ function FileTypeIcon({
   );
 }
 
-function getExtension(extension: string, name?: string): string {
-  const ext = (extension || "").toLowerCase();
-  if (ext) return ext;
-  // fallback: extract from filename
+export function getExtension(extension: string, name?: string): string {
+  // 优先从文件名后缀提取: 服务端返回的 extension 字段不可靠 (可能为空、
+  // 或是 "file" 等占位值, 见 issue #143), 用文件名后缀更稳妥。
+  //
+  // 边界:
+  //   - dot > 0       : 排除前导点的 dotfile (如 ".env" / ".bashrc"),
+  //                     这类文件按 POSIX 语义没有"扩展名", 该 fallback。
+  //   - dot < len-1   : 排除尾部点 (如 "report."), 提取出来是空串, 也该 fallback。
   if (name) {
     const dot = name.lastIndexOf(".");
-    if (dot >= 0) return name.substring(dot + 1).toLowerCase();
+    if (dot > 0 && dot < name.length - 1) {
+      return name.substring(dot + 1).toLowerCase();
+    }
   }
+  // fallback: 文件名无可用后缀 (Makefile / Dockerfile / .env / report.) 时
+  // 才用 extension
+  const ext = (extension || "").toLowerCase();
+  if (ext) return ext;
   return "";
+}
+
+interface FileUrlSource {
+  url?: string;
+  remoteUrl?: string;
+}
+
+// 解析文件内容块的可用下载 URL: 拼接 baseURL + 相对路径绝对化 + 安全校验。
+// 任一环节失败返回 ""，方便调用方一次性判断。生产环境 apiURL 是 /api/v1/，
+// 直接喂给 isSafeUrl 会被 new URL() 拒掉，必须先绝对化。
+export function resolveSafeFileUrl(content: FileUrlSource): string {
+  const rawUrl = content.url || content.remoteUrl || "";
+  if (!rawUrl) return "";
+  let fileUrl = WKApp.dataSource.commonDataSource.getFileURL(rawUrl);
+  if (!fileUrl) return "";
+  if (!fileUrl.startsWith("http")) {
+    fileUrl = window.location.origin + "/" + fileUrl.replace(/^\//, "");
+  }
+  return isSafeUrl(fileUrl) ? fileUrl : "";
 }
 
 function isPreviewable(extension: string, name?: string): boolean {
@@ -319,10 +353,24 @@ interface FileCellState {
   textPreviewContent: string;
   textPreviewName: string;
   textPreviewExt: string;
+  /** 该 IM 文件是否已存进云盘。undefined = 未查过/查询中。挂载时批量查一次。 */
+  imTransferred?: { exists: boolean; file_id?: number; space_id?: string; parent_id?: number };
 }
 
 export class FileCell extends MessageCell<any, FileCellState> {
+  static contextType = I18nContext;
+  declare context: React.ContextType<typeof I18nContext>;
+
   private _task?: RestartableTask;
+  private _mounted = false;
+  private _unsubscribeConfig?: () => void;
+  // mittBus listener for cross-path drive-transferred flip. Held so
+  // componentWillUnmount can detach.
+  private _driveTransferredListener?: (payload: {
+    sourceKey: string;
+    entry: { file_id: number; space_id: string; parent_id: number };
+  }) => void;
+  private _checkInFlight = false;
 
   private _taskListener = (task: Task) => {
     const { message } = this.props;
@@ -347,6 +395,7 @@ export class FileCell extends MessageCell<any, FileCellState> {
 
   componentDidMount() {
     super.componentDidMount();
+    this._mounted = true;
     const { message } = this.props;
     const content = message.content as FileContent;
     // 小文件不显示进度，跳过订阅
@@ -368,11 +417,201 @@ export class FileCell extends MessageCell<any, FileCellState> {
         });
       }
     }
+
+    // 挂载时查询转存状态：多条消息在钩子层微批合并成一次批量请求。
+    // 群/子区/私聊统一支持（源码 source_key 已带 channelType 区分）。
+    // 自己刚发出的消息在收到 send-ack 前 messageID 为空 / status===Wait
+    // (vm.ts:updateMessageStatusBySendAck 才写入 server messageID)——此时
+    // 服务端还没这条消息，跳过查询避免 empty-msg_id 污染 batch 请求。
+    // ack 后 componentDidUpdate 会补一次查询。
+    this.runTransferredCheck();
+
+    // drive_on 是异步 appconfig 拉下来的：conversation 打开时可能还没到位，
+    // 此刻 runTransferredCheck 会因 !remoteConfig.driveOn 短路。订阅 config
+    // 变更让 mount 后 driveOn 翻转的那一刻触发一次 forceUpdate → componentDidUpdate
+    // 会看到 imTransferred===undefined 补查询。#1261 review round 6 spec req 3.
+    //
+    // 正确 API 路径是 WKApp.remoteConfig.addConfigChangeListener (类 WKRemoteConfig
+    // 的 instance 方法，见 App.tsx:389)；WKApp 本身没有这个静态方法。round 7 P0-1
+    // 抓到过一次 `WKApp.addConfigChangeListener is not a function`。
+    this._unsubscribeConfig = WKApp.remoteConfig.addConfigChangeListener(() => {
+      if (this._mounted) this.forceUpdate();
+    });
+
+    // 单向对齐：任何路径(图标/右键 picker/其他 tab 的 batch 查询)成功后，
+    // 私有 Drive module 会在 mittBus 广播 sourceKey + entry。凡是匹配本 FileCell
+    // 的消息就 setState，让图标(以及右键菜单下次打开时通过 cache 查)一起切
+    // "已存"。核心目的:两个入口共享一份 saved-state，杜绝"图标不切"和"右键
+    // 与图标状态不一致"这两种漂移。
+    this._driveTransferredListener = (payload: {
+      sourceKey: string;
+      entry: { file_id: number; space_id: string; parent_id: number };
+    }) => {
+      if (!this._mounted) return;
+      if (payload.sourceKey !== this.driveSourceKey()) return;
+      if (this.state.imTransferred?.exists === true) return; // already saved, no-op
+      this.setState({
+        imTransferred: {
+          exists: true,
+          file_id: payload.entry.file_id,
+          space_id: payload.entry.space_id,
+          parent_id: payload.entry.parent_id,
+        },
+      });
+    };
+    WKApp.mittBus.on("wk:drive-transferred-changed", this._driveTransferredListener);
+  }
+
+  // Resolve the DM peer uid for the drive-transfer wire.
+  //
+  // In a person-DM the octo-server 'get message by (peer_uid, msg_id)' probe
+  // that drive uses to authorise the transfer takes the PEER's uid — NOT the
+  // caller's own uid — as the peer parameter. In normal 1v1 DMs
+  // `message.channel.channelID` is already the peer's uid so passing it
+  // through works fine. But some WuKongIM system-bot DMs (notification,
+  // fileHelper, and any bot that pushes system messages) deliver recv packets
+  // whose `channel.channelID` COLLAPSES to the receiver's own uid — the
+  // "receiver as container" storage layout that InteractiveCard hit as bug
+  // in #1261 review round 7. If we forward channelID=self as im_group_no,
+  // drive → octo-server GET /v1/messages/person/<self>/<msg-id> returns
+  // 400 `peer_uid` (can't query my own DM with myself) and the save
+  // silently fails with "invalid IM message reference".
+  //
+  // Same tie-break rule as InteractiveCard's `resolveCardActionChannelId`:
+  // when person + channelID === selfUID, fall back to `message.fromUID`
+  // (the WKSDK-canonical peer for a received message). Groups / topics and
+  // any DM whose channelID is already the peer pass through unchanged.
+  //
+  // The result of THIS helper is what upstream (dmworkdrive backend) sees.
+  //
+  // Space-prefix stripping IS applied here (only on Person channels), because
+  // the self-collapse comparison `bareChannelID === selfUID` has to be done
+  // in the same namespace: in a Space deployment the recv-packet channelID
+  // is `s<32hex>_<uid>` while `WKApp.loginInfo.uid` is the bare uid, so
+  // without the strip the equality check silently misses the collapse case
+  // and the caller still forwards `s<32hex>_<self>`. `stripSpacePrefix`
+  // is idempotent (no prefix → passthrough) so this is safe on non-Space
+  // deployments too; the downstream `imDriveTransferSourceKey` /
+  // `normaliseImDriveChannelID` will just no-op on the already-bare id.
+  private resolvedImChannelID(): string {
+    const { message } = this.props;
+    const bareChannelID =
+      message.channel.channelType === ChannelTypePerson
+        ? stripSpacePrefix(message.channel.channelID)
+        : message.channel.channelID;
+    return resolveCardActionChannelId({
+      channelType: message.channel.channelType,
+      channelID: bareChannelID,
+      fromUID: message.fromUID,
+      selfUID: WKApp.loginInfo?.uid,
+    });
+  }
+
+  // sourceKey is derived by @octo/base's `imDriveTransferSourceKey` — the
+  // SAME implementation the private Drive module uses to construct the wire source_key
+  // and to key the mittBus 'wk:drive-transferred-changed' fan-out. Hosting
+  // both derivations in one place makes it impossible for FileCell's
+  // subscriber-side key to drift from the emitter-side key (Octo-Q /
+  // yujiawei review PR #1322 P2-6 — the earlier local inline version was
+  // an obvious silent-drift trap).
+  //
+  // Uses the DM-peer-resolved channel id (not the raw one) so a system-bot
+  // DM's source_key matches what the module.tsx save/check handlers emit.
+  private driveSourceKey(): string {
+    const { message } = this.props;
+    return imDriveTransferSourceKey(
+      message.channel.channelType,
+      this.resolvedImChannelID(),
+      message.messageID,
+    );
+  }
+
+  componentDidUpdate() {
+    // 处理两种"迟到"场景（reviewer 抓的 P1-2 + spec req 3）：
+    //   a) 自己刚发的文件 mount 时 messageID 为空，跳过了查询；ack 落地后需要补一次
+    //   b) drive_on 是异步 appconfig 拉下来的，mount 时 remoteConfig?.driveOn=false
+    //      导致 runTransferredCheck 内部短路了；appconfig 到位后需要补一次
+    // 早先版本用 prevProps 对比状态位来触发，但 vm.ts:updateMessageStatusBySendAck
+    // 是 **in-place mutate 同一 MessageWrap 对象**（clientMsgNo 作 React key、
+    // 引用不换），prevProps.message === this.props.message，所以对比 messageID/status
+    // 永远拿不到"从空到有"的过渡。改成用 state 判定：只要 imTransferred 还是
+    // undefined（= 查询没成功产生结果），每次 update 都试一次；runTransferredCheck
+    // 自带 isMessagePersisted + driveOn 短路，重复调用是安全的（微批合并 + 同一
+    // sourceKey dedupe waiters）。
+    if (this.state.imTransferred === undefined) {
+      this.runTransferredCheck();
+    }
+  }
+
+  // isMessagePersisted：消息已被服务端 ack、拥有 server messageID，可作 im_msg_id
+  // 参与云盘转存 / 已存查询。发送中(Wait) / 失败(Fail) / 无 messageID 时为 false。
+  private isMessagePersisted(): boolean {
+    const { message } = this.props;
+    return Boolean(message.messageID) && message.status === MessageStatus.Normal;
+  }
+
+  private runTransferredCheck(): void {
+    // In-flight guard：多次 render 都可能进 componentDidUpdate 触发这里；
+    // 若前一次查询还在飞就跳过，避免每 re-render 都开一次新 batch，也避免
+    // backend unhealthy 时无 backoff 地无限重试（#1261 review round 7 P1-1）。
+    if (this._checkInFlight) return;
+    if (!this.isMessagePersisted()) return;
+    const { message } = this.props;
+    // 只在支持的 channelType 上查询——防止 CustomerService 等未支持类型
+    // 白发一次 backend 请求命中 404，且与图标 gate 一致（图标不显示时也
+    // 不该查）。#1261 review round 6 P1-3.
+    if (!isDriveTransferSupportedChannel(message.channel.channelType)) return;
+    const check = WKApp.checkDriveTransferred;
+    if (!check || !WKApp.remoteConfig?.driveOn) return;
+
+    this._checkInFlight = true;
+    check({
+      im_group_no: this.resolvedImChannelID(),
+      im_channel_type: message.channel.channelType,
+      im_msg_id: message.messageID,
+    })
+      .then((entry) => {
+        if (!this._mounted) return;
+        // 竞态守卫：转存/更早的查询若已把状态设为"已存"，不要被这次
+        // mount 时的 in-flight 查询覆盖回未存态。
+        if (this.state.imTransferred?.exists === true) return;
+        this.setState({
+          imTransferred: entry
+            ? {
+                exists: true,
+                file_id: entry.file_id,
+                space_id: entry.space_id,
+                parent_id: entry.parent_id,
+              }
+            : { exists: false },
+        });
+      })
+      .catch(() => {
+        // 失败也置终止态：componentDidUpdate 通过 `imTransferred===undefined`
+        // 判定要不要重跑，若保持 undefined 会每 re-render 都重试、放大后端
+        // unhealthy 下的抖动。置 `{ exists: false }` 视觉上按"未存"渲染，
+        // 与 backend 明确返回未存等价；#1261 review round 7 P1-1.
+        if (!this._mounted) return;
+        if (this.state.imTransferred?.exists === true) return;
+        this.setState({ imTransferred: { exists: false } });
+      })
+      .finally(() => {
+        this._checkInFlight = false;
+      });
   }
 
   componentWillUnmount() {
     super.componentWillUnmount();
+    this._mounted = false;
     WKSDK.shared().taskManager.removeListener(this._taskListener);
+    if (this._unsubscribeConfig) {
+      this._unsubscribeConfig();
+      this._unsubscribeConfig = undefined;
+    }
+    if (this._driveTransferredListener) {
+      WKApp.mittBus.off("wk:drive-transferred-changed", this._driveTransferredListener);
+      this._driveTransferredListener = undefined;
+    }
   }
 
   getFileURL(content: FileContent): string {
@@ -397,6 +636,56 @@ export class FileCell extends MessageCell<any, FileCellState> {
     await downloadFile(url, content.name || "file");
   };
 
+  handleSaveToDrive = async () => {
+    const { message } = this.props;
+    const { t } = this.context;
+    const content = message.content as FileContent;
+    // 防御式：本 handler 只能在 icon gate 已放行时被调（icon 会在
+    // isMessagePersisted 为 false 时拦截 onClick），这里再检查一次防止
+    // 未来被别的入口误调（例如 keyboard trigger / a11y 路径）导致把空
+    // im_msg_id 传给后端。
+    if (!this.isMessagePersisted()) return;
+    // 已存过 → 直接在云盘中查看，不再转存。查看只依赖 file_id + space_id，
+    // 与文件 URL 无关，所以放在 URL 安全校验之前——避免 URL 畸形时把
+    // 已转存文件的"在云盘查看"也误拦掉。本期定位到空间根目录。
+    const known = this.state.imTransferred;
+    if (known?.exists && known.file_id && known.space_id) {
+      WKApp.openDriveFile?.({
+        space_id: known.space_id,
+        file_id: known.file_id,
+        parent_id: known.parent_id,
+      });
+      return;
+    }
+    // 未存 → 需要转存，此时才校验 URL（转存依赖消息附件）。
+    const url = this.getFileURL(content);
+    if (!url || !isSafeUrl(url)) {
+      Toast.error(t("base.messageFile.saveToDriveFailed"));
+      return;
+    }
+    const save = WKApp.saveMessageToDrive;
+    if (!save) return;
+    try {
+      const result = await save({
+        im_group_no: this.resolvedImChannelID(),
+        im_channel_type: message.channel.channelType,
+        im_msg_id: message.messageID,
+      });
+      // 转存成功：立即把状态切到"已存"，下次点击/hover 直接走查看分支。
+      this.setState({
+        imTransferred: {
+          exists: true,
+          file_id: result.file_id,
+          space_id: result.space_id,
+          parent_id: result.parent_id,
+        },
+      });
+      Toast.success(t("base.messageFile.saveToDriveSuccess"));
+    } catch {
+      Toast.error(t("base.messageFile.saveToDriveFailed"));
+    }
+  };
+
   handlePreview = () => {
     const { message } = this.props;
     const content = message.content as FileContent;
@@ -412,7 +701,7 @@ export class FileCell extends MessageCell<any, FileCellState> {
     // 所有文件都发送预览事件，由面板决定如何渲染（支持的显示内容，不支持的显示提示）
     const previewData = {
       url,
-      name: content.name || "未知文件",
+      name: content.name || this.context.t("base.messageFile.unknownFile"),
       extension: ext,
       size: content.size,
       // 携带来源频道信息（用于判断是否在子区面板内触发）
@@ -433,7 +722,7 @@ export class FileCell extends MessageCell<any, FileCellState> {
     try {
       const response = await fetch(url);
       if (!response.ok) {
-        Toast.error("文件预览失败");
+        Toast.error(this.context.t("base.messageFile.previewFailed"));
         return;
       }
       const contentLength = parseInt(
@@ -457,13 +746,14 @@ export class FileCell extends MessageCell<any, FileCellState> {
         textPreviewExt: extension.toLowerCase(),
       });
     } catch {
-      Toast.error("文件预览失败");
+      Toast.error(this.context.t("base.messageFile.previewFailed"));
     }
   };
 
   render() {
     const { message, context } = this.props;
     const content = message.content as FileContent;
+    const { t } = this.context;
     const iconInfo = getFileIconInfo(content.extension, content.name);
     const canPreview = isPreviewable(content.extension, content.name);
     const { uploadProgress, uploadStatus } = this.state;
@@ -489,7 +779,7 @@ export class FileCell extends MessageCell<any, FileCellState> {
             </div>
             <div className="wk-message-file-info">
               <div className="wk-message-file-name" title={content.name}>
-                {content.name || "上传中…"}
+                {content.name || t("base.messageFile.uploading")}
               </div>
               <div className="wk-message-file-progress-bar">
                 <div
@@ -539,20 +829,20 @@ export class FileCell extends MessageCell<any, FileCellState> {
             </div>
             <div className="wk-message-file-info">
               <div className="wk-message-file-name" title={content.name}>
-                {content.name || "上传失败"}
+                {content.name || t("base.messageFile.uploadFailed")}
               </div>
               <div className="wk-message-file-meta">
-                <span className="wk-message-file-failed-text">上传失败</span>
+                <span className="wk-message-file-failed-text">{t("base.messageFile.uploadFailed")}</span>
               </div>
-              <div className="wk-message-file-retry-hint">点击图标重试</div>
+              <div className="wk-message-file-retry-hint">{t("base.messageFile.retryHint")}</div>
             </div>
             <div className="wk-message-file-actions">
               <div
                 className="wk-message-file-action"
-                title="重试"
+                title={t("base.messageFile.retry")}
                 onClick={() => {
                   if (!this._task) {
-                    Toast.warning("上传任务已失效，请重新发送文件");
+                    Toast.warning(t("base.messageFile.uploadTaskExpired"));
                     return;
                   }
                   this._task.restart();
@@ -560,8 +850,8 @@ export class FileCell extends MessageCell<any, FileCellState> {
               >
                 <svg
                   viewBox="0 0 24 24"
-                  width="18"
-                  height="18"
+                  width="16"
+                  height="16"
                   fill="none"
                   stroke="currentColor"
                   strokeWidth="2"
@@ -579,6 +869,8 @@ export class FileCell extends MessageCell<any, FileCellState> {
     }
 
     const uiProps = getFileMessageUI(message);
+    const selectionMode = context.editOn();
+    const selectable = isMessageSelectable(message);
     // 检查是否为当前正在预览的文件
     const isActive =
       context.getActivePreviewMessageId?.() === message.messageID;
@@ -589,10 +881,12 @@ export class FileCell extends MessageCell<any, FileCellState> {
           {...uiProps.row}
           onContextMenu={(event) => context.showContextMenus(message, event)}
           isActive={context.isContextMenuOpen(message.message)}
-          showCheckbox={context.editOn()}
-          isSelected={!!message.checked}
-          onSelect={(selected) =>
-            context.checkeMessage(message.message, selected)
+          selectionMode={selectionMode}
+          showCheckbox={selectionMode && selectable}
+          isSelected={selectable && !!message.checked}
+          onSelect={selectable
+            ? (selected) => context.checkeMessage(message.message, selected)
+            : undefined
           }
           onAvatarClick={(e) => context.onTapAvatar(message.fromUID, e)}
           onSenderNameClick={() => context.showUser(message.fromUID)}
@@ -603,7 +897,7 @@ export class FileCell extends MessageCell<any, FileCellState> {
                 isActive ? " wk-message-file--active" : ""
               }`}
               onClick={this.handlePreview}
-              title="点击预览"
+              title={t("base.messageFile.preview")}
             >
               <div className="wk-message-file-icon">
                 <FileTypeIcon
@@ -613,42 +907,109 @@ export class FileCell extends MessageCell<any, FileCellState> {
               </div>
               <div className="wk-message-file-info">
                 <div className="wk-message-file-name" title={content.name}>
-                  {content.name || "未知文件"}
+                  {content.name || t("base.messageFile.unknownFile")}
                 </div>
-                <div className="wk-message-file-meta">
-                  <span className="wk-message-file-size">
-                    {formatFileSize(content.size)}
-                  </span>
-                  {content.extension && (
-                    <span className="wk-message-file-ext">
-                      {content.extension.toUpperCase()}
+                <div className="wk-message-file-meta-row">
+                  <div className="wk-message-file-meta">
+                    <span className="wk-message-file-size">
+                      {formatFileSize(content.size)}
                     </span>
-                  )}
-                </div>
-              </div>
-              <div className="wk-message-file-actions">
-                <div
-                  className="wk-message-file-action"
-                  title="下载"
-                  onClick={(e) => {
-                    e.stopPropagation(); // 阻止冒泡，避免触发预览
-                    this.handleDownload();
-                  }}
-                >
-                  <svg
-                    viewBox="0 0 24 24"
-                    width="18"
-                    height="18"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                    <polyline points="7 10 12 15 17 10" />
-                    <line x1="12" y1="15" x2="12" y2="3" />
-                  </svg>
+                    {content.extension && (
+                      <span className="wk-message-file-ext">
+                        {content.extension.toUpperCase()}
+                      </span>
+                    )}
+                  </div>
+                  <div className="wk-message-file-actions">
+                    {WKApp.saveMessageToDrive && WKApp.remoteConfig?.driveOn && isDriveTransferSupportedChannel(message.channel.channelType) && (
+                      <Tooltip
+                        content={
+                          !this.isMessagePersisted()
+                            ? t("base.messageFile.saveToDrivePendingAck")
+                            : this.state.imTransferred?.exists
+                              ? t("base.messageFile.viewInDrive")
+                              : t("base.messageFile.saveToDrive")
+                        }
+                        position="top"
+                      >
+                        <div
+                          className="wk-message-file-action"
+                          aria-label={
+                            !this.isMessagePersisted()
+                              ? t("base.messageFile.saveToDrivePendingAck")
+                              : this.state.imTransferred?.exists
+                                ? t("base.messageFile.viewInDrive")
+                                : t("base.messageFile.saveToDrive")
+                          }
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            // 未 ack / 无 server messageID：静默拦截点击，避免把
+                            // 空 im_msg_id 传给后端(#1261 review round 3 flagged case)。
+                            // 视觉上与下载按钮口径一致（始终高亮、运行时静默返回），
+                            // hover tooltip 提示原因。
+                            if (!this.isMessagePersisted()) return;
+                            this.handleSaveToDrive();
+                          }}
+                        >
+                          {this.state.imTransferred?.exists ? (
+                            <svg
+                              viewBox="0 0 24 24"
+                              width="16"
+                              height="16"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            >
+                              <path d="M20 16.58A5 5 0 0 0 18 7h-1.26A8 8 0 1 0 4 15.25" />
+                              <polyline points="9 12 11 14 15 10" />
+                            </svg>
+                          ) : (
+                            <svg
+                              viewBox="0 0 24 24"
+                              width="16"
+                              height="16"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            >
+                              <path d="M20 16.58A5 5 0 0 0 18 7h-1.26A8 8 0 1 0 4 15.25" />
+                              <polyline points="16 16 12 12 8 16" />
+                              <line x1="12" y1="12" x2="12" y2="21" />
+                            </svg>
+                          )}
+                        </div>
+                      </Tooltip>
+                    )}
+                    <Tooltip content={t("base.conversation.file.download")} position="top">
+                      <div
+                        className="wk-message-file-action"
+                        aria-label={t("base.conversation.file.download")}
+                        onClick={(e) => {
+                          e.stopPropagation(); // 阻止冒泡，避免触发预览
+                          this.handleDownload();
+                        }}
+                      >
+                        <svg
+                          viewBox="0 0 24 24"
+                          width="16"
+                          height="16"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                          <polyline points="7 10 12 15 17 10" />
+                          <line x1="12" y1="15" x2="12" y2="3" />
+                        </svg>
+                      </div>
+                    </Tooltip>
+                  </div>
                 </div>
               </div>
             </div>

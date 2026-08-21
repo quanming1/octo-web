@@ -53,35 +53,38 @@ body[theme-mode="dark"] .wk-conversationlist:hover::-webkit-scrollbar-thumb {
   letter-spacing: 0.3px;
 }
 
-/* ── 列表项 ── */
+/* ── 列表项（design v3.1 最近 tab .wk-conv-im 对标） ── */
+.wk-conversationlist {
+  padding: 0 var(--wk-sp-2) var(--wk-sp-2);
+}
+
 .wk-conversationlist-item {
   width: 100%;
   cursor: pointer;
-  height: 56px; /* Figma: 56px 固定高度 */
-  padding: 8px; /* Figma: 8px all sides */
+  padding: 7px var(--wk-sp-2);
   box-sizing: border-box;
-  border-radius: 0; /* Figma: 无圆角 */
+  border-radius: var(--wk-r-sm);
   margin-bottom: 1px;
   position: relative;
   transition: background var(--wk-dur) var(--wk-ease);
 }
 
 .wk-conversationlist-item:hover {
-  background: var(--wk-brand-tint-03); /* Figma: 3% 透明黑 */
+  background: var(--wk-bg-item-hover);
 }
 
-/* 置顶：用高优先级选择器，不用 !important */
 .wk-conversationlist .wk-conversationlist-item-top {
-  /* 置顶 item 不做特殊背景处理，和普通 item 保持一致 */
+  /* 置顶 item 不做特殊背景处理 */
 }
 
 .wk-conversationlist-item-content {
   display: flex;
   align-items: center;
+  gap: 10px;
 }
 
 .wk-conversationlist-item-left {
-  width: auto; /* Figma: 去掉固定宽度，让头像自适应 */
+  width: auto;
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -94,35 +97,37 @@ body[theme-mode="dark"] .wk-conversationlist:hover::-webkit-scrollbar-thumb {
   display: flex;
   flex-direction: column;
   justify-content: center;
-  gap: 4px; /* Figma: 名字行和消息预览行间距 4px */
-  padding-left: 8px; /* Figma: 头像和内容之间 gap=8px */
-  padding-right: 8px;
+  gap: var(--wk-sp-0-5);
+  padding: 0;
   box-sizing: border-box;
   overflow: hidden;
 }
 
 .wk-conversationlist-item-avatar-box {
   position: relative;
+  width: 32px;
+  height: 32px;
 }
 
-/* Figma: 私聊头像 36x36 圆形 */
+/* Avatar shape is unified; identity is shown by badges/metadata, not corners. */
 .wk-conversationlist-item-avatar-box .wk-avatar {
-  width: 36px;
-  height: 36px;
-  border-radius: 100px;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--wk-avatar-radius, 50%);
 }
 
 .wk-conversationlist-item-right-first-line {
   display: flex;
   justify-content: flex-start;
   align-items: center;
+  gap: var(--wk-sp-1-5);
   overflow: hidden;
 }
 
 .wk-conversationlist-item-right-second-line {
   display: flex;
   align-items: center;
-  margin-top: 0; /* 改用父容器的 gap: 4px */
+  margin-top: 0;
 }
 
 .wk-conversationlist-item-name {
@@ -130,35 +135,34 @@ body[theme-mode="dark"] .wk-conversationlist:hover::-webkit-scrollbar-thumb {
   flex: 1;
   min-width: 0;
   align-items: center;
-  gap: 4px;
+  gap: var(--wk-sp-1-5);
 }
 
 .wk-conversationlist-item-name h3 {
-  font-size: 14px; /* Figma: 14px，从 13.5px 改大 */
-  font-weight: 500; /* Figma: 500 */
+  font-size: var(--wk-text-size-base);
+  font-weight: 500;
   line-height: 1.4;
   margin: 0;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  max-width: 80%;
-  color: var(--wk-brand-primary); /* Figma: 纯黑 */
+  max-width: 100%;
+  color: var(--wk-text-strong);
 }
 
-/* 选中态：淡背景 + 左侧指示条，文字不反白 */
-.wk-conversationlist-item-selected {
-  background: var(--wk-brand-tint-06); /* Figma: 6% 透明黑 */
-  border-radius: 0; /* Figma: 无圆角 */
-  box-shadow: inset 4px 0 0 var(--wk-brand-primary); /* Figma: 左侧 4px 纯黑指示条 */
+/* 选中态：background-only 高亮（design v3.1 无左侧指示条） */
+.wk-conversationlist-item-selected,
+.wk-conversationlist-item-selected:hover {
+  background: var(--wk-brand-tint-06);
+  box-shadow: none;
 }
 
 .wk-conversationlist-item-time {
-  color: var(--wk-icon-muted); /* Figma: 40% 透明黑 */
-  padding-left: 8px; /* Figma: 名字和时间之间 gap=8px */
+  color: var(--wk-icon-default);
   flex-shrink: 0;
-  font-size: 12px; /* Figma: 12px，从 11px 改大 */
-  font-family: var(--wk-font-sans); /* Figma: Inter 字体 */
-  font-weight: 400; /* Figma: 400 */
+  font-size: var(--wk-text-size-xs);
+  font-family: var(--wk-font-sans);
+  font-weight: 400;
   line-height: 1;
   display: flex;
   align-items: center;
@@ -171,28 +175,124 @@ body[theme-mode="dark"] .wk-conversationlist:hover::-webkit-scrollbar-thumb {
   min-width: 0;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--wk-text-secondary); /* Figma: 80% 透明黑 */
+  color: var(--wk-icon-default);
   overflow: hidden;
-  font-size: 12px; /* Figma: 12px */
-  font-weight: 400; /* Figma: 400 */
-  font-family: var(--wk-font-sans); /* Figma: PingFang SC */
-  min-height: 18px;
+  font-size: var(--wk-text-size-sm);
+  font-weight: 400;
+  font-family: var(--wk-font-sans);
 }
 
-/* 未读时预览文字加深 */
-.wk-conversationlist-item-unread .wk-conversationlist-item-lastmsg {
-  color: var(--semi-color-text-0);
-}
+/* 未读时预览不再加深（与 design v3.1 timeline 低打扰一致） */
 
 .wk-conversationlist-item-unread .wk-conversationlist-item-name h3 {
   font-weight: 600;
+}
+
+/* 静音状态：名字 / 预览降为 icon-muted */
+.wk-conversationlist-item-muted .wk-conversationlist-item-name h3,
+.wk-conversationlist-item-muted .wk-conversationlist-item-lastmsg {
+  color: var(--wk-icon-muted);
+}
+
+/* 第二行右侧状态区：对齐在时间下方 */
+.wk-conversationlist-item-indicators {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--wk-sp-1);
+  flex-shrink: 0;
+  margin-left: var(--wk-sp-1);
+  min-height: var(--wk-sp-4);
+}
+
+/* 时间下方未读数字 badge（非静音） */
+.wk-conv-unread-num {
+  min-width: var(--wk-sp-4);
+  height: var(--wk-sp-4);
+  padding: 0 var(--wk-sp-1);
+  background: var(--wk-badge-danger-bg);
+  color: var(--wk-badge-danger-text);
+  border-radius: var(--wk-r-full);
+  font-size: var(--wk-text-size-tiny);
+  font-weight: 600;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+}
+
+.wk-conv-unread-num--muted {
+  background: color-mix(in srgb, var(--wk-icon-muted) 14%, transparent);
+  color: var(--wk-icon-muted);
+}
+
+.wk-conv-unread-num--nudge-a {
+  animation: wk-conv-unread-num-nudge-a 560ms ease;
+}
+
+.wk-conv-unread-num--nudge-b {
+  animation: wk-conv-unread-num-nudge-b 560ms ease;
+}
+
+@keyframes wk-conv-unread-num-nudge-a {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20% {
+    transform: translateX(-2px);
+  }
+  40% {
+    transform: translateX(2px);
+  }
+  60% {
+    transform: translateX(-1px);
+  }
+  80% {
+    transform: translateX(1px);
+  }
+}
+
+@keyframes wk-conv-unread-num-nudge-b {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20% {
+    transform: translateX(-2px);
+  }
+  40% {
+    transform: translateX(2px);
+  }
+  60% {
+    transform: translateX(-1px);
+  }
+  80% {
+    transform: translateX(1px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wk-conv-unread-num--nudge-a,
+  .wk-conv-unread-num--nudge-b {
+    animation: none;
+  }
+}
+
+/* name 行内的免打扰小图标 */
+.wk-conv-mute-icon {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  color: var(--wk-icon-muted);
 }
 
 /* AI 协作中预览 */
 .wk-ai-collab-preview {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--wk-sp-1);
   min-width: 0;
 }
 
@@ -204,9 +304,9 @@ body[theme-mode="dark"] .wk-conversationlist:hover::-webkit-scrollbar-thumb {
 }
 
 .wk-ai-collab-tag {
-  font-size: 11px;
+  font-size: var(--wk-text-size-xs);
   padding: 1px 5px;
-  border-radius: 3px;
+  border-radius: var(--wk-r-xs);
   background: linear-gradient(
     135deg,
     color-mix(in srgb, var(--wk-brand-primary) 12%, transparent),
@@ -218,13 +318,13 @@ body[theme-mode="dark"] .wk-conversationlist:hover::-webkit-scrollbar-thumb {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  margin-right: 4px;
+  margin-right: var(--wk-sp-1);
 }
 
 .wk-ai-collab-pulse {
   width: 5px;
   height: 5px;
-  border-radius: 50%;
+  border-radius: var(--wk-r-circle);
   background: var(--wk-color-success);
   animation: wk-collab-pulse 2s ease-in-out infinite;
 }
@@ -241,149 +341,87 @@ body[theme-mode="dark"] .wk-conversationlist:hover::-webkit-scrollbar-thumb {
   }
 }
 
-/* 未读数字 badge（淡红底红字）*/
-.wk-conversationlist-item-badge,
-.wk-conversationlist-item-reddot {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0 4px;
-  flex-shrink: 0;
-}
-
-/* @我 mention tag */
+/* @我 mention badge：第二行右侧，对齐时间区域 */
 .wk-mention {
-  font-size: 10px;
+  font-size: var(--wk-text-size-tiny);
   font-weight: 600;
   color: var(--wk-color-error);
   background: color-mix(in srgb, var(--wk-color-error) 10%, transparent);
   padding: 0 var(--wk-sp-1);
-  border-radius: 3px;
+  border-radius: var(--wk-r-xs);
   flex-shrink: 0;
-  margin-right: var(--wk-sp-1);
 }
 
 /* 草稿、提醒 */
 .wk-reminder {
-  font-size: 11px;
+  font-size: var(--wk-text-size-xs);
   font-weight: 500;
   color: var(--wk-color-error);
   flex-shrink: 0;
   margin-right: var(--wk-sp-1);
 }
 
-/* ── 在线状态 badge ── */
+/* ── 在线状态 badge：在线为绿点，离线 <1h 显示时间胶囊 ── */
 .wk-onlinestatusbadge {
-  background-color: var(--semi-color-bg-1);
   position: absolute;
-  padding: 1.5px;
-  transform: scale(0.6);
   right: -10px;
   bottom: -5px;
+  padding: 1.5px;
   border-radius: var(--wk-r-md);
+  background: var(--wk-bg-base);
   white-space: nowrap;
 }
 
-.wk-onlinestatusbadge-empty.wk-onlinestatusbadge {
-  border-radius: 50%;
-  right: -1px;
-  bottom: -1px;
-}
-
 .wk-onlinestatusbadge-content {
-  background-color: color-mix(
-    in srgb,
-    var(--wk-color-success) 15%,
-    transparent
-  );
   padding: 0 var(--wk-sp-1);
   border-radius: var(--wk-r-md);
+  background: color-mix(in srgb, var(--wk-color-success) 15%, transparent);
 }
 
 .wk-onlinestatusbadge-content-tip {
-  padding: 0;
-  font-size: 12px;
+  font-size: var(--wk-text-size-xs);
   color: var(--wk-color-success);
   white-space: nowrap;
 }
 
-.wk-onlinestatusbadge-empty .wk-onlinestatusbadge-content {
-  background-color: var(--wk-color-success);
-  border-radius: 50%;
+.wk-onlinestatusbadge-empty {
+  right: -1px;
+  bottom: -1px;
+  width: 9px;
+  height: 9px;
   padding: 0;
+  border-radius: var(--wk-r-circle);
+  background: var(--wk-color-success);
+  border: 2px solid var(--wk-bg-base);
+  box-sizing: border-box;
 }
 
-.wk-onlinestatusbadge-empty .wk-onlinestatusbadge-content-tip {
-  padding: 8px;
+.wk-onlinestatusbadge-empty .wk-onlinestatusbadge-content {
+  display: none;
 }
 
 /* Thread prefix */
 .wk-thread-prefix {
   color: var(--wk-text-accent);
-  margin-right: 2px;
+  margin-right: var(--wk-sp-0-5);
   font-weight: 600;
 }
 
-/* Thread conversation item - 子区只显示竖线和文字 */
-.wk-conversationlist-item-thread {
-  padding-left: 40px; /* 父频道16 + icon16 + gap4 + 缩进4 */
-  margin-bottom: 0;
-  padding-top: 2px;
-  padding-bottom: 2px;
-  position: relative;
+/* 最近 tab 扁平子区行：父频道名作为面包屑出现在子区名上方 */
+.wk-conv-breadcrumb {
+  font-size: var(--wk-text-size-xs);
+  color: var(--wk-icon-default);
+  line-height: 1;
+  margin-bottom: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-/* 子区左侧树形连接线 ├── */
-.wk-conversationlist-item-thread::after {
-  content: "";
-  position: absolute;
-  left: 24px; /* 父频道 icon 中心 */
-  top: 0;
-  height: 50%;
-  width: 10px;
-  border-left: 2px solid var(--wk-border-default);
-  border-bottom: 2px solid var(--wk-border-default);
-  border-bottom-left-radius: 4px;
-}
-
-/* 非最后一个子区：延伸竖线到下一个 */
-.wk-conversationlist-item-thread:has(
-    + .wk-conversationlist-item-thread
-  )::before,
-.wk-conversationlist-item-thread:has(
-    + .wk-conversationlist-thread-overflow
-  )::before {
-  content: "";
-  position: absolute;
-  left: 24px; /* 父频道 icon 中心 */
-  top: 50%;
-  bottom: 0;
-  width: 2px;
-  background: var(--wk-border-default);
-}
-
-.wk-conversationlist-item-thread .wk-conversationlist-item-content {
-  padding: 4px 8px;
-}
-
-.wk-conversationlist-item-thread .wk-conversationlist-item-right {
-  padding-left: 0;
-}
-
-.wk-conversationlist-item-thread .wk-conversationlist-item-name h3 {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 13px;
-}
-
-/* 子区组与下一个群组之间的间隔 */
-.wk-conversationlist-thread-overflow
-  + .wk-conversationlist-item:not(.wk-conversationlist-item-thread),
-.wk-conversationlist-item-thread
-  + .wk-conversationlist-item:not(.wk-conversationlist-item-thread) {
-  margin-top: 8px;
-}
+/* Thread conversation item — 已废弃。
+ * 非 compact 模式（最近 tab）现在子区扁平展示，不再套此类；
+ * compact 模式（关注 tab）使用 .wk-conv-compact-item--thread 走另一套缩进+树形线样式。
+ * 保留下方 .wk-conversationlist-thread-overflow 控件以防其他地方仍引用。 */
 
 /* Thread overflow indicator */
 .wk-conversationlist-thread-overflow {
@@ -434,7 +472,7 @@ body[theme-mode="dark"] .wk-conversationlist:hover::-webkit-scrollbar-thumb {
   bottom: -3px;
   width: 16px;
   height: 16px;
-  border-radius: 50%;
+  border-radius: var(--wk-r-circle);
   background: var(--wk-bg-elevated);
   border: 1.5px solid var(--wk-bg-base);
   display: flex;
@@ -443,18 +481,19 @@ body[theme-mode="dark"] .wk-conversationlist:hover::-webkit-scrollbar-thumb {
   color: var(--wk-text-secondary);
 }
 
-/* ── Compact 模式（群聊 Tab）紧凑频道列表 ── */
+/* ── Compact 模式（关注 Tab）紧凑频道列表 — design v3.1 .wk-conv-compact 对标 ── */
 .wk-conv-compact-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 8px 0 20px; /* 加大左缩进体现层级，黑条仍贴左边缘 */
-  border-radius: 0;
+  gap: var(--wk-sp-2);
+  padding: 5px var(--wk-sp-2);
+  border-radius: var(--wk-r-xs);
   cursor: pointer;
-  height: 36px;
+  min-height: 30px;
+  height: auto;
   box-sizing: border-box;
   position: relative;
-  transition: background 200ms;
+  transition: background 120ms;
 }
 
 .wk-conv-compact-item:hover:not(.wk-conv-compact-item--selected) {
@@ -463,21 +502,28 @@ body[theme-mode="dark"] .wk-conversationlist:hover::-webkit-scrollbar-thumb {
 
 .wk-conv-compact-item--selected {
   background: var(--wk-brand-tint-06);
-  border-radius: 0;
-  box-shadow: inset 4px 0 0 var(--wk-brand-primary);
+  border-radius: var(--wk-r-xs);
+  box-shadow: none;
 }
 
 /* 旧式 padding，已在下方的 position:relative 版本合并，保留 fallback */
 
 .wk-conv-compact-icon {
   flex-shrink: 0;
-  width: 26px;
-  height: 26px;
+  width: 22px;
+  height: 22px;
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--wk-text-tertiary, #9498a8);
+  color: var(--wk-icon-default);
   position: relative;
+}
+
+/* Compact avatars keep their size but share the global circular shape. */
+.wk-conv-compact-icon .wk-avatar {
+  width: 22px;
+  height: 22px;
+  border-radius: var(--wk-avatar-radius, 50%);
 }
 
 /* Figma: emoji/icon 左上角 6x6 红色小圆点（有未读消息时显示） */
@@ -488,17 +534,27 @@ body[theme-mode="dark"] .wk-conversationlist:hover::-webkit-scrollbar-thumb {
   left: -1px;
   width: 6px;
   height: 6px;
-  border-radius: 50%;
+  border-radius: var(--wk-r-circle);
   background: var(--wk-color-danger);
-  border: 1px solid white;
+  border: 1px solid var(--wk-color-white);
+}
+
+/* compact 列表头像更小（22x22 vs 最近列表 32x32），在线圆点等比缩小并贴右下角，
+ * 与左上角未读红点错开、不撑乱紧凑排版。复用 .wk-onlinestatusbadge 同色同形。 */
+.wk-conv-compact-icon .wk-onlinestatusbadge-empty {
+  width: 7px;
+  height: 7px;
+  right: -1px;
+  bottom: -1px;
+  border-width: 1.5px;
 }
 
 .wk-conv-compact-name {
   flex: 1;
-  font-size: 14px;
+  font-size: var(--wk-text-size-base);
   font-weight: 500;
-  color: var(--wk-brand-primary); /* Figma: 纯黑 */
-  line-height: 20px; /* Figma: 统一行高 */
+  color: var(--wk-text-strong);
+  line-height: 1.4;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -509,12 +565,12 @@ body[theme-mode="dark"] .wk-conversationlist:hover::-webkit-scrollbar-thumb {
   display: inline-block;
   width: 80px;
   height: 12px;
-  border-radius: 4px;
+  border-radius: var(--wk-r-xs);
   background: linear-gradient(
     90deg,
-    var(--wk-bg-elevated, #f0f0f0) 25%,
-    var(--wk-bg-hover, #e0e0e0) 50%,
-    var(--wk-bg-elevated, #f0f0f0) 75%
+    var(--wk-bg-elevated) 25%,
+    var(--wk-bg-hover) 50%,
+    var(--wk-bg-elevated) 75%
   );
   background-size: 200% 100%;
   animation: wk-skeleton-shimmer 1.2s infinite;
@@ -532,7 +588,7 @@ body[theme-mode="dark"] .wk-conversationlist:hover::-webkit-scrollbar-thumb {
 
 .wk-conv-compact-item--unread .wk-conv-compact-name {
   font-weight: 600;
-  color: var(--wk-text-primary, #1a1c24);
+  color: var(--wk-text-primary);
 }
 
 .wk-conv-compact-badges {
@@ -542,19 +598,37 @@ body[theme-mode="dark"] .wk-conversationlist:hover::-webkit-scrollbar-thumb {
   flex-shrink: 0;
 }
 
+.wk-conv-compact-mention {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 var(--wk-sp-1);
+  border-radius: var(--wk-r-full);
+  background: color-mix(in srgb, var(--wk-color-error) 10%, transparent);
+  color: var(--wk-color-error);
+  font-family: var(--wk-font-sans);
+  font-size: var(--wk-text-size-tiny);
+  font-weight: 700;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  user-select: none;
+}
+
 .wk-conv-compact-badge {
   min-width: 16px;
   height: 16px;
-  border-radius: 100px;
+  border-radius: var(--wk-r-full);
   background: var(--wk-badge-danger-bg);
   color: var(--wk-badge-danger-text);
   font-family: var(--wk-font-sans);
-  font-size: 10px;
+  font-size: var(--wk-text-size-tiny);
   font-weight: 600;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 0 4px;
+  padding: 0 var(--wk-sp-1);
   flex-shrink: 0;
 }
 
@@ -589,99 +663,64 @@ body[theme-mode="dark"] .wk-conversationlist:hover::-webkit-scrollbar-thumb {
 
 /* DragOverlay ghost 样式 */
 .wk-conv-compact-item--ghost {
-  background: var(--wk-bg-base, #f7f8fa);
-  border: 1px solid var(--wk-brand-from, #1c1c23);
-  border-radius: var(--wk-r-sm, 6px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  background: var(--wk-bg-base);
+  border: 1px solid var(--wk-brand-from);
+  border-radius: var(--wk-r-sm);
+  box-shadow: var(--wk-shadow-md);
   opacity: 0.9;
 }
 
-/* compact 模式子区 L连接线 */
+/* compact 模式子区 — design v3.1：仅缩进 + 🧵 icon，无树形连接线 */
 .wk-conv-compact-item.wk-conv-compact-item--thread {
   position: relative;
-  padding-left: 52px;
-  height: 32px; /* 子区行高保持原来 32px */
-  gap: 2px;
+  padding-left: 36px;
+  min-height: 26px;
+  height: auto;
+  gap: var(--wk-sp-1-5);
 }
 
 /* 子区名称比父群组小且不加粗，视觉层级区分 */
 .wk-conv-compact-item--thread .wk-conv-compact-name {
-  font-size: 13px;
+  font-size: var(--wk-text-size-base);
   font-weight: 400;
+  color: var(--wk-icon-default);
 }
 
 /* 未读子区：保持加粗（防止被上面的 fw400 覆盖） */
 .wk-conv-compact-item--thread.wk-conv-compact-item--unread
   .wk-conv-compact-name {
-  font-weight: 600;
+  font-weight: 500;
+  color: var(--wk-text-strong);
 }
 
-/* 子区 icon 容器贴合 icon 尺寸，不撑空白 */
+.wk-conv-compact-item--thread:hover .wk-conv-compact-name,
+.wk-conv-compact-item--thread.wk-conv-compact-item--selected .wk-conv-compact-name {
+  color: var(--wk-text-strong);
+}
+
+/* 子区 icon 容器 14px 宽 */
 .wk-conv-compact-item--thread .wk-conv-compact-icon {
-  width: 13px;
-  height: 13px;
-}
-
-/* L 转角（带弧度）：从中间到底部，border-left + border-bottom */
-.wk-conv-compact-item.wk-conv-compact-item--thread::after {
-  content: "";
-  position: absolute;
-  left: 40px;
-  top: 0;
-  height: 50%;
-  width: 10px;
-  border-left: 1px solid var(--wk-border-default, rgba(0, 0, 0, 0.12));
-  border-bottom: 1px solid var(--wk-border-default, rgba(0, 0, 0, 0.12));
-  border-bottom-left-radius: 3px;
-}
-
-/* 竖线延伸：从中间到底部，衔接下一个子区的 ::after 顶部 */
-.wk-conv-compact-item.wk-conv-compact-item--thread:has(
-    + .wk-conv-compact-item--thread
-  )::before,
-.wk-conv-compact-item.wk-conv-compact-item--thread:has(
-    + .wk-conv-compact-thread-overflow
-  )::before {
-  content: "";
-  position: absolute;
-  left: 40px;
-  top: 50%;
-  bottom: 0;
-  width: 1px;
-  background: var(--wk-border-default, rgba(0, 0, 0, 0.12));
+  width: 14px;
+  height: 14px;
+  color: var(--wk-icon-muted);
 }
 
 /* compact 模式「+N 个子区」/ 「收起」 overflow 控件 */
 .wk-conv-compact-thread-overflow {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 3px 8px 3px 48px;
-  font-size: 11px;
-  color: var(--wk-text-tertiary, #9498a8);
+  gap: var(--wk-sp-1);
+  padding: 3px var(--wk-sp-2) 3px 36px;
+  font-size: var(--wk-text-size-xs);
+  color: var(--wk-icon-muted);
   cursor: pointer;
-  border-radius: var(--wk-r-sm, 4px);
+  border-radius: var(--wk-r-xs);
   transition: color 150ms;
   position: relative;
 }
 
-/* overflow 控件：L 转角（带弧度），和子区 ::after 保持一致 */
-.wk-conv-compact-thread-overflow::after {
-  content: "";
-  position: absolute;
-  left: 36px;
-  top: 0;
-  height: 50%;
-  width: 10px;
-  border-left: 1px solid var(--wk-border-default, rgba(0, 0, 0, 0.12));
-  border-bottom: 1px solid var(--wk-border-default, rgba(0, 0, 0, 0.12));
-  border-bottom-left-radius: 3px;
-}
-
-/* 展开态控件置底，不需要下方延伸线 */
-
 .wk-conv-compact-thread-overflow:hover {
-  color: var(--wk-brand-primary, #1c1c23);
+  color: var(--wk-text-strong);
 }
 
 .wk-conv-compact-thread-overflow-badge {
@@ -690,8 +729,8 @@ body[theme-mode="dark"] .wk-conversationlist:hover::-webkit-scrollbar-thumb {
   justify-content: center;
   min-width: 16px;
   height: 16px;
-  padding: 0 4px;
-  font-size: 10px;
+  padding: 0 var(--wk-sp-1);
+  font-size: var(--wk-text-size-tiny);
   font-weight: 600;
   color: var(--wk-color-error);
   background: color-mix(in srgb, var(--wk-color-error) 10%, transparent);
@@ -709,10 +748,12 @@ body[theme-mode="dark"] .wk-conversationlist:hover::-webkit-scrollbar-thumb {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
+  gap: var(--wk-sp-0-5);
+  width: auto;
   height: 20px;
-  border-radius: 4px;
-  margin-left: 2px;
+  padding: 0 var(--wk-sp-1);
+  border-radius: var(--wk-r-xs);
+  margin-left: var(--wk-sp-0-5);
   cursor: pointer;
   opacity: 0.85;
   transition: background 0.15s, opacity 0.15s;
@@ -720,7 +761,7 @@ body[theme-mode="dark"] .wk-conversationlist:hover::-webkit-scrollbar-thumb {
 
 .wk-conv-compact-thread-tag:hover {
   opacity: 1;
-  background: rgba(101, 105, 232, 0.12);
+  background: var(--wk-purple-alpha-12);
 }
 
 /* 父群聊有子区：不画竖线，连接线靠子区自身的 ::after L 形体现 */
@@ -739,25 +780,25 @@ body[theme-mode="dark"] .wk-conversationlist:hover::-webkit-scrollbar-thumb {
   right: -3px;
   width: 12px;
   height: 12px;
-  border-radius: 3px;
-  background: var(--wk-bg-navrail, #f5f6f7);
-  border: 1px solid var(--wk-border-subtle, rgba(28, 28, 35, 0.1));
+  border-radius: var(--wk-r-xs);
+  background: var(--wk-bg-navrail);
+  border: 1px solid var(--wk-border-subtle);
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--wk-text-tertiary, #9498a8);
+  color: var(--wk-text-tertiary);
   pointer-events: none;
 }
 
 body[theme-mode="dark"] .wk-conv-compact-thread-badge {
-  background: var(--wk-bg-deep, #1c1c23);
-  border-color: rgba(255, 255, 255, 0.12);
+  background: var(--wk-bg-deep);
+  border-color: var(--wk-border-subtle);
 }
 
 /* compact 模式 mute 状态 */
 .wk-conv-compact-item--muted .wk-conv-compact-name {
   opacity: 0.45;
-  color: var(--semi-color-text-2, #8a8f99);
+  color: var(--wk-text-tertiary);
   font-weight: 400;
 }
 
@@ -765,20 +806,8 @@ body[theme-mode="dark"] .wk-conv-compact-thread-badge {
   display: flex;
   align-items: center;
   flex-shrink: 0;
-  margin-left: 2px;
+  margin-left: var(--wk-sp-0-5);
   opacity: 0.6;
-}
-
-/* @ 未读角标（红色圆形） */
-.wk-mention-badge {
-  color: var(--wk-badge-danger-text); /* Figma: #F54A45 */
-  font-size: 14px; /* Figma: 14px */
-  font-weight: 500; /* Figma: 500 */
-  font-family: var(--wk-font-sans);
-  line-height: 20px;
-  flex-shrink: 0;
-  user-select: none;
-  margin: 0; /* 间距由父容器 gap:4 控制 */
 }
 
 /* ── 外部群角标 ── */

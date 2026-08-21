@@ -12,6 +12,7 @@ import FileTooLarge from "./FileTooLarge";
 import MarkdownContent from "../../../Messages/Text/MarkdownContent";
 import MarkdownSourceView from "./MarkdownSourceView";
 import MarkdownToc, { shouldShowToc, extractTocItems } from "./MarkdownToc";
+import { useI18n } from "../../../i18n";
 import "./MarkdownRenderer.css";
 
 /** 超过此大小的 Markdown 自动使用源码模式（性能考虑） */
@@ -90,6 +91,7 @@ const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
   onTocToggle,
   onTocAvailableChange,
 }) => {
+  const { t } = useI18n();
   // 内部状态（当外部未控制时使用）
   const [internalViewMode, setInternalViewMode] = useState<
     "preview" | "source"
@@ -304,7 +306,7 @@ const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
       <div className="wk-file-preview-markdown-renderer wk-file-preview-markdown-renderer--loading">
         <div className="wk-file-preview-markdown-renderer__spinner" />
         <span className="wk-file-preview-markdown-renderer__message">
-          加载中...
+          {t("base.filePreview.loading")}
         </span>
       </div>
     );
@@ -321,7 +323,7 @@ const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
           className="wk-file-preview-markdown-renderer__retry"
           onClick={reload}
         >
-          重试
+          {t("base.filePreview.retry")}
         </button>
       </div>
     );
@@ -332,7 +334,7 @@ const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
     return (
       <div className="wk-file-preview-markdown-renderer wk-file-preview-markdown-renderer--empty">
         <span className="wk-file-preview-markdown-renderer__message">
-          暂无内容
+          {t("base.filePreview.empty")}
         </span>
       </div>
     );
@@ -359,7 +361,7 @@ const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
         {/* 大文件提示（强制源码模式时显示） */}
         {isLargeFile && (
           <div className="wk-file-preview-markdown-renderer__large-file-notice">
-            文件较大，已自动切换到源码模式以提升性能
+            {t("base.filePreview.markdown.largeAutoSource")}
           </div>
         )}
 

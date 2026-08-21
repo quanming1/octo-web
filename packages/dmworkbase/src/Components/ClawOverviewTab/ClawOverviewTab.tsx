@@ -11,6 +11,7 @@ import {
   Users,
 } from 'lucide-react';
 import type { RuntimeInfo } from '../../Service/AgentCardService';
+import { useI18n } from '../../i18n';
 import './ClawOverviewTab.css';
 export interface ClawOverviewTabProps {
   /** 运行时信息数据 */
@@ -32,6 +33,8 @@ export default function ClawOverviewTab({
   loading = false,
   onRecheck,
 }: ClawOverviewTabProps) {
+  const { t } = useI18n();
+
   // 计算健康检查状态
   const getProcessStatus = (): HealthStatus => {
     return runtimeInfo.process_status === 'running' ? 'success' : 'error';
@@ -56,7 +59,9 @@ export default function ClawOverviewTab({
   if (loading) {
     return (
       <div className="claw-overview-tab" data-testid="claw-overview-tab-loading">
-        <div className="claw-overview-tab__loading">加载中...</div>
+        <div className="claw-overview-tab__loading">
+          {t('base.claw.loading')}
+        </div>
       </div>
     );
   }
@@ -66,42 +71,44 @@ export default function ClawOverviewTab({
       {/* OpenClaw 配置信息卡片 */}
       <div className="config-card" data-testid="config-card">
         <div className="config-card__header">
-          <h2 className="config-card__title">OpenClaw 配置信息</h2>
+          <h2 className="config-card__title">
+            {t('base.claw.overview.configInfo')}
+          </h2>
         </div>
         <div className="config-card__grid">
           <ClawConfigItem
             icon={<Monitor />}
-            label="系统版本"
+            label={t('base.claw.overview.osVersion')}
             value={runtimeInfo.os_version}
           />
           <ClawConfigItem
             icon={<Cpu />}
-            label="处理器架构"
+            label={t('base.claw.overview.arch')}
             value={runtimeInfo.arch}
           />
           <ClawConfigItem
             icon={<HardDrive />}
-            label="可写磁盘空间"
+            label={t('base.claw.overview.writableDiskSpace')}
             value={`${runtimeInfo.disk_space_gb.toFixed(1)} GB`}
           />
           <ClawConfigItem
             icon={<FolderOpen />}
-            label="应用数据目录"
+            label={t('base.claw.overview.appDataDir')}
             value={runtimeInfo.app_data_dir}
           />
           <ClawConfigItem
             icon={<Package />}
-            label="OpenClaw 版本"
+            label={t('base.claw.overview.clawVersion')}
             value={runtimeInfo.claw_version}
           />
           <ClawConfigItem
             icon={<Globe />}
-            label="后台地址"
+            label={t('base.claw.overview.adminUrl')}
             value={runtimeInfo.admin_url}
           />
           <ClawConfigItem
             icon={<Users />}
-            label="积分来源团队"
+            label={t('base.claw.overview.teamName')}
             value={runtimeInfo.team_name}
           />
         </div>
@@ -110,35 +117,41 @@ export default function ClawOverviewTab({
       {/* 健康检查卡片 */}
       <div className="health-card" data-testid="health-card">
         <div className="health-card__header">
-          <h2 className="health-card__title">健康检查</h2>
+          <h2 className="health-card__title">
+            {t('base.claw.overview.healthCheck')}
+          </h2>
           <span className="health-card__summary">
-            本地环境 {runtimeInfo.gateway_alive_agents}/{runtimeInfo.gateway_total_agents}
+            {t('base.claw.overview.localEnvironment')} {runtimeInfo.gateway_alive_agents}/{runtimeInfo.gateway_total_agents}
           </span>
           {onRecheck && (
             <button
               className="health-card__recheck-btn"
               onClick={onRecheck}
-              data-testid="recheck-button"
-            >
-              重新检查
+            data-testid="recheck-button"
+          >
+              {t('base.claw.overview.recheck')}
             </button>
           )}
         </div>
         <div className="health-card__chips" data-testid="health-chips">
           <ClawHealthCheckItem
             status={getProcessStatus()}
-            label="OpenClaw 进程"
-            value={runtimeInfo.process_status === 'running' ? '运行中' : '已停止'}
+            label={t('base.claw.overview.process')}
+            value={runtimeInfo.process_status === 'running'
+              ? t('base.claw.overview.running')
+              : t('base.claw.overview.stopped')}
           />
           <ClawHealthCheckItem
             status={getGatewayStatus()}
-            label="网关连接"
+            label={t('base.claw.overview.gatewayConnection')}
             value={
               runtimeInfo.gateway_status === 'connected'
                 ? runtimeInfo.network_latency_ms != null
-                  ? `延迟 ${runtimeInfo.network_latency_ms.toFixed(2)}ms`
-                  : '已连接'
-                : '未连接'
+                  ? t('base.claw.overview.latency', {
+                    values: { value: runtimeInfo.network_latency_ms.toFixed(2) },
+                  })
+                  : t('base.claw.overview.connected')
+                : t('base.claw.overview.disconnected')
             }
           />
           <ClawHealthCheckItem
@@ -148,7 +161,7 @@ export default function ClawOverviewTab({
           />
           <ClawHealthCheckItem
             status={getMemoryStatus()}
-            label="内存"
+            label={t('base.claw.overview.memory')}
             value={`${runtimeInfo.memory_gb.toFixed(0)}GB`}
           />
         </div>

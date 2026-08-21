@@ -1,6 +1,7 @@
 import { Thread } from "../../Service/Thread"
 import { Message } from "wukongimjssdk"
 import WKApp from "../../App"
+import { t } from "../../i18n"
 
 export interface ThreadPanelState {
   loading: boolean
@@ -47,15 +48,13 @@ export class ThreadPanelVM {
   async load() {
     this.setState({ loading: true, error: null })
     try {
-      // 获取 thread 详情
-      const threads = await WKApp.dataSource.channelDataSource.threadList(this.groupNo, {
-        page_index: 1,
-        page_size: 100
-      })
-      const thread = threads.find(t => t.short_id === this.threadShortId) || null
+      const thread = await WKApp.dataSource.channelDataSource.threadGet(
+        this.groupNo,
+        this.threadShortId
+      )
       this.setState({ loading: false, thread })
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "加载失败"
+      const msg = err instanceof Error ? err.message : t("base.threadPanel.loadFailed")
       this.setState({ loading: false, error: msg })
     }
   }

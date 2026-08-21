@@ -2,6 +2,8 @@ import BigNumber from "bignumber.js";
 import { Setting } from "wukongimjssdk";
 import { WKSDK, ChannelInfo, Channel, Conversation, Message, MessageStatus, ChannelTypePerson, ChannelTypeGroup,ConversationExtra,Reminder, MessageExtra, Reply } from "wukongimjssdk";
 import { displayName as resolveDisplayName } from "../Utils/displayName";
+import { getImChannelInfo, getImChannelSubscribers } from "../im-runtime/channelRuntime";
+import { normalizeMessageReactions } from "./MessageReactionService";
 
 
 /**
@@ -133,7 +135,7 @@ export function applyMsgLevelExternalFieldsWithFallback(target: any, msgMap: any
     const groupChannel = resolveGroupChannel(target, msgMap)
     if (groupChannel) {
         try {
-            const subs: any = WKSDK.shared().channelManager.getSubscribes(groupChannel)
+            const subs: any = getImChannelSubscribers(WKSDK.shared(), groupChannel)
             if (subs && typeof subs.length === "number" && subs.length > 0) {
                 const member = subs.find((s: any) => s && s.uid === fromUID)
                 fillHomeSpaceFromOrg(target, member?.orgData, need)
@@ -148,7 +150,7 @@ export function applyMsgLevelExternalFieldsWithFallback(target: any, msgMap: any
     // 3) Person 频道兜底（R4 原逻辑，保留为最后防线）：仅当 fromUID 对应的
     //    1v1 Channel 已缓存过才会有值（用户真的跟对方私聊过）。
     try {
-        const info = WKSDK.shared().channelManager.getChannelInfo(new Channel(fromUID, ChannelTypePerson))
+        const info = getImChannelInfo(WKSDK.shared(), new Channel(fromUID, ChannelTypePerson))
         fillHomeSpaceFromOrg(target, info?.orgData, need)
     } catch (_e) {
         // channelManager 未初始化或查询失败：静默兜底失败，上层保留既有字段
@@ -210,6 +212,16 @@ export class Convert {
         conversation.extra.top = conversationMap["stick"]
         conversation.extra.categoryId = conversationMap["category_id"] ?? null
         conversation.extra.categorySort = conversationMap["category_sort"] ?? 0
+        // octo-server PR#154+：透传群表权威 space_id 与外部成员自己的 source space。
+        // 用于 ChatVM 在 sync 处理时预填 WKApp.shared.channelSpaceMap /
+        // channelMySourceSpaceMap，消除实时 WS 消息到达时的 fail-open 竞态窗口。
+        // 老后端没有该字段时为空，走原有 channelInfo.orgData / subscriber 路径。
+        if (typeof conversationMap["space_id"] === "string" && conversationMap["space_id"]) {
+            conversation.extra.spaceId = conversationMap["space_id"]
+        }
+        if (typeof conversationMap["my_source_space_id"] === "string" && conversationMap["my_source_space_id"]) {
+            conversation.extra.mySourceSpaceId = conversationMap["my_source_space_id"]
+        }
         // 后端返回的 per-Space 字段
         if (conversationMap["space_unread"] !== undefined && conversationMap["space_unread"] !== null) {
             conversation.extra.spaceUnread = conversationMap["space_unread"]
@@ -290,6 +302,7 @@ export class Convert {
         message.content = messageContent
 
         message.isDeleted = msgMap["is_deleted"] === 1
+        message.octoReactions = normalizeMessageReactions(msgMap["reactions"])
 
         // 外部群成员消息来源字段（dmwork-web#1069）：
         // /message/channel/sync 和 conversation/sync 响应在 msg-level 携带
@@ -350,9 +363,10 @@ export class Convert {
 
         channelInfo.orgData = data.extra || {};
         channelInfo.orgData = { ...channelInfo.orgData, ...data }
+        channelInfo.orgData.online = data.online;
         channelInfo.orgData.remark = data.remark ?? "";
         // GH #1121: 展示名解析接入 OCTO 实名认证。
-        // 优先级：remark（本地备注）> real_name（已实名时）> name（昵称）。
+        // 优先级：real_name（已实名时）> remark（本地备注）> name（昵称）。
         // 所有消费方统一读 `orgData.displayName`，无需逐点判断 real_name。
         // 硬约束：仅在 realname_verified 为 true/1 且 real_name 非空时才覆盖昵称；
         // 字段缺失（老后端）时 behavior 与原实现一致（退化到 remark 或 title）。
@@ -394,12 +408,15 @@ export class Convert {
 
         channelInfo.orgData = data.extra || {};
         channelInfo.orgData = { ...channelInfo.orgData, ...data }
+        channelInfo.orgData.online = data.online;
         channelInfo.orgData.remark = data.remark ?? "";
         channelInfo.orgData.displayName = data.remark && data.remark !== "" ? data.remark : channelInfo.title;
         channelInfo.orgData.forbidden = data.forbidden;
         channelInfo.orgData.invite = data.invite;
         channelInfo.orgData.forbiddenAddFriend = data.forbidden_add_friend;
         channelInfo.orgData.save = data.save;
+        // 群级「允许免@回答」总开关：老数据无字段时回退 1（允许），零回归。
+        channelInfo.orgData.allow_no_mention = data.allow_no_mention ?? 1;
 
         channelInfo.logo = data.logo
         if (!channelInfo.logo || channelInfo.logo === "") {

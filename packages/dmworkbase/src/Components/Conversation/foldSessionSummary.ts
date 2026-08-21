@@ -9,7 +9,6 @@ export interface FoldSessionSummarySource {
 
 export interface FoldSessionExpandedMessagesSource {
     messages: MessageWrap[]
-    typing?: MessageWrap
 }
 
 export interface FoldSessionSummaryState {
@@ -30,10 +29,8 @@ export function getFoldSessionSummaryState(session: FoldSessionSummarySource): F
 }
 
 export function getFoldSessionExpandedMessages(session: FoldSessionExpandedMessagesSource): MessageWrap[] {
-    if (session.messages.length === 0) {
-        return []
-    }
-    // 展开时显示所有消息(包括最后一条)
+    // 展开时 CSS 会隐藏 summary（FoldSessionCard/index.css 中 .expanded-show ~ .summary-show {display:none}），
+    // 所以最后一条必须留在 expanded 列表里，否则会从 UI 上消失。
     return [...session.messages]
 }
 

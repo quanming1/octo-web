@@ -6,6 +6,7 @@ import { SpaceService } from "../../Service/SpaceService";
 import { extractErrorMsg } from "../../Service/APIClient";
 import WKButton from "../WKButton";
 import InputEdit from "../InputEdit";
+import { I18nContext } from "../../i18n";
 import "./index.css";
 
 export interface SpaceCreateProps {
@@ -23,6 +24,9 @@ interface SpaceCreateState {
 }
 
 export default class SpaceCreate extends Component<SpaceCreateProps, SpaceCreateState> {
+    static contextType = I18nContext;
+    declare context: React.ContextType<typeof I18nContext>;
+
     constructor(props: SpaceCreateProps) {
         super(props);
         this.state = {
@@ -36,8 +40,9 @@ export default class SpaceCreate extends Component<SpaceCreateProps, SpaceCreate
 
     handleCreate = async () => {
         const { name, description, joinMode } = this.state;
+        const { t } = this.context;
         if (!name.trim()) {
-            Toast.warning("请输入 Space 名称");
+            Toast.warning(t("base.spaceCreate.nameRequired"));
             return;
         }
         this.setState({ loading: true });
@@ -45,17 +50,17 @@ export default class SpaceCreate extends Component<SpaceCreateProps, SpaceCreate
             const resp = await SpaceService.shared.createSpace(name.trim(), description.trim(), joinMode);
             const invite = await SpaceService.shared.createInvite(resp.space_id);
             this.setState({ name: "", description: "", joinMode: 0, inviteUrl: invite.invite_url, loading: false });
-            Toast.success("Space 创建成功");
+            Toast.success(t("base.spaceCreate.success"));
             this.props.onSuccess(resp.space_id);
         } catch (err: unknown) {
-            Toast.error(extractErrorMsg(err) || "创建失败，请重试");
+            Toast.error(extractErrorMsg(err) || t("base.spaceCreate.failed"));
             this.setState({ loading: false });
         }
     };
 
     handleCopyInvite = () => {
         navigator.clipboard.writeText(this.state.inviteUrl).then(() => {
-            Toast.success("邀请链接已复制");
+            Toast.success(this.context.t("base.spaceCreate.inviteCopied"));
         });
     };
 
@@ -67,27 +72,32 @@ export default class SpaceCreate extends Component<SpaceCreateProps, SpaceCreate
     render() {
         const { visible } = this.props;
         const { name, description, joinMode, loading, inviteUrl } = this.state;
+        const { t } = this.context;
 
         return (
             <WKModal
-                title={inviteUrl ? "邀请成员" : "创建 Space"}
+                title={inviteUrl ? t("base.spaceCreate.inviteMembers") : t("base.spaceCreate.createSpace")}
                 visible={visible}
                 onCancel={this.handleClose}
             >
                 {inviteUrl ? (
                     <div className="wk-spacecreate-invite">
-                        <p className="wk-spacecreate-invite-tip">Space 创建成功！分享以下链接邀请成员加入：</p>
+                        <p className="wk-spacecreate-invite-tip">
+                            {t("base.spaceCreate.successInviteTip")}
+                        </p>
                         <div className="wk-spacecreate-invite-link">
                             <WKInput value={inviteUrl} readOnly />
-                            <WKButton variant="secondary" onClick={this.handleCopyInvite}>复制链接</WKButton>
+                            <WKButton variant="secondary" onClick={this.handleCopyInvite}>
+                                {t("base.spaceCreate.copyLink")}
+                            </WKButton>
                         </div>
                     </div>
                 ) : (
                     <div className="wk-spacecreate-form">
                         <div className="wk-spacecreate-field">
-                            <label className="wk-spacecreate-label">名称</label>
+                            <label className="wk-spacecreate-label">{t("base.spaceCreate.name")}</label>
                             <WKInput
-                                placeholder="输入 Space 名称"
+                                placeholder={t("base.spaceCreate.namePlaceholder")}
                                 value={name}
                                 onChange={(v) => this.setState({ name: v })}
                                 maxLength={32}
@@ -96,11 +106,11 @@ export default class SpaceCreate extends Component<SpaceCreateProps, SpaceCreate
                             />
                         </div>
                         <div className="wk-spacecreate-field">
-                            <label className="wk-spacecreate-label">描述</label>
+                            <label className="wk-spacecreate-label">{t("base.spaceCreate.description")}</label>
                             <InputEdit
                                 key={visible ? "open" : "closed"}
                                 defaultValue={description}
-                                placeholder="输入 Space 描述（可选）"
+                                placeholder={t("base.spaceCreate.descriptionPlaceholder")}
                                 maxCount={200}
                                 onChange={(v) => this.setState({ description: v })}
                             />
@@ -110,13 +120,13 @@ export default class SpaceCreate extends Component<SpaceCreateProps, SpaceCreate
                                 checked={joinMode === 1}
                                 onChange={(e) => this.setState({ joinMode: e.target.checked ? 1 : 0 })}
                             >
-                                开启加入审批（成员需管理员审批后才能加入）
+                                {t("base.spaceCreate.approvalRequired")}
                             </Checkbox>
                         </div>
                         <div className="wk-spacecreate-actions">
-                            <WKButton variant="secondary" onClick={this.handleClose}>取消</WKButton>
+                            <WKButton variant="secondary" onClick={this.handleClose}>{t("base.common.cancel")}</WKButton>
                             <WKButton variant="primary" loading={loading} onClick={this.handleCreate}>
-                                创建
+                                {t("base.spaceCreate.create")}
                             </WKButton>
                         </div>
                     </div>

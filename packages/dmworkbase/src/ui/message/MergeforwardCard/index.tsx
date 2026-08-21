@@ -1,4 +1,5 @@
 import React from 'react'
+import { useI18n } from '../../../i18n'
 import './index.css'
 
 /**
@@ -41,6 +42,7 @@ export default function MergeforwardCard({
   previewMsgs,
   onClick,
 }: MergeforwardCardUIProps) {
+  const { t } = useI18n()
   const visible = previewMsgs.slice(0, 4)
 
   return (
@@ -63,7 +65,7 @@ export default function MergeforwardCard({
       <div className="wk-mf-card__divider" />
 
       {/* 底部标签 */}
-      <div className="wk-mf-card__footer">聊天记录</div>
+      <div className="wk-mf-card__footer">{t("base.message.mergeForward.chatRecord")}</div>
     </div>
   )
 }

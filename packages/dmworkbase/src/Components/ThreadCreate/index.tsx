@@ -2,7 +2,10 @@ import React, { Component } from "react"
 import { Toast } from "@douyinfe/semi-ui"
 import { X } from "lucide-react"
 import ThreadIcon from "../Icons/ThreadIcon"
-import WKApp from "../../App"
+import { I18nContext, t } from "../../i18n"
+import { THREAD_NAME_MAX_LENGTH } from "../../Service/nameLimits"
+import { createThreadByNameAndNotify } from "../../bridge/thread/createThread"
+import { ThreadCreateForm, ThreadCreateLabels } from "../../ui/ThreadCreateDialog"
 import "./index.css"
 
 export interface ThreadCreateProps {
@@ -13,69 +16,60 @@ export interface ThreadCreateProps {
 }
 
 interface ThreadCreateState {
-  name: string
   loading: boolean
+  error: string | null
 }
 
 export class ThreadCreate extends Component<ThreadCreateProps, ThreadCreateState> {
+  static contextType = I18nContext
+  declare context: React.ContextType<typeof I18nContext>
+
   constructor(props: ThreadCreateProps) {
     super(props)
     this.state = {
-      name: "",
       loading: false,
+      error: null,
     }
   }
 
-  handleNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    this.setState({ name: e.target.value })
-  }
-
-  handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && !this.state.loading && this.state.name.trim()) {
-      this.handleSubmit()
-    }
-  }
-
-  handleSubmit = async () => {
+  handleSubmit = async (name: string) => {
     const { groupNo, sourceMessageId, onSuccess } = this.props
-    const { name } = this.state
 
-    if (!name.trim()) {
-      Toast.warning("请输入子区名称")
-      return
-    }
-
-    if (name.length > 50) {
-      Toast.warning("子区名称不能超过50个字符")
-      return
-    }
-
-    this.setState({ loading: true })
+    this.setState({ loading: true, error: null })
 
     try {
-      await WKApp.dataSource.channelDataSource.threadCreate(
-        groupNo,
-        name.trim(),
-        sourceMessageId
-      )
-      Toast.success("创建成功")
+      await createThreadByNameAndNotify(groupNo, name, sourceMessageId)
+      Toast.success(t("base.threadCreate.success"))
       onSuccess?.()
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "创建失败"
+      const msg = err instanceof Error ? err.message : t("base.module.createThread.failed")
       Toast.error(msg)
-      this.setState({ loading: false })
+      this.setState({ loading: false, error: msg })
+    }
+  }
+
+  handleNameChange = () => {
+    if (this.state.error) {
+      this.setState({ error: null })
     }
   }
 
   render() {
     const { onCancel } = this.props
-    const { name, loading } = this.state
+    const { loading, error } = this.state
+    const labels: ThreadCreateLabels = {
+      cancel: t("base.common.cancel"),
+      create: t("base.module.createThread.ok"),
+      creating: t("base.threadCreate.creating"),
+      maxLength: t("base.threadCreate.nameMaxLength"),
+      nameRequired: t("base.threadCreate.nameRequired"),
+    }
 
     return (
       <div className="wk-thread-create">
         <div className="wk-thread-create-header">
           <ThreadIcon className="wk-thread-create-icon" size={24} />
-          <span className="wk-thread-create-title">创建子区</span>
+          <span className="wk-thread-create-title">{t("base.module.createThread.title")}</span>
           {onCancel && (
             <div className="wk-thread-create-close" onClick={onCancel}>
               <X size={18} />
@@ -83,34 +77,16 @@ export class ThreadCreate extends Component<ThreadCreateProps, ThreadCreateState
           )}
         </div>
         <div className="wk-thread-create-body">
-          <input
-            className="wk-thread-create-input"
-            type="text"
-            placeholder="输入子区名称"
-            value={name}
+          <ThreadCreateForm
+            placeholder={t("base.threadCreate.namePlaceholder")}
+            maxLength={THREAD_NAME_MAX_LENGTH}
+            loading={loading}
+            error={error}
+            labels={labels}
+            onSubmit={this.handleSubmit}
+            onCancel={onCancel}
             onChange={this.handleNameChange}
-            onKeyDown={this.handleKeyDown}
-            maxLength={50}
-            autoFocus
           />
-        </div>
-        <div className="wk-thread-create-footer">
-          {onCancel && (
-            <button
-              className="wk-thread-create-btn wk-thread-create-btn-cancel"
-              onClick={onCancel}
-              disabled={loading}
-            >
-              取消
-            </button>
-          )}
-          <button
-            className="wk-thread-create-btn wk-thread-create-btn-submit"
-            onClick={this.handleSubmit}
-            disabled={loading || !name.trim()}
-          >
-            {loading ? "创建中..." : "创建"}
-          </button>
         </div>
       </div>
     )

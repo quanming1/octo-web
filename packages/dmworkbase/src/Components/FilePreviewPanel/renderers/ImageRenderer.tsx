@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from "react";
 import { BaseRendererProps } from "../types";
 import { isFileTooLarge } from "../config";
 import FileTooLarge from "./FileTooLarge";
+import { useI18n } from "../../../i18n";
 import "./ImageRenderer.css";
 
 export interface ImageRendererProps extends BaseRendererProps {
@@ -24,6 +25,7 @@ const ImageRenderer: React.FC<ImageRendererProps> = ({
   onError,
   mode = "auto",
 }) => {
+  const { t } = useI18n();
   const [loading, setLoading] = useState(true);
   const [hasError, setHasError] = useState(false);
   const [imageSize, setImageSize] = useState({ width: 0, height: 0 });
@@ -66,8 +68,8 @@ const ImageRenderer: React.FC<ImageRendererProps> = ({
   const handleError = useCallback(() => {
     setLoading(false);
     setHasError(true);
-    onError?.("图片加载失败");
-  }, [onError]);
+    onError?.(t("base.filePreview.image.loadFailed"));
+  }, [onError, t]);
 
   const handleRetry = useCallback(() => {
     setLoading(true);
@@ -132,13 +134,13 @@ const ImageRenderer: React.FC<ImageRendererProps> = ({
             </svg>
           </div>
           <span className="wk-file-preview-image-renderer__error-text">
-            图片加载失败
+            {t("base.filePreview.image.loadFailed")}
           </span>
           <button
             className="wk-file-preview-image-renderer__retry"
             onClick={handleRetry}
           >
-            重试
+            {t("base.filePreview.retry")}
           </button>
         </div>
       </div>
@@ -152,7 +154,7 @@ const ImageRenderer: React.FC<ImageRendererProps> = ({
           <div className="wk-file-preview-image-renderer__loading">
             <div className="wk-file-preview-image-renderer__spinner" />
             <span className="wk-file-preview-image-renderer__loading-text">
-              加载中...
+              {t("base.filePreview.loading")}
             </span>
           </div>
         )}

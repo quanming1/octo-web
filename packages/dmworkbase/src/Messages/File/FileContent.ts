@@ -1,5 +1,6 @@
 import { MediaMessageContent } from "wukongimjssdk"
 import { MessageContentTypeConst } from "../../Service/Const"
+import { t } from "../../i18n"
 
 export class FileContent extends MediaMessageContent {
     name!: string
@@ -50,6 +51,6 @@ export class FileContent extends MediaMessageContent {
     }
 
     get conversationDigest() {
-        return "[文件]"
+        return t("base.message.digest.file")
     }
 }

@@ -1,6 +1,7 @@
 import React from "react";
 import { Component, ReactNode } from "react";
 import WKApp from "../../App";
+import { I18nContext } from "../../i18n";
 
 import "./index.css"
 
@@ -20,6 +21,8 @@ export interface SmallTableEditProps {
 }
 
 export default class SmallTableEdit extends Component<SmallTableEditProps> {
+    static contextType = I18nContext
+    declare context: React.ContextType<typeof I18nContext>
 
     render(): ReactNode {
         const { items, onAdd,addTitle } = this.props
@@ -58,7 +61,7 @@ export default class SmallTableEdit extends Component<SmallTableEditProps> {
                     </div>
                     <div className="wk-smalltableedit-content-item-name wk-text-oneline">
                         {
-                            addTitle?addTitle:"添加"
+                            addTitle?addTitle:this.context.t("base.common.add")
                         }
                     </div>
                 </div>

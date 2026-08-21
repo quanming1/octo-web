@@ -5,16 +5,32 @@ import {
   ChannelInfo,
   ChannelTypePerson,
   ChannelTypeGroup,
+  ConversationAction,
+  ReminderType,
 } from "wukongimjssdk";
 import { ChannelTypeCommunityTopic } from "../../Service/Const";
-import { parseThreadChannelId } from "../../Service/Thread";
+import {
+  isEffectivelyMuted,
+  parseThreadChannelId,
+} from "../../Service/Thread";
 import React, { Component } from "react";
-import { Modal, Tag } from "@douyinfe/semi-ui";
+import { Tag, Toast } from "@douyinfe/semi-ui";
 import { ConversationWrap, MessageWrap } from "../../Service/Model";
 import { getTimeStringAutoShort2 } from "../../Utils/time";
 import classNames from "classnames";
-import { useDraggable } from "@dnd-kit/core";
+import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
+import {
+  Bell,
+  BellOff,
+  BrushCleaning,
+  ChevronDown,
+  ChevronRight,
+  EyeOff,
+  GripVertical,
+  Pin,
+  PinOff,
+} from "lucide-react";
 
 import "./index.css";
 
@@ -26,7 +42,6 @@ import ContextMenus, {
   ContextMenusContext,
   ContextMenusData,
 } from "../ContextMenus";
-import { ChannelSettingManager } from "../../Service/ChannelSetting";
 import { TypingListener, TypingManager } from "../../Service/TypingManager";
 import { BeatLoader } from "react-spinners";
 import { RevokeCell } from "../../Messages/Revoke";
@@ -34,7 +49,57 @@ import { FlameMessageCell } from "../../Messages/Flame";
 import WKAvatar from "../WKAvatar";
 import AiBadge from "../AiBadge";
 import ConversationVM from "../Conversation/vm";
+import { I18nContext, t, useI18n } from "../../i18n";
+import { formatDraftPreview } from "../../Utils/draftPreview";
+import { collapsedThreadUnread } from "./unread";
+import {
+  addImChannelInfoListener,
+  fetchImChannelInfo,
+  getImChannelInfo,
+} from "../../im-runtime/channelRuntime";
+import {
+  muteChannelSetting,
+  topChannelSetting,
+} from "../../bridge/channelSetting/channelSettingActions";
+import { getBrowserUnreadConversationSync } from "../../features/documentTitle";
+import { hideConversation } from "./hideConversation";
 export type ConvFilter = "all" | "human" | "ai" | "group" | "dm";
+
+// ── 在线态判定/渲染 helper ──────────────────────────────────────────────
+// 最近列表（非 compact）与关注/收藏列表（compact 的 CompactGroupItem）共用同一份
+// 判定与 tip 文案，保证两处在线圆点的数据源、阈值、文案完全一致，避免逻辑复制漂移。
+
+// 是否需要显示在线状态：在线，或离线时间在 1 小时内
+export function needShowOnlineStatus(channelInfo?: ChannelInfo): boolean {
+  if (!channelInfo) {
+    return false;
+  }
+  if (channelInfo.online) {
+    return true;
+  }
+  const nowTime = new Date().getTime() / 1000;
+  const btwTime = nowTime - channelInfo.lastOffline;
+  if (btwTime > 0 && btwTime < 60 * 60) {
+    // 小于1小时才显示
+    return true;
+  }
+  return false;
+}
+
+// 离线 tip 文案（在线时返回 undefined，badge 退化为纯绿点）
+export function getOnlineTip(channelInfo: ChannelInfo): string | undefined {
+  if (channelInfo.online) {
+    return undefined;
+  }
+  const nowTime = new Date().getTime() / 1000;
+  const btwTime = nowTime - channelInfo.lastOffline;
+  if (btwTime < 60) {
+    return t("base.conversationList.justNow");
+  }
+  return t("base.conversationList.minutesAgoShort", {
+    values: { count: (btwTime / 60).toFixed(0) },
+  });
+}
 
 // ── CompactGroupItem：群聊 Tab 紧凑 item，支持拖拽 ──────────────────────
 interface CompactGroupItemProps {
@@ -46,6 +111,8 @@ interface CompactGroupItemProps {
   onContextMenu: (e: React.MouseEvent) => void;
   /** 该群聊有子区，需要在 # icon 下方画竖线 */
   hasThreads?: boolean;
+  /** 当前父群的子区是否展开 */
+  threadsExpanded?: boolean;
   onToggleThreads?: (e: React.MouseEvent) => void;
   /** 折叠时子区的未读数（展开时为 0） */
   threadUnread?: number;
@@ -59,55 +126,59 @@ const CompactGroupItem: React.FC<CompactGroupItemProps> = ({
   onDoubleClick,
   onContextMenu,
   hasThreads,
+  threadsExpanded,
   onToggleThreads,
   threadUnread = 0,
 }) => {
+  const { t } = useI18n();
   const totalUnread = conversationWrap.unread + threadUnread;
+  const hasMention = conversationWrap.isMentionMe && totalUnread > 0;
   const channelInfo = conversationWrap.channelInfo;
   // channelInfo 未加载时主动拉取，加载完触发 re-render
   React.useEffect(() => {
     if (!channelInfo) {
-      WKSDK.shared().channelManager.fetchChannelInfo(conversationWrap.channel);
+      void fetchImChannelInfo(WKSDK.shared(), conversationWrap.channel);
     }
   }, [conversationWrap.channel.channelID]);
 
   const isThread =
     conversationWrap.channel.channelType === ChannelTypeCommunityTopic;
 
-  // effectiveMute 对齐后端 allowPush 降级逻辑：
-  // - 子区有显式设置（thread.mute != null）→ 只看子区自身
-  // - 子区未设置（thread.mute == null）→ 继承父群组 mute
-  // - 群组：只看自身 mute
+  // 列表、标题与通知共用同一份有效静音语义：父群静音时 Thread 不能单独解除。
   const parentGroupNo = isThread
-    ? (channelInfo?.orgData?.parentGroupNo as string | undefined)
+    ? (channelInfo?.orgData?.parentGroupNo as string | undefined) ||
+      parseThreadChannelId(conversationWrap.channel.channelID)?.groupNo
     : undefined;
   const parentChannelInfo = parentGroupNo
-    ? WKSDK.shared().channelManager.getChannelInfo(
+    ? getImChannelInfo(
+        WKSDK.shared(),
         new Channel(parentGroupNo, ChannelTypeGroup)
       )
     : undefined;
-  const threadRawMute = isThread
-    ? (channelInfo?.orgData?.thread as any)?.mute as number | null | undefined
-    : undefined;
-  const effectiveMute = isThread
-    ? threadRawMute != null
-      ? threadRawMute === 1          // 显式设置：只看子区自身
-      : !!(parentChannelInfo?.mute)  // 未设置：继承父群
-    : !!(channelInfo?.mute);         // 群组：只看自身
+  const effectiveMute = isEffectivelyMuted({
+    isThread,
+    channelInfo,
+    parentChannelInfo,
+  });
 
-  const { attributes, listeners, setNodeRef, transform, isDragging } =
-    useDraggable({
-      id: `grp::${conversationWrap.channel.channelID}`,
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({
+      // 同一分组内 sort 与跨分组 move 共用 sortable id：item::<channelType>::<channelID>
+      // handleDragEnd 通过 over 是 item / cat 判断分支。
+      id: `item::${conversationWrap.channel.channelType}::${conversationWrap.channel.channelID}`,
       data: {
-        type: "group",
-        groupNo: conversationWrap.channel.channelID,
+        type: "item",
+        channelType: conversationWrap.channel.channelType,
+        channelID: conversationWrap.channel.channelID,
+        isThread,
       },
-      // 子区不参与跨分组拖拽
+      // 子区跟随父频道，不独立拖拽 / 排序
       disabled: isThread,
     });
 
   const style: React.CSSProperties = {
-    transform: CSS.Translate.toString(transform),
+    transform: CSS.Transform.toString(transform),
+    transition,
     opacity: isDragging ? 0.4 : undefined,
   };
 
@@ -115,6 +186,10 @@ const CompactGroupItem: React.FC<CompactGroupItemProps> = ({
     <div
       ref={setNodeRef}
       style={style}
+      // 子区行不发 channel_opened:改由 Pages/Chat componentDidMount 命令式发 subchannel_opened
+      // (带父群 channel_id + 子区 short_id,DOM 规则带不了)。两事件按手势划分、不重叠。
+      data-track={isThread ? undefined : "channel_opened"}
+      data-object-id={conversationWrap.channel.channelID}
       className={classNames(
         "wk-conv-compact-item",
         selected ? "wk-conv-compact-item--selected" : undefined,
@@ -139,18 +214,12 @@ const CompactGroupItem: React.FC<CompactGroupItemProps> = ({
       {!isThread && (
         <span
           className="wk-conv-compact-drag-handle"
+          data-track-ignore
           {...attributes}
           {...listeners}
           onClick={(e) => e.stopPropagation()}
         >
-          <svg width="10" height="14" viewBox="0 0 10 14" fill="none">
-            <circle cx="3" cy="3" r="1.2" fill="currentColor" />
-            <circle cx="7" cy="3" r="1.2" fill="currentColor" />
-            <circle cx="3" cy="7" r="1.2" fill="currentColor" />
-            <circle cx="7" cy="7" r="1.2" fill="currentColor" />
-            <circle cx="3" cy="11" r="1.2" fill="currentColor" />
-            <circle cx="7" cy="11" r="1.2" fill="currentColor" />
-          </svg>
+          <GripVertical size={14} aria-hidden="true" />
         </span>
       )}
       <span
@@ -164,18 +233,12 @@ const CompactGroupItem: React.FC<CompactGroupItemProps> = ({
           <WKAvatar
             key={avatarKey}
             channel={conversationWrap.channel}
-            style={{
-              width: 26,
-              height: 26,
-              borderRadius: "50%",
-              flexShrink: 0,
-            }}
           />
         )}
+        {!isThread && channelInfo && needShowOnlineStatus(channelInfo) ? (
+          <OnlineStatusBadge tip={getOnlineTip(channelInfo)}></OnlineStatusBadge>
+        ) : undefined}
       </span>
-      {conversationWrap.isMentionMe && totalUnread > 0 && (
-        <span className="wk-mention-badge">@我</span>
-      )}
       <span className="wk-conv-compact-name">
         {channelInfo?.orgData.displayName ? (
           channelInfo.orgData.displayName
@@ -187,8 +250,8 @@ const CompactGroupItem: React.FC<CompactGroupItemProps> = ({
       </span>
       {conversationWrap.channel.channelType === ChannelTypeGroup &&
         channelInfo?.orgData?.is_external_group === 1 && (
-          <span className="wk-conv-compact-external-badge" aria-label="外部群">
-            外部
+          <span className="wk-conv-compact-external-badge" aria-label={t("base.conversationList.externalGroup")}>
+            {t("base.conversationList.external")}
           </span>
         )}
       {effectiveMute && (
@@ -208,25 +271,36 @@ const CompactGroupItem: React.FC<CompactGroupItemProps> = ({
           </svg>
         </span>
       )}
-      {totalUnread > 0 && !effectiveMute && (
+      {(hasMention || (totalUnread > 0 && !effectiveMute)) && (
         <span className="wk-conv-compact-badges">
-          <span className="wk-conv-compact-badge">
-            {totalUnread > 99 ? "99+" : totalUnread}
-          </span>
+          {hasMention && (
+            <span className="wk-conv-compact-mention" aria-hidden="true">
+              {t("base.conversationList.mentionMarker")}
+            </span>
+          )}
+          {totalUnread > 0 && !effectiveMute && (
+            <span className="wk-conv-compact-badge">
+              {totalUnread > 99 ? "99+" : totalUnread}
+            </span>
+          )}
         </span>
       )}
       {hasThreads && (
         <span
           className="wk-conv-compact-thread-tag"
-          aria-label="展开/收起子区"
+          data-track-ignore
+          aria-label={t("base.conversationList.toggleThreads")}
           onClick={(e) => {
             e.stopPropagation();
             onToggleThreads?.(e);
           }}
         >
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="#6569E8">
-            <path d="M12 2.81a1 1 0 0 1 0-1.41l.36-.36a1 1 0 0 1 1.41 0l9.2 9.2a1 1 0 0 1 0 1.4l-.7.7a1 1 0 0 1-1.3.13l-9.54-6.72a1 1 0 0 1-.08-1.58l1-1L12 2.8ZM12 21.2a1 1 0 0 1 0 1.41l-.35.35a1 1 0 0 1-1.41 0l-9.2-9.19a1 1 0 0 1 0-1.41l.7-.7a1 1 0 0 1 1.3-.12l9.54 6.72a1 1 0 0 1 .07 1.58l-1 1 .35.36ZM15.66 16.8a1 1 0 0 1-1.38.28l-8.49-5.66A1 1 0 1 1 6.9 9.76l8.49 5.65a1 1 0 0 1 .27 1.39ZM17.1 14.25a1 1 0 1 0 1.11-1.66L9.73 6.93a1 1 0 0 0-1.11 1.66l8.49 5.66Z" />
-          </svg>
+          <ThreadIcon size={13} />
+          {threadsExpanded ? (
+            <ChevronDown size={13} aria-hidden="true" />
+          ) : (
+            <ChevronRight size={13} aria-hidden="true" />
+          )}
         </span>
       )}
     </div>
@@ -245,25 +319,54 @@ export interface ConversationListProps {
   onClearMessages?: (channel: Channel) => void;
   /** 点击 "+N 个子区" 时的回调，传入父群组 ID */
   onThreadOverflowClick?: (groupNo: string) => void;
-  /** 外部注入的额外右键菜单项，追加到内置菜单之后 */
+  /** 状态类菜单项：插入在“清除未读”之后、免打扰之前 */
   extraContextMenus?: (
     conversation: ConversationWrap | undefined
   ) => ContextMenusData[];
+  /** 独立分组菜单项：插入在状态类菜单后的分隔线之后 */
+  trailingContextMenus?: (
+    conversation: ConversationWrap | undefined
+  ) => ContextMenusData[];
+  /** 隐藏右键菜单的「不显示该会话」项（关注 tab 不展示） */
+  hideCloseChat?: boolean;
+  /** 关闭按 channelInfo.top 拆分置顶 / 普通两段的渲染逻辑。
+   *  关注 tab 里会话顺序由 /v2/follow/sort 决定（sidebar 给的 follow_sort），
+   *  pin 只是标记不影响位置，关闭后保持 caller 传入的顺序原样渲染。 */
+  disablePinSplit?: boolean;
+  /** 隐藏「置顶/取消置顶」菜单项 + 行尾图钉图标。关注 tab 用手动拖拽排序，
+   *  pin 与拖拽语义冲突（pin 会强制顶到分组顶端覆盖手动顺序），所以在关注 tab 移除 pin 入口。
+   *  最近 tab 仍保留 pin。 */
+  hidePin?: boolean;
+  /** 递增 token：变化时滚到第一条 shouldScrollToUnreadTarget 命中的会话 */
+  scrollToUnreadToken?: number;
+  /** 外部提供导航目标口径，避免列表层重复理解具体业务规则 */
+  shouldScrollToUnreadTarget?: (conversation: ConversationWrap) => boolean;
 }
 
 export interface ConversationListState {
   selectConversationWrap?: ConversationWrap;
   /** compact 模式：已展开全部子区的父群聊 ID 集合（点击 +N 后加入） */
   expandedGroupIds: Set<string>;
+  locatingUnreadKey?: string;
+  locatingUnreadPulse: number;
 }
 
 export default class ConversationList extends Component<
   ConversationListProps,
   ConversationListState
 > {
+  static contextType = I18nContext;
+  declare context: React.ContextType<typeof I18nContext>;
+
   channelListener!: ChannelInfoListener;
   contextMenusContext!: ContextMenusContext;
   typingListener!: TypingListener;
+  private unsubscribeChannelInfoListener?: () => void;
+  private listRef = React.createRef<HTMLDivElement>();
+  private itemRefs = new Map<string, HTMLDivElement>();
+  private lastRenderableItems: ConversationWrap[] = [];
+  private scrollFrame: number | null = null;
+  private unreadNudgeTimer: number | null = null;
   private _storageKey(): string {
     const uid = WKApp.loginInfo?.uid || 'unknown';
     const spaceId = WKApp.shared?.currentSpaceId || 'default';
@@ -282,14 +385,21 @@ export default class ConversationList extends Component<
     } catch {
       restoredIds = new Set();
     }
-    this.state = { expandedGroupIds: restoredIds };
+    this.state = {
+      expandedGroupIds: restoredIds,
+      locatingUnreadKey: undefined,
+      locatingUnreadPulse: 0,
+    };
   }
 
   componentDidMount() {
     this.channelListener = (channelInfo: ChannelInfo) => {
       this.setState({});
     };
-    WKSDK.shared().channelManager.addListener(this.channelListener);
+    this.unsubscribeChannelInfoListener = addImChannelInfoListener(
+      WKSDK.shared(),
+      this.channelListener
+    );
 
     this.typingListener = (channel: Channel, add: boolean) => {
       this.setState({});
@@ -297,10 +407,129 @@ export default class ConversationList extends Component<
     TypingManager.shared.addTypingListener(this.typingListener);
   }
 
+  componentDidUpdate(prevProps: ConversationListProps) {
+    if (
+      this.props.scrollToUnreadToken !== undefined &&
+      this.props.scrollToUnreadToken !== prevProps.scrollToUnreadToken
+    ) {
+      this.scheduleScrollToFirstUnreadTarget();
+    }
+  }
+
   componentWillUnmount() {
-    WKSDK.shared().channelManager.removeListener(this.channelListener);
+    if (
+      this.scrollFrame !== null &&
+      typeof window !== "undefined" &&
+      typeof window.cancelAnimationFrame === "function"
+    ) {
+      window.cancelAnimationFrame(this.scrollFrame);
+      this.scrollFrame = null;
+    }
+    if (
+      this.unreadNudgeTimer !== null &&
+      typeof window !== "undefined" &&
+      typeof window.clearTimeout === "function"
+    ) {
+      window.clearTimeout(this.unreadNudgeTimer);
+      this.unreadNudgeTimer = null;
+    }
+    this.unsubscribeChannelInfoListener?.();
+    this.unsubscribeChannelInfoListener = undefined;
     TypingManager.shared.removeTypingListener(this.typingListener);
   }
+
+  private setConversationItemRef(
+    conversationWrap: ConversationWrap,
+    node: HTMLDivElement | null
+  ) {
+    const key = conversationWrap.channel.getChannelKey();
+    if (node) {
+      this.itemRefs.set(key, node);
+    } else {
+      this.itemRefs.delete(key);
+    }
+  }
+
+  private scheduleScrollToFirstUnreadTarget() {
+    if (
+      typeof window === "undefined" ||
+      typeof window.requestAnimationFrame !== "function"
+    ) {
+      this.scrollToFirstUnreadTarget();
+      return;
+    }
+
+    if (this.scrollFrame !== null) {
+      window.cancelAnimationFrame(this.scrollFrame);
+    }
+    this.scrollFrame = window.requestAnimationFrame(() => {
+      this.scrollFrame = null;
+      this.scrollToFirstUnreadTarget();
+    });
+  }
+
+  private scrollToFirstUnreadTarget() {
+    const root = this.listRef.current;
+    const shouldTarget = this.props.shouldScrollToUnreadTarget;
+    if (!root || !shouldTarget) return;
+
+    const target = this.lastRenderableItems.find((conv) => shouldTarget(conv));
+    if (!target) return;
+
+    const node = this.itemRefs.get(target.channel.getChannelKey());
+    if (!node) return;
+
+    const rootRect = root.getBoundingClientRect();
+    const nodeRect = node.getBoundingClientRect();
+    const targetTop = Math.max(0, root.scrollTop + nodeRect.top - rootRect.top);
+
+    if (typeof root.scrollTo === "function") {
+      root.scrollTo({
+        top: targetTop,
+        behavior: "smooth",
+      });
+    } else {
+      root.scrollTop = targetTop;
+    }
+
+    this.nudgeUnreadBadge(target.channel.getChannelKey());
+  }
+
+  private nudgeUnreadBadge(channelKey: string) {
+    if (
+      this.unreadNudgeTimer !== null &&
+      typeof window !== "undefined" &&
+      typeof window.clearTimeout === "function"
+    ) {
+      window.clearTimeout(this.unreadNudgeTimer);
+      this.unreadNudgeTimer = null;
+    }
+
+    this.setState((state) => ({
+      locatingUnreadKey: channelKey,
+      locatingUnreadPulse: state.locatingUnreadPulse + 1,
+    }));
+
+    if (
+      typeof window === "undefined" ||
+      typeof window.setTimeout !== "function"
+    ) {
+      return;
+    }
+
+    this.unreadNudgeTimer = window.setTimeout(() => {
+      this.unreadNudgeTimer = null;
+      this.setState({ locatingUnreadKey: undefined });
+    }, 700);
+  }
+
+  // 子区是否展开。
+  // - 关注 tab（disablePinSplit）：默认展开，expandedGroupIds 记录"被用户折叠的"（反转语义）
+  // - 其他 tab：默认折叠，expandedGroupIds 记录"被用户展开的"
+  _isThreadExpanded = (parentGroupId: string): boolean => {
+    const inSet = this.state.expandedGroupIds.has(parentGroupId);
+    return this.props.disablePinSplit ? !inSet : inSet;
+  };
 
   _handleScroll = () => {
     this.contextMenusContext.hide();
@@ -353,18 +582,18 @@ export default class ConversationList extends Component<
         {conversationWrap.channel.channelType !== ChannelTypePerson
           ? typing?.fromName
           : ""}
-        正在输入
+        {t("base.conversationList.typing")}
       </div>
     );
   }
 
   lastContent(conversationWrap: ConversationWrap) {
-    if (!conversationWrap.lastMessage) {
-      return;
-    }
     const draft = conversationWrap.remoteExtra.draft;
     if (draft && draft !== "") {
-      return draft;
+      return formatDraftPreview(draft);
+    }
+    if (!conversationWrap.lastMessage) {
+      return;
     }
     // 检查是否有进行中的 AI 折叠 session
     const foldPreview = ConversationVM.foldSessionPreview.get(
@@ -375,10 +604,15 @@ export default class ConversationList extends Component<
         <span className="wk-ai-collab-preview">
           <span className="wk-ai-collab-tag">
             <span className="wk-ai-collab-pulse" />
-            AI协作中
+            {t("base.conversationList.aiCollaborating")}
           </span>
           <span className="wk-ai-collab-text">
-            {foldPreview.participants.join(" × ")} · {foldPreview.count}条
+            {t("base.conversationList.aiCollabCount", {
+              values: {
+                participants: foldPreview.participants.join(" × "),
+                count: foldPreview.count,
+              },
+            })}
           </span>
         </span>
       );
@@ -401,11 +635,11 @@ export default class ConversationList extends Component<
       if (lastMessage.fromUID && lastMessage.fromUID !== "") {
         const fromChannel = new Channel(lastMessage.fromUID, ChannelTypePerson);
         const fromChannelInfo =
-          WKSDK.shared().channelManager.getChannelInfo(fromChannel);
+          getImChannelInfo(WKSDK.shared(), fromChannel);
         if (fromChannelInfo) {
           from = `${fromChannelInfo.title}: `;
         } else {
-          WKSDK.shared().channelManager.fetchChannelInfo(fromChannel);
+          void fetchImChannelInfo(WKSDK.shared(), fromChannel);
         }
       }
 
@@ -414,32 +648,12 @@ export default class ConversationList extends Component<
   }
 
   getOnlineTip(channelInfo: ChannelInfo) {
-    if (channelInfo.online) {
-      return undefined;
-    }
-    const nowTime = new Date().getTime() / 1000;
-    const btwTime = nowTime - channelInfo.lastOffline;
-    if (btwTime < 60) {
-      return "刚刚";
-    }
-    return `${(btwTime / 60).toFixed(0)}分钟`;
+    return getOnlineTip(channelInfo);
   }
 
   // 是否需要显示在线状态
   needShowOnlineStatus(channelInfo?: ChannelInfo) {
-    if (!channelInfo) {
-      return false;
-    }
-    if (channelInfo.online) {
-      return true;
-    }
-    const nowTime = new Date().getTime() / 1000;
-    const btwTime = nowTime - channelInfo.lastOffline;
-    if (btwTime > 0 && btwTime < 60 * 60) {
-      // 小于1小时才显示
-      return true;
-    }
-    return false;
+    return needShowOnlineStatus(channelInfo);
   }
 
   conversationItem(
@@ -449,13 +663,30 @@ export default class ConversationList extends Component<
   ) {
     let channelInfo = conversationWrap.channelInfo;
     if (!channelInfo) {
-      WKSDK.shared().channelManager.fetchChannelInfo(conversationWrap.channel);
+      void fetchImChannelInfo(WKSDK.shared(), conversationWrap.channel);
     }
 
     const { compact } = this.props;
     const avatarKey = WKApp.shared.getChannelAvatarTag(
       conversationWrap.channel
     );
+    const isThread =
+      conversationWrap.channel.channelType === ChannelTypeCommunityTopic;
+    // 非 compact（最近 tab）下子区按时间扁平展示，需要拿父频道 displayName 做面包屑、
+    // 父频道头像作为左侧图标。父群信息可能还没拉到，主动 fetch，依赖 channelListener 触发重渲染。
+    const parentGroupNo = isThread
+      ? (channelInfo?.orgData?.parentGroupNo as string | undefined) ||
+        parseThreadChannelId(conversationWrap.channel.channelID)?.groupNo
+      : undefined;
+    const parentChannel = parentGroupNo
+      ? new Channel(parentGroupNo, ChannelTypeGroup)
+      : undefined;
+    const parentChannelInfo = parentChannel
+      ? getImChannelInfo(WKSDK.shared(), parentChannel)
+      : undefined;
+    if (parentChannel && !parentChannelInfo) {
+      void fetchImChannelInfo(WKSDK.shared(), parentChannel);
+    }
 
     // ── Compact 模式（群聊 Tab）：用 CompactGroupItem 函数组件（支持拖拽） ──
     if (compact) {
@@ -469,6 +700,11 @@ export default class ConversationList extends Component<
           selected={selected}
           avatarKey={avatarKey}
           hasThreads={hasThreads}
+          threadsExpanded={
+            hasThreads
+              ? this._isThreadExpanded(conversationWrap.channel.channelID)
+              : false
+          }
           threadUnread={threadUnread}
           onClick={() => {
             if (this.props.onClick) this.props.onClick(conversationWrap);
@@ -499,13 +735,49 @@ export default class ConversationList extends Component<
     }
 
     const { select, onClick } = this.props;
+    const { locatingUnreadKey, locatingUnreadPulse } = this.state;
     const typing = TypingManager.shared.getTyping(conversationWrap.channel);
     const selected = select && select.isEqual(conversationWrap.channel);
-    const isThread =
-      conversationWrap.channel.channelType === ChannelTypeCommunityTopic;
+    // compact mode nests collapsed threads under the parent group, so the
+    // parent item receives the collapsed unread count. Recent mode renders
+    // threads as independent rows and must keep parent unread independent.
+    const totalUnread = conversationWrap.unread + threadUnread;
+    const hasMention = conversationWrap.isMentionMe && totalUnread > 0;
+    const visibleSimpleReminders = conversationWrap.simpleReminders?.filter(
+      (r) => !r.done && r.reminderType !== ReminderType.ReminderTypeMentionMe
+    );
+    const effectiveMute = isEffectivelyMuted({
+      isThread,
+      channelInfo,
+      parentChannelInfo,
+    });
+    // 非 compact 下子区按 design v3.1 走扁平时间序，左侧用父频道头像，
+    // 不再套 .wk-conversationlist-item-thread（避免缩进 + 树形连接线视觉嵌套）。
+    const avatarChannel = isThread && parentChannel ? parentChannel : conversationWrap.channel;
+    const isDM = avatarChannel.channelType === ChannelTypePerson;
+    // 1v1 未读高优先级：与群聊「@我」共用同一深红视觉信号（注意力分级——「有人在等我响应」），
+    // 触发条件在 1v1 退化为「未读 > 0」。三个前提对齐 Android / iOS：
+    //  1）unread 已是 Space 过滤后的口径（见 Model.unread：Person 频道用 spaceUnread、
+    //     系统 Bot 跨 Space 清零），跨 Space 污染不会误点亮；
+    //  2）排除免打扰 1v1（effectiveMute）——不是「有人在等回复」；
+    //  3）语义与群聊 mention 区分，用独立文案 [未读]/[unread]，不复用 [@我]/[@me]。
+    // 群聊 mention（hasMention）优先，命中时不再叠加 1v1 标记。
+    const is1v1Priority =
+      isDM && !hasMention && !effectiveMute && totalUnread > 0;
+    const unreadNudgeClass =
+      locatingUnreadKey === conversationWrap.channel.getChannelKey()
+        ? locatingUnreadPulse % 2 === 0
+          ? "wk-conv-unread-num--nudge-a"
+          : "wk-conv-unread-num--nudge-b"
+        : undefined;
     return (
       <div
+        ref={(node) => this.setConversationItemRef(conversationWrap, node)}
         key={conversationWrap.channel.getChannelKey()}
+        // 子区行不发 channel_opened:改由 Pages/Chat componentDidMount 命令式发 subchannel_opened。
+        // 两事件按手势划分、不重叠。
+        data-track={isThread ? undefined : "channel_opened"}
+        data-object-id={conversationWrap.channel.channelID}
         onClick={() => {
           if (onClick) {
             onClick(conversationWrap);
@@ -515,38 +787,41 @@ export default class ConversationList extends Component<
           "wk-conversationlist-item",
           selected ? "wk-conversationlist-item-selected" : undefined,
           channelInfo?.top ? "wk-conversationlist-item-top" : undefined,
-          conversationWrap.unread > 0
+          totalUnread > 0
             ? "wk-conversationlist-item-unread"
             : undefined,
-          isThread ? "wk-conversationlist-item-thread" : undefined
+          effectiveMute ? "wk-conversationlist-item-muted" : undefined,
+          isDM ? "wk-conversationlist-item-dm" : undefined
         )}
         onContextMenu={(e) => {
           this._handleContextMenu(conversationWrap, e);
         }}
       >
         <div className="wk-conversationlist-item-content">
-          {/* 子区不显示左侧图标区域 */}
-          {!isThread && (
-            <div className="wk-conversationlist-item-left">
-              <div className="wk-conversationlist-item-avatar-box">
-                <WKAvatar
-                  channel={conversationWrap.channel}
-                  key={avatarKey}
-                ></WKAvatar>
-                {hasThreads && (
-                  <div className="wk-conv-group-hash-badge">
-                    <GroupIcon size={10} />
-                  </div>
-                )}
-                {channelInfo && this.needShowOnlineStatus(channelInfo) ? (
-                  <OnlineStatusBadge
-                    tip={this.getOnlineTip(channelInfo)}
-                  ></OnlineStatusBadge>
-                ) : undefined}
-              </div>
+          <div className="wk-conversationlist-item-left">
+            <div className="wk-conversationlist-item-avatar-box">
+              <WKAvatar
+                channel={avatarChannel}
+                key={avatarKey}
+              ></WKAvatar>
+              {hasThreads && (
+                <div className="wk-conv-group-hash-badge">
+                  <GroupIcon size={10} />
+                </div>
+              )}
+              {!isThread && channelInfo && this.needShowOnlineStatus(channelInfo) ? (
+                <OnlineStatusBadge
+                  tip={this.getOnlineTip(channelInfo)}
+                ></OnlineStatusBadge>
+              ) : undefined}
             </div>
-          )}
+          </div>
           <div className="wk-conversationlist-item-right">
+            {isThread && parentChannelInfo?.orgData?.displayName && (
+              <div className="wk-conv-breadcrumb">
+                {parentChannelInfo.orgData.displayName}
+              </div>
+            )}
             <div className="wk-conversationlist-item-right-first-line">
               <div className="wk-conversationlist-item-name">
                 <h3>
@@ -566,7 +841,7 @@ export default class ConversationList extends Component<
                       color="purple"
                       className="wk-conversationlist-item-external-tag"
                     >
-                      外部
+                      {t("base.conversationList.external")}
                     </Tag>
                   )}
                 {channelInfo?.orgData?.robot === 1 && <AiBadge />}
@@ -579,32 +854,20 @@ export default class ConversationList extends Component<
                     src={channelInfo?.orgData.identityIcon}
                   ></img>
                 ) : undefined}
-                <div
-                  style={{
-                    width: "14px",
-                    height: "14px",
-                    display: "flex",
-                    alignItems: "center",
-                  }}
-                >
-                  {channelInfo?.mute && (
+                {effectiveMute && (
+                  <span className="wk-conv-mute-icon" aria-label={t("base.conversationList.doNotDisturb")}>
                     <svg
-                      className="icon"
                       viewBox="0 0 1131 1024"
-                      version="1.1"
-                      xmlns="http://www.w3.org/2000/svg"
-                      p-id="2755"
-                      width="14"
-                      height="14"
+                      width="11"
+                      height="11"
                     >
                       <path
                         d="M914.688 892.736L64 236.224l38.784-50.88L271.36 315.648a300.288 300.288 0 0 1 246.976-157.952v-33.28c0-16.64 13.504-30.08 30.08-30.08h2.304c16.576 0 30.08 13.44 30.08 30.08v32.96a299.776 299.776 0 0 1 284.928 299.136v294.272l45.504 58.624 48.768 37.696-45.312 45.632zM234.624 480.384l506.88 391.232H140.416l94.272-121.536-0.064-269.696z"
-                        fill="#bfbfbf"
-                        p-id="2756"
+                        fill="currentColor"
                       ></path>
                     </svg>
-                  )}
-                </div>
+                  </span>
+                )}
                 <div className="wk-conversationlist-item-time">
                   <span>
                     {getTimeStringAutoShort2(
@@ -626,40 +889,49 @@ export default class ConversationList extends Component<
                         : "none",
                     }}
                   >
-                    [草稿]
+                    {t("base.conversationList.draft")}
                   </label>
                 ) : undefined}
-                {conversationWrap.simpleReminders &&
+                {visibleSimpleReminders &&
                 !typing &&
-                conversationWrap.simpleReminders.length > 0
-                  ? conversationWrap.simpleReminders
-                      .filter((r) => r.done === false)
-                      .map((r) => {
-                        return (
-                          <label key={r.reminderID} className="wk-reminder">
-                            {r.text}
-                          </label>
-                        );
-                      })
+                visibleSimpleReminders.length > 0
+                  ? visibleSimpleReminders.map((r) => {
+                      return (
+                        <label key={r.reminderID} className="wk-reminder">
+                          {r.text}
+                        </label>
+                      );
+                    })
                   : undefined}
                 {typing
                   ? this._getTypingUI(conversationWrap)
                   : this.lastContent(conversationWrap)}
               </div>
-              <div className="wk-conversationlist-item-reddot">
-                {conversationWrap.unread > 0 && !channelInfo?.mute ? (
-                  <span className="wk-conv-compact-badges">
-                    <span className="wk-conv-compact-badge">
-                      {conversationWrap.unread > 99
-                        ? "99+"
-                        : conversationWrap.unread}
+              {(hasMention || is1v1Priority || totalUnread > 0) && (
+                <span className="wk-conversationlist-item-indicators">
+                  {hasMention && (
+                    <span className="wk-mention" aria-hidden="true">
+                      {t("base.conversationList.mentionMarker")}
                     </span>
-                    {conversationWrap.isMentionMe && (
-                      <span className="wk-mention-badge">@我</span>
-                    )}
-                  </span>
-                ) : undefined}
-              </div>
+                  )}
+                  {is1v1Priority && (
+                    <span className="wk-mention" aria-hidden="true">
+                      {t("base.conversationList.unreadPriorityMarker")}
+                    </span>
+                  )}
+                  {totalUnread > 0 && (
+                    <span
+                      className={classNames(
+                        "wk-conv-unread-num",
+                        effectiveMute ? "wk-conv-unread-num--muted" : undefined,
+                        unreadNudgeClass
+                      )}
+                    >
+                      {totalUnread > 99 ? "99+" : totalUnread}
+                    </span>
+                  )}
+                </span>
+              )}
             </div>
           </div>
         </div>
@@ -668,7 +940,15 @@ export default class ConversationList extends Component<
   }
 
   onTop(channelInfo: ChannelInfo) {
-    ChannelSettingManager.shared.top(!channelInfo.top, channelInfo.channel);
+    // 置顶埋点(conversation_pinned)已收口到 topChannelSetting 内部,这里不再本地派生 willPin
+    // 供埋点使用;仅按当前状态取反传入(#1452 review P2-7)。
+    topChannelSetting({
+      channel: channelInfo.channel,
+      top: !channelInfo.top,
+    })
+      .catch((err) => {
+        Toast.error(err?.msg);
+      });
   }
 
   onMute(channelInfo: ChannelInfo) {
@@ -676,17 +956,54 @@ export default class ConversationList extends Component<
   }
 
   onMuteWithValue(value: boolean, channelInfo: ChannelInfo) {
-    ChannelSettingManager.shared.mute(value, channelInfo.channel)
+    muteChannelSetting({
+      channel: channelInfo.channel,
+      mute: value,
+    })
       .then(() => {
         // 直接重拉（不删缓存），新数据覆盖旧缓存，避免删除期间出现 loading 骨架
-        WKSDK.shared().channelManager.fetchChannelInfo(channelInfo.channel)
+        fetchImChannelInfo(WKSDK.shared(), channelInfo.channel)
           .then(() => this.setState({}))
       })
+      .catch((err) => {
+        Toast.error(err?.msg);
+      });
   }
 
-  onCloseChat(channel: Channel) {
-    // 关闭聊天
-    WKApp.conversationProvider.deleteConversation(channel);
+  onHideConversation(channel: Channel) {
+    void hideConversation(channel, {
+      // “不显示”同时结束旧未读；先清未读再删除，避免清未读写操作把已删除会话建回最近页。
+      clearUnread: (target) =>
+        WKApp.conversationProvider.markConversationUnread(target, 0),
+      deleteConversation: (target) =>
+        WKApp.conversationProvider.deleteConversation(target),
+      // 仅移出最近会话列表，不改 openChannel，右侧当前内容保持可见。
+      // 后续新消息由 SDK 重新创建 conversation，恢复到最近列表。
+      removeLocalConversation: (target) =>
+        WKSDK.shared().conversationManager.removeConversation(target),
+      updateFollowingUnread: (target) => {
+        WKApp.mittBus.emit("sidebar-unread-updated" as any, {
+          channelId: target.channelID,
+          channelType: target.channelType,
+          unread: 0,
+        });
+      },
+      publishUnreadCleared: (target) => {
+        getBrowserUnreadConversationSync().publish({
+          accountId: WKApp.loginInfo.uid,
+          spaceId: WKApp.shared.currentSpaceId || "",
+          channelId: target.channelID,
+          channelType: target.channelType,
+          unread: 0,
+        });
+      },
+      reloadFollowingSidebar: () => {
+        WKApp.mittBus.emit("sidebar-reload" as any);
+      },
+    })
+      .catch((err) => {
+        Toast.error(err?.msg || t("base.conversationList.error.hideFailed"));
+      });
   }
 
   async onClearMessages(channel: Channel) {
@@ -722,8 +1039,35 @@ export default class ConversationList extends Component<
     return true;
   }
 
-  // 将子区放在父群组后面，默认全部收起（MAX_VISIBLE_THREADS=0），展开后显示全部
-  private groupThreadsWithParent(convs: ConversationWrap[]): {
+  // 收集每个父群组下的子区列表（不重排），compact 模式下基于此再做嵌套；
+  // 非 compact（最近 tab）只用它给父群组打 hash badge / 算菜单展开态。
+  private buildThreadsByParent(
+    convs: ConversationWrap[]
+  ): Map<string, ConversationWrap[]> {
+    const threadsByParent = new Map<string, ConversationWrap[]>();
+    for (const conv of convs) {
+      if (conv.channel.channelType === ChannelTypeCommunityTopic) {
+        const parentGroupNo =
+          conv.channelInfo?.orgData?.parentGroupNo ||
+          parseThreadChannelId(conv.channel.channelID)?.groupNo;
+        if (parentGroupNo) {
+          const list = threadsByParent.get(parentGroupNo) || [];
+          list.push(conv);
+          threadsByParent.set(parentGroupNo, list);
+        }
+      }
+    }
+    return threadsByParent;
+  }
+
+  // 将子区放在父群组后面。maxVisibleThreads 控制默认可见数：
+  // - 0 = 全部收起（最近 tab / 群聊 tab）
+  // - Infinity = 全部展开（关注 tab，PR #208 行为）
+  private groupThreadsWithParent(
+    convs: ConversationWrap[],
+    maxVisibleThreads: number = 0,
+    keepOrphanThreads: boolean = false,
+  ): {
     items: Array<
       | ConversationWrap
       | {
@@ -735,7 +1079,7 @@ export default class ConversationList extends Component<
     >;
     threadsByParent: Map<string, ConversationWrap[]>;
   } {
-    const MAX_VISIBLE_THREADS = 0;
+    const MAX_VISIBLE_THREADS = maxVisibleThreads;
 
     // 分离群组和子区
     const threads: ConversationWrap[] = [];
@@ -771,9 +1115,26 @@ export default class ConversationList extends Component<
     > = [];
     const usedThreads = new Set<string>();
 
+    // 预计算列表中存在的群组 ID（用于判断子区是否孤儿）
+    const groupIdsInList = new Set(
+      convs
+        .filter((c) => c.channel.channelType === ChannelTypeGroup)
+        .map((c) => c.channel.channelID)
+    );
+
     for (const conv of convs) {
       if (conv.channel.channelType === ChannelTypeCommunityTopic) {
-        // 子区会在父群组后面添加，这里跳过
+        // 子区：父群在列表中 → 跳过（在父群后面统一添加）；
+        // 孤儿子区（父群不在列表）+ 关注 tab → 在原位保留为独立条目（保持 follow_sort 顺序）
+        if (usedThreads.has(conv.channel.channelID)) continue;
+        const parentGroupNo =
+          conv.channelInfo?.orgData?.parentGroupNo ||
+          parseThreadChannelId(conv.channel.channelID)?.groupNo;
+        const parentInList = !!parentGroupNo && groupIdsInList.has(parentGroupNo);
+        if (!parentInList && keepOrphanThreads) {
+          result.push(conv);
+          usedThreads.add(conv.channel.channelID);
+        }
         continue;
       }
       result.push(conv);
@@ -811,24 +1172,16 @@ export default class ConversationList extends Component<
       }
     }
 
-    // 收集列表中存在的群组 ID
-    const groupIdsInList = new Set(
-      convs
-        .filter((c) => c.channel.channelType === ChannelTypeGroup)
-        .map((c) => c.channel.channelID)
-    );
-
-    // 孤儿子区：父群组在列表中但未被分组的先显示，父群组不在列表中的隐藏
+    // 父群在列表但子区未被分组的兜底（理论上不应出现）
     for (const thread of threads) {
       if (!usedThreads.has(thread.channel.channelID)) {
         const parentGroupNo =
           thread.channelInfo?.orgData?.parentGroupNo ||
           parseThreadChannelId(thread.channel.channelID)?.groupNo;
         if (parentGroupNo && groupIdsInList.has(parentGroupNo)) {
-          // 父群组在列表中但子区未被分组（理论上不应该出现）
           result.push(thread);
         }
-        // 父群组不在列表中（已退出等）：隐藏
+        // 孤儿子区已在主循环原位处理；其他 tab 父群不在列表 → 隐藏
       }
     }
 
@@ -836,15 +1189,37 @@ export default class ConversationList extends Component<
   }
 
   render() {
-    const { conversations, select } = this.props;
+    const { conversations, select, compact } = this.props;
     const { selectConversationWrap } = this.state;
 
     const filtered =
       conversations?.filter((c) => this.filterConversation(c)) ?? [];
 
-    // 先对整个列表分组子区，再分离置顶/最近（避免置顶群组和子区断开）
-    const { items: grouped, threadsByParent } =
-      this.groupThreadsWithParent(filtered);
+    // compact（关注 tab）：把子区按父群嵌套；
+    // 非 compact（最近 tab，design v3.1）：扁平按时间序，子区作为独立条目自带父频道面包屑。
+    type GroupedItem =
+      | ConversationWrap
+      | {
+          type: "thread-overflow";
+          parentGroupId: string;
+          count: number;
+          unreadCount: number;
+        };
+    let grouped: GroupedItem[];
+    let threadsByParent: Map<string, ConversationWrap[]>;
+    if (compact) {
+      // 关注 tab：默认展开子区 + 保留孤儿子区（PR #208）
+      const r = this.groupThreadsWithParent(
+        filtered,
+        0,
+        this.props.disablePinSplit ?? false,
+      );
+      grouped = r.items;
+      threadsByParent = r.threadsByParent;
+    } else {
+      grouped = filtered;
+      threadsByParent = this.buildThreadsByParent(filtered);
+    }
     const groupedPinned = grouped.filter((item) => {
       if ("type" in item) return false;
       return (item as ConversationWrap).channelInfo?.top;
@@ -862,6 +1237,10 @@ export default class ConversationList extends Component<
     );
     const finalPinned: typeof grouped = [];
     const finalRecent: typeof grouped = [];
+    if (this.props.disablePinSplit) {
+      // 关注 tab 顺序由 sidebar 的 follow_sort 决定，不按 pin 状态拆段
+      finalRecent.push(...grouped);
+    } else {
     for (const item of grouped) {
       if ("type" in item) {
         // thread-overflow 跟随父群组
@@ -874,8 +1253,8 @@ export default class ConversationList extends Component<
         const conv = item as ConversationWrap;
         if (conv.channelInfo?.top) {
           finalPinned.push(item);
-        } else if (conv.channel.channelType === ChannelTypeCommunityTopic) {
-          // 子区跟随父群组
+        } else if (compact && conv.channel.channelType === ChannelTypeCommunityTopic) {
+          // compact 嵌套语义：子区跟随父群组
           const parentGroupNo =
             conv.channelInfo?.orgData?.parentGroupNo ||
             parseThreadChannelId(conv.channel.channelID)?.groupNo;
@@ -889,9 +1268,13 @@ export default class ConversationList extends Component<
         }
       }
     }
+    }
 
-    const { onThreadOverflowClick, compact } = this.props;
+    const { onThreadOverflowClick } = this.props;
     const { expandedGroupIds } = this.state;
+    this.lastRenderableItems = [...finalPinned, ...finalRecent].filter(
+      (item): item is ConversationWrap => !("type" in item)
+    );
 
     const renderItem = (
       item:
@@ -905,7 +1288,7 @@ export default class ConversationList extends Component<
     ) => {
       if ("type" in item && item.type === "thread-overflow") {
         // 展开/收起由双击群组行触发，不显示「+N 个子区」控件
-        const isExpanded = expandedGroupIds.has(item.parentGroupId);
+        const isExpanded = this._isThreadExpanded(item.parentGroupId);
         if (!isExpanded) return null;
         const extraThreads = threadsByParent.get(item.parentGroupId) ?? [];
         return (
@@ -944,25 +1327,20 @@ export default class ConversationList extends Component<
         threadsByParent.has(conv.channel.channelID);
       const threadUnread = (() => {
         if (!hasThreads) return 0;
-        const isExpanded = expandedGroupIds.has(conv.channel.channelID);
-        if (isExpanded) return 0;
+        if (this._isThreadExpanded(conv.channel.channelID)) return 0;
         const threads = threadsByParent.get(conv.channel.channelID) ?? [];
-        // 子区有独立免打扰设置，汇总时过滤掉已开启免打扰的子区未读
-        return threads.reduce((sum, t) => {
-          // 对齐 effectiveMute 逻辑：显式设置看自身，未设置继承父群
-          const rawMute = (t.channelInfo?.orgData?.thread as any)?.mute as number | null | undefined
-          const parentInfo = WKSDK.shared().channelManager.getChannelInfo(
-            new Channel(conv.channel.channelID, ChannelTypeGroup)
-          )
-          const tMute = rawMute != null ? rawMute === 1 : !!(parentInfo?.mute)
-          return sum + (tMute ? 0 : t.unread)
-        }, 0);
+        const parentInfo = getImChannelInfo(
+          WKSDK.shared(),
+          new Channel(conv.channel.channelID, ChannelTypeGroup)
+        );
+        return collapsedThreadUnread(threads, !!parentInfo?.mute, !!compact);
       })();
       return this.conversationItem(conv, hasThreads, threadUnread);
     };
 
     return (
       <div
+        ref={this.listRef}
         id="wk-conversationlist"
         className="wk-conversationlist"
         onScroll={this._handleScroll}
@@ -981,153 +1359,116 @@ export default class ConversationList extends Component<
             const extraMenus = this.props.extraContextMenus
               ? this.props.extraContextMenus(conv)
               : [];
+            const trailingMenus = this.props.trailingContextMenus
+              ? this.props.trailingContextMenus(conv)
+              : [];
 
-            const menus: any[] = [];
+            const menus: ContextMenusData[] = [];
 
-            // 1. 标为已读（有未读时显示）
-            if (conv && conv.unread > 0) {
+            // 1. 置顶 / 取消置顶（最近页个人、群聊和活跃子区）
+            if (!this.props.hidePin) {
               menus.push({
-                title: "标为已读",
-                icon: "M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z",
-                onClick: () => {
-                  if (!channel) return;
-                  WKApp.apiClient.put("conversation/clearUnread", {
-                    channel_id: channel.channelID,
-                    channel_type: channel.channelType,
-                    unread: 0,
-                  });
-                },
-              });
-            }
-
-            // 2. 关闭聊天窗口
-            menus.push({
-              title: "关闭聊天窗口",
-              icon: "M18 6 6 18 M6 6l12 12",
-              onClick: () => {
-                if (!channel) return;
-                Modal.confirm({
-                  title: "确认关闭",
-                  content: "确定要关闭此聊天窗口吗？",
-                  okText: "确定",
-                  cancelText: "取消",
-                  onOk: () => {
-                    this.onCloseChat(channel);
-                  },
-                });
-              },
-            });
-
-            // 3. 额外菜单项（移出分组 / 移到分组等，由上层通过 extraContextMenus 传入）
-            if (extraMenus.length > 0) {
-              menus.push(...extraMenus);
-            }
-
-            // 4. 置顶 / 取消置顶（子区不显示）
-            if (channel?.channelType !== ChannelTypeCommunityTopic) {
-              menus.push({
-                title: channelInfo?.top ? "取消置顶" : "置顶聊天",
-                icon: channelInfo?.top
-                  ? "M12 17v5 M15 9.34V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H7.89 M2 2l20 20 M9 9v1.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h11"
-                  : "M12 17v5 M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z",
+                title: channelInfo?.top
+                  ? t("base.conversationList.context.unpin")
+                  : t("base.conversationList.context.pin"),
+                icon: channelInfo?.top ? PinOff : Pin,
                 onClick: () => {
                   if (channelInfo) this.onTop(channelInfo);
                 },
               });
             }
 
-            // 5. 免打扰 / 关闭免打扰
-            // 菜单标题跟 effectiveMute（用户看到的静音状态）保持一致：
-            // 子区：有显式设置看自身；未设置继承父群
-            // 群组：只看自身
+            // 2. 清除未读（有未读时显示；本期不展示“标为未读”）
+            if (conv && conv.unread > 0) {
+              menus.push({
+                title: t("base.conversationList.context.markAsRead"),
+                icon: BrushCleaning,
+                onClick: () => {
+                  if (!channel) return;
+                  void WKApp.apiClient
+                    .put("conversation/clearUnread", {
+                      channel_id: channel.channelID,
+                      channel_type: channel.channelType,
+                      unread: 0,
+                    })
+                    .then(() => {
+                      conv.conversation.unread = 0;
+                      if (
+                        WKApp.shared.currentSpaceId &&
+                        channel.channelType === ChannelTypePerson &&
+                        conv.conversation.extra?.spaceUnread !== undefined
+                      ) {
+                        conv.conversation.extra.spaceUnread = 0;
+                      }
+                      WKSDK.shared().conversationManager.notifyConversationListeners(
+                        conv.conversation,
+                        ConversationAction.update
+                      );
+                      WKApp.mittBus.emit("sidebar-unread-updated" as any, {
+                        channelId: channel.channelID,
+                        channelType: channel.channelType,
+                        unread: 0,
+                      });
+                      getBrowserUnreadConversationSync().publish({
+                        accountId: WKApp.loginInfo.uid,
+                        spaceId: WKApp.shared.currentSpaceId || "",
+                        channelId: channel.channelID,
+                        channelType: channel.channelType,
+                        unread: 0,
+                      });
+                      WKApp.mittBus.emit("sidebar-reload" as any);
+                    })
+                    .catch((err) => {
+                      Toast.error(
+                        err?.msg || t("base.conversationList.error.clearUnreadFailed")
+                      );
+                    });
+                },
+              });
+            }
+
+            // 3. 添加到关注 / 取消关注
+            if (extraMenus.length > 0) {
+              menus.push(...extraMenus);
+            }
+
+            // 4. 设为免打扰 / 取消免打扰
+            // 菜单标题与列表、标题、通知使用同一份有效静音状态。
             const menuIsThread = channel?.channelType === ChannelTypeCommunityTopic
             const menuParentGroupNo = menuIsThread
-              ? (channelInfo?.orgData?.parentGroupNo as string | undefined)
+              ? (channelInfo?.orgData?.parentGroupNo as string | undefined) ||
+                parseThreadChannelId(channel?.channelID || "")?.groupNo
               : undefined
             const menuParentChannelInfo = menuParentGroupNo
-              ? WKSDK.shared().channelManager.getChannelInfo(new Channel(menuParentGroupNo, ChannelTypeGroup))
+              ? getImChannelInfo(WKSDK.shared(), new Channel(menuParentGroupNo, ChannelTypeGroup))
               : undefined
-            const menuRawMute = menuIsThread
-              ? (channelInfo?.orgData?.thread as any)?.mute as number | null | undefined
-              : undefined
-            const menuEffectiveMute = menuIsThread
-              ? menuRawMute != null ? menuRawMute === 1 : !!(menuParentChannelInfo?.mute)
-              : !!(channelInfo?.mute)
+            const menuEffectiveMute = isEffectivelyMuted({
+              isThread: menuIsThread,
+              channelInfo,
+              parentChannelInfo: menuParentChannelInfo,
+            })
             menus.push({
-              title: menuEffectiveMute ? "关闭免打扰" : "开启免打扰",
-              icon: "M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9 M13.73 21a2 2 0 0 1-3.46 0",
+              title: menuEffectiveMute
+                ? t("base.conversationList.context.unmute")
+                : t("base.conversationList.context.mute"),
+              icon: menuEffectiveMute ? BellOff : Bell,
               onClick: () => {
                 if (channelInfo) this.onMuteWithValue(!menuEffectiveMute, channelInfo);
               },
             });
 
-            // 6. 展开/收起子区（compact 模式下、群组且有子区时显示）
-            if (
-              compact &&
-              channel &&
-              channel.channelType === ChannelTypeGroup &&
-              threadsByParent.has(channel.channelID)
-            ) {
-              const isExpanded = expandedGroupIds.has(channel.channelID);
-              menus.push({
-                title: isExpanded ? "收起子区" : "展开子区",
-                icon: isExpanded ? "M19 9l-7 7-7-7" : "M5 15l7-7 7 7",
-                onClick: () => {
-                  this._toggleGroupExpand(channel.channelID);
-                },
-              });
+            // 独立分组：关注页个人/群聊的“移动到分组”，以及最近页常驻的“不显示该会话”。
+            if (trailingMenus.length > 0 || !this.props.hideCloseChat) {
+              menus.push({ separator: true } as ContextMenusData);
+              menus.push(...trailingMenus);
             }
-
-            // 7. 分隔线
-            menus.push({ separator: true } as ContextMenusData);
-
-            // 8. 清空聊天记录 / 关闭并清空
-            // 子区：直接展开到顶层
-            // 群组：保留在「更多」子菜单里
-            const clearItems = [
-              {
-                title: "清空聊天记录",
-                danger: true,
-                onClick: () => {
-                  if (!channel) return;
-                  Modal.confirm({
-                    title: "确认清空",
-                    content: "确定要清空所有聊天记录吗？此操作不可撤销。",
-                    okText: "确定",
-                    cancelText: "取消",
-                    onOk: () => {
-                      this.onClearMessages(channel);
-                    },
-                  });
-                },
-              },
-              {
-                title: "关闭窗口并清空记录",
-                danger: true,
-                onClick: () => {
-                  if (!channel) return;
-                  Modal.confirm({
-                    title: "确认关闭并清空",
-                    content:
-                      "确定要关闭窗口并清空所有聊天记录吗？此操作不可撤销。",
-                    okText: "确定",
-                    cancelText: "取消",
-                    onOk: () => {
-                      this.onCloseChat(channel);
-                      this.onClearMessages(channel);
-                    },
-                  });
-                },
-              },
-            ];
-
-            if (channel?.channelType === ChannelTypeCommunityTopic) {
-              menus.push(...clearItems);
-            } else {
+            if (!this.props.hideCloseChat) {
               menus.push({
-                title: "更多",
-                icon: "M12 12m-1 0a1 1 0 1 0 2 0 1 1 0 1 0-2 0 M12 5m-1 0a1 1 0 1 0 2 0 1 1 0 1 0-2 0 M12 19m-1 0a1 1 0 1 0 2 0 1 1 0 1 0-2 0",
-                children: clearItems,
+                title: t("base.conversationList.context.hideChat"),
+                icon: EyeOff,
+                onClick: () => {
+                  if (channel) this.onHideConversation(channel);
+                },
               });
             }
 

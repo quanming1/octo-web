@@ -1,7 +1,8 @@
 import React, { Component } from "react";
-import { WKApp, toJoinApprovalStatus, computeAndSaveJoinSuccess } from "@octo/base";
+import { I18nContext, WKApp, apiFetchJson, computeAndSaveJoinSuccess, setSessionSid, t, toJoinApprovalStatus, Dap } from "@octo/base";
 import type { JoinSpaceStatus } from "@octo/base";
 import { Button, Spin, Toast } from "@douyinfe/semi-ui";
+import { buildPostLoginRedirectUrl } from "../../Layout/postLoginRedirect";
 import "./index.css";
 
 interface InviteLandingProps {
@@ -33,6 +34,9 @@ interface InviteLandingState {
 }
 
 export default class InviteLanding extends Component<InviteLandingProps, InviteLandingState> {
+    static contextType = I18nContext;
+    declare context: React.ContextType<typeof I18nContext>;
+
     state: InviteLandingState = {
         loading: true,
         joining: false,
@@ -68,22 +72,34 @@ export default class InviteLanding extends Component<InviteLandingProps, InviteL
 
     async loadInviteInfo() {
         try {
-            const resp = await fetch(`${WKApp.apiClient.config.apiURL}space/invite/${this.props.inviteCode}`);
-            const body = await resp.json().catch(() => ({} as any));
+            const body = await apiFetchJson<any>(`${WKApp.apiClient.config.apiURL}space/invite/${this.props.inviteCode}`);
             // dmworkim#1319: detail 入口可能返回 need_space
             // 状态（后端契约：{status: "need_space", msg: "..."}）。识别到时
             // 持久化邀请码并切到 need_space 分支，避免渲染入群/入 Space 按钮。
-            if (this.isNeedSpaceResponse(resp.status, body)) {
+            if (this.isNeedSpaceResponse(200, body)) {
                 this.enterNeedSpace();
-                return;
-            }
-            if (!resp.ok) {
-                this.setState({ loading: false, error: body?.msg || "邀请码无效" });
                 return;
             }
             this.setState({ loading: false, info: body });
         } catch (e) {
-            this.setState({ loading: false, error: "网络错误" });
+            const body = this.getApiErrorData(e);
+            const status = this.getApiErrorStatus(e);
+            if (this.isNeedSpaceResponse(status, body)) {
+                this.enterNeedSpace();
+                return;
+            }
+            const message = e instanceof Error ? e.message : "";
+            const hasBackendMessage = Boolean(
+                e && typeof e === "object" && typeof (e as { backendMessage?: unknown }).backendMessage === "string"
+            );
+            this.setState({
+                loading: false,
+                error: hasBackendMessage && message
+                    ? message
+                    : status
+                        ? t("app.invite.invalidCode")
+                        : t("app.invite.networkError"),
+            });
         }
     }
 
@@ -98,6 +114,19 @@ export default class InviteLanding extends Component<InviteLandingProps, InviteL
      */
     private isNeedSpaceResponse(_status: number, body: any): boolean {
         return !!body && body.status === "need_space";
+    }
+
+    private getApiErrorData(error: unknown): any {
+        return error && typeof error === "object" && "data" in error
+            ? (error as { data?: unknown }).data
+            : undefined;
+    }
+
+    private getApiErrorStatus(error: unknown): number {
+        if (!error || typeof error !== "object") return 0;
+        const status = (error as { httpStatus?: unknown; status?: unknown }).httpStatus
+            ?? (error as { status?: unknown }).status;
+        return typeof status === "number" ? status : 0;
     }
 
     /**
@@ -128,9 +157,9 @@ export default class InviteLanding extends Component<InviteLandingProps, InviteL
         return (
             m.includes("unauthorized") ||
             m.includes("token") ||
-            msg.includes("登录") ||
-            msg.includes("未授权") ||
-            msg.includes("凭证")
+            msg.includes(t("app.invite.serverTerms.login", { locale: "zh-CN" })) ||
+            msg.includes(t("app.invite.serverTerms.unauthorized", { locale: "zh-CN" })) ||
+            msg.includes(t("app.invite.serverTerms.credential", { locale: "zh-CN" }))
         );
     }
 
@@ -197,7 +226,7 @@ export default class InviteLanding extends Component<InviteLandingProps, InviteL
             const token = this.findToken();
             // 无 token（可能 localStorage 被清 / 跨浏览器访问）：直接走登录引导，避免 API 401
             if (!token) {
-                this.redirectToLoginWithPendingInvite("请先登录后再加入");
+                this.redirectToLoginWithPendingInvite(t("app.invite.needLoginBeforeJoin"));
                 return;
             }
             // dmwork-web#1065: 在调用 /space/join 前先记住用户「当前 Space」。
@@ -205,23 +234,17 @@ export default class InviteLanding extends Component<InviteLandingProps, InviteL
             // 必须由用户显式点 toast 里的「切换过去」才切。这里在改动前快照下来。
             const prevCurrentSpaceId = localStorage.getItem("currentSpaceId") || "";
             const apiUrl = WKApp.apiClient.config.apiURL?.replace(/\/+$/, '');
-            const resp = await fetch(`${apiUrl}/space/join`, {
+            const result = await apiFetchJson<any>(`${apiUrl}/space/join`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', token },
                 body: JSON.stringify({ invite_code: this.props.inviteCode }),
             });
-            const result = await resp.json().catch(() => ({} as any));
             // dmworkim#1319: authorize / scanjoin 亦可能
             // 同步返回 need_space。与 detail 分支走同一 enterNeedSpace()，
             // 保证 CTA + pendingInviteCode 自动重试语义一致。
-            if (this.isNeedSpaceResponse(resp.status, result)) {
+            if (this.isNeedSpaceResponse(200, result)) {
                 this.enterNeedSpace();
                 return;
-            }
-            if (!resp.ok) {
-                const error: any = new Error(result?.msg || "加入失败");
-                error.status = resp.status;
-                throw error;
             }
             const status: JoinSpaceStatus | undefined = result?.status;
 
@@ -236,6 +259,9 @@ export default class InviteLanding extends Component<InviteLandingProps, InviteL
 
             const joinedSpaceId = result?.space_id || this.state.info?.space_id || "";
             const joinedSpaceName = this.state.info?.space_name || "";
+            // 十二审 🔴 P1-4:space_join_new 命令式,仅真加入时计(审批态 / need-space 已在上方 early-return)。
+            //   此为邀请落地页(登录前)直发 POST /space/join 的成功分支。
+            Dap.shared.track("space_join_new", {});
             // 统一经 computeAndSaveJoinSuccess 计算 crossSpace 并
             // 写 sessionStorage notice。Layout.onLogin 的 pendingInviteCode 分支也走
             // 同一 helper，保证两条路径的 toast 行为一致。
@@ -253,23 +279,41 @@ export default class InviteLanding extends Component<InviteLandingProps, InviteL
             if (!crossSpace && joinedSpaceId) {
                 localStorage.setItem('currentSpaceId', joinedSpaceId);
             }
-            // 跳转回主界面，带上正确的 sid
+            // 跳转回主界面（sid-clean 派：先把 sid 存到 SessionScope
+            // sessionStorage，跳转 URL 就不再挂 `?sid=` 了。RouteManager 的
+            // ensureSessionSid() + stripSessionSidFromUrl() 会兜底读取和清理。
+            // 之前 append `?sid=` 到地址栏是 sid-in-URL 派做法，跟 fork 主流
+            // Layout/index.tsx 的 sid-clean 实现相反 —— 由 PR#851 定为
+            // sid-clean 之后统一收敛到这一处。
             const sid = this.findSid();
+            if (sid) setSessionSid(sid);
             // 使用安全的 basePath，避免当 pathname 为 /api/ 时跳到后端 API 路径（#1006）
             const basePath = this.getAppBasePath();
-            window.location.href = `${window.location.origin}${basePath}/${sid ? `?sid=${sid}` : ''}`;
+            // file:// (Electron 桌面端) 下不能跳到 ${origin}${basePath}/（该路径不存在会白屏），
+            // 复用 buildPostLoginRedirectUrl 保留当前 index.html 路径、只改 query。
+            window.location.href = buildPostLoginRedirectUrl(
+                window.location.href,
+                window.location.origin,
+                basePath,
+                ""
+            );
         } catch (e: any) {
-            const msg = e?.message || "";
-            const status = e?.status || 0;
-            // session 过期 / 未授权 → 引导重新登录（携带 pendingInviteCode 登录后自动加群）
-            if (this.isUnauthorizedError(status, msg)) {
-                this.redirectToLoginWithPendingInvite("登录已过期，请重新登录后加入");
+            const body = this.getApiErrorData(e);
+            if (this.isNeedSpaceResponse(this.getApiErrorStatus(e), body)) {
+                this.enterNeedSpace();
                 return;
             }
-            if (msg.includes("已满") || msg.includes("SPACE_FULL")) {
-                Toast.error("空间已满，无法加入");
+            const msg = e?.message || "";
+            const status = this.getApiErrorStatus(e);
+            // session 过期 / 未授权 → 引导重新登录（携带 pendingInviteCode 登录后自动加群）
+            if (this.isUnauthorizedError(status, msg)) {
+                this.redirectToLoginWithPendingInvite(t("app.invite.sessionExpiredJoin"));
+                return;
+            }
+            if (msg.includes(t("app.invite.serverTerms.full", { locale: "zh-CN" })) || msg.includes("SPACE_FULL")) {
+                Toast.error(t("app.invite.spaceFullCannotJoin"));
             } else {
-                Toast.error(msg || "加入失败");
+                Toast.error(msg || t("app.invite.joinFailed"));
             }
             this.safeSetState({ joining: false });
         } finally {
@@ -285,7 +329,13 @@ export default class InviteLanding extends Component<InviteLandingProps, InviteL
         // 使用安全的 basePath，避免硬编码 /web 导致部署路径不匹配，
         // 同时剥离 /api 前缀防止登录页被错误托管在后端 API 路径下（#1006）
         const basePath = this.getAppBasePath();
-        window.location.href = `${window.location.origin}${basePath}/?invite=${encodeURIComponent(this.props.inviteCode)}&action=login`;
+        // file:// (Electron 桌面端) 下复用 buildPostLoginRedirectUrl 保留当前 index.html 路径、只改 query。
+        window.location.href = buildPostLoginRedirectUrl(
+            window.location.href,
+            window.location.origin,
+            basePath,
+            `?invite=${encodeURIComponent(this.props.inviteCode)}&action=login`
+        );
     }
 
     /**
@@ -313,6 +363,7 @@ export default class InviteLanding extends Component<InviteLandingProps, InviteL
 
     render() {
         const { loading, info, error, joining, needSpace } = this.state;
+        const { t } = this.context;
         const colors = ['#667eea', '#764ba2', '#f093fb', '#4facfe', '#43e97b', '#fa709a'];
         const isLoggedIn = WKApp.shared.isLogined();
 
@@ -339,15 +390,15 @@ export default class InviteLanding extends Component<InviteLandingProps, InviteL
                         <div className="invite-landing-icon" style={{ backgroundColor: colors[0] }}>
                             🏠
                         </div>
-                        <div className="invite-landing-name">请先加入一个 Space</div>
+                        <div className="invite-landing-name">{t("app.invite.needSpace.title")}</div>
                         <div className="invite-landing-hint">
-                            完成后将自动继续加入当前群聊
+                            {t("app.invite.needSpace.hint")}
                         </div>
                         <Button type="primary" size="large"
                             className="invite-landing-btn"
                             data-testid="invite-landing-need-space-cta"
                             onClick={() => this.handleGoJoinSpace()}>
-                            去输入邀请码
+                            {t("app.invite.needSpace.cta")}
                         </Button>
                     </div>
                 </div>
@@ -358,12 +409,12 @@ export default class InviteLanding extends Component<InviteLandingProps, InviteL
             return (
                 <div className="invite-landing">
                     <div className="invite-landing-card">
-                        <div className="invite-landing-error">❌ {error || "邀请码无效"}</div>
+                        <div className="invite-landing-error">❌ {error || t("app.invite.invalidCode")}</div>
                         <Button onClick={() => {
                             const url = new URL(window.location.href);
                             url.searchParams.delete("invite");
                             window.location.href = url.toString();
-                        }}>返回</Button>
+                        }}>{t("app.common.back")}</Button>
                     </div>
                 </div>
             );
@@ -378,9 +429,11 @@ export default class InviteLanding extends Component<InviteLandingProps, InviteL
                         {info.space_name.charAt(0)}
                     </div>
                     <div className="invite-landing-name">{info.space_name}</div>
-                    <div className="invite-landing-subtitle">邀请你加入</div>
+                    <div className="invite-landing-subtitle">{t("app.invite.inviteYouJoin")}</div>
                     <div className="invite-landing-members">
-                        {info.max_users > 0 ? `${info.member_count}/${info.max_users} 人` : `${info.member_count} 位成员`}
+                        {info.max_users > 0
+                            ? t("app.invite.memberCountWithLimit", { values: { count: info.member_count, max: info.max_users } })
+                            : t("app.invite.memberCount", { values: { count: info.member_count } })}
                     </div>
 
                     {isLoggedIn ? (
@@ -388,20 +441,22 @@ export default class InviteLanding extends Component<InviteLandingProps, InviteL
                             className="invite-landing-btn"
                             disabled={info.max_users > 0 && info.member_count >= info.max_users}
                             onClick={() => this.handleJoin()}>
-                            {info.max_users > 0 && info.member_count >= info.max_users ? "空间已满" : "加入 Space"}
+                            {info.max_users > 0 && info.member_count >= info.max_users
+                                ? t("app.invite.spaceFull")
+                                : t("app.invite.joinSpace")}
                         </Button>
                     ) : (
                         <>
                             {/* dmwork-web#1047: 未登录态必须展示明显的「登录后加入」CTA，
                                 避免用户只看到空白或 App 下载按钮而无处下一步。 */}
                             <div className="invite-landing-hint">
-                                登录或注册后即可加入该团队
+                                {t("app.invite.loginHint")}
                             </div>
                             <Button type="primary" size="large"
                                 className="invite-landing-btn"
                                 data-testid="invite-landing-login-cta"
                                 onClick={() => this.handleGoLogin()}>
-                                登录后加入
+                                {t("app.invite.loginAfterJoin")}
                             </Button>
                         </>
                     )}

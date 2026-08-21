@@ -1,0 +1,66 @@
+import { describe, expect, it } from "vitest";
+
+import { buildPostLoginRedirectUrl } from "../postLoginRedirect";
+import { buildShellDocumentUrl } from "../../../../../packages/dmworkbase/src/Service/ShellDocument";
+
+describe("buildPostLoginRedirectUrl", () => {
+  it("keeps Electron on the packaged index file after login", () => {
+    expect(
+      buildPostLoginRedirectUrl(
+        "file:///Applications/OCTO.app/Contents/Resources/app.asar/build/index.html?sid=old",
+        "null",
+        "/Applications/OCTO.app/Contents/Resources/app.asar/build",
+        "?doc=d_1"
+      )
+    ).toBe(
+      "file:///Applications/OCTO.app/Contents/Resources/app.asar/build/index.html?doc=d_1&sid=old"
+    );
+  });
+
+  it("preserves the callback sid when there is no post-login query", () => {
+    expect(
+      buildPostLoginRedirectUrl(
+        "file:///Applications/OCTO.app/Contents/Resources/app.asar/build/index.html?sid=callback",
+        "null",
+        "/Applications/OCTO.app/Contents/Resources/app.asar/build",
+        ""
+      )
+    ).toBe(
+      "file:///Applications/OCTO.app/Contents/Resources/app.asar/build/index.html?sid=callback"
+    );
+  });
+
+  it("keeps the existing web redirect behavior", () => {
+    expect(
+      buildPostLoginRedirectUrl(
+        "https://octo.example.com/login?sid=old",
+        "https://octo.example.com",
+        "",
+        "?doc=d_1"
+      )
+    ).toBe("https://octo.example.com/?doc=d_1");
+  });
+
+  it("returns to the shell document after a packaged route was pushed", () => {
+    expect(
+      buildShellDocumentUrl(
+        "file:///Applications/OCTO.app/Contents/Resources/app.asar/build/index.html?sid=old",
+        "file:///drive",
+        "?logout=1",
+      ),
+    ).toBe(
+      "file:///Applications/OCTO.app/Contents/Resources/app.asar/build/index.html?logout=1&sid=old",
+    );
+  });
+
+  it("strips one-time OIDC callback parameters from the shell anchor", () => {
+    expect(
+      buildShellDocumentUrl(
+        "file:///Applications/OCTO.app/Contents/Resources/app.asar/build/index.html?authcode=AC123&provider=acme-sso&token=BINDTOK&sid=w1&__octo_route=%2Foidc%2Fbind",
+        "file:///Applications/OCTO.app/Contents/Resources/app.asar/build/index.html",
+      ),
+    ).toBe(
+      "file:///Applications/OCTO.app/Contents/Resources/app.asar/build/index.html?sid=w1",
+    );
+  });
+});

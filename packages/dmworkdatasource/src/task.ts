@@ -94,8 +94,9 @@ export class MediaMessageUploadTask extends MessageTask {
     async getUploadCredentials(file: File, path: string): Promise<UploadCredentials | undefined> {
         const contentType = file.type || "application/octet-stream"
         const fileName = file.name || 'file'
+        const fileSize = file.size
         const result = await WKApp.apiClient.get(
-            `file/upload/credentials?path=${encodeURIComponent(path)}&type=chat&filename=${encodeURIComponent(fileName)}&contentType=${encodeURIComponent(contentType)}`
+            `file/upload/credentials?path=${encodeURIComponent(path)}&type=chat&filename=${encodeURIComponent(fileName)}&contentType=${encodeURIComponent(contentType)}&fileSize=${fileSize}`
         )
         if(result && result.uploadUrl && result.downloadUrl) {
             return result as UploadCredentials

@@ -1,22 +1,121 @@
 import React, { Component } from "react";
-import { WKApp, WKBase, Provider, ErrorBoundary } from "@octo/base"
+import { WKApp, WKBase, Provider, ErrorBoundary, t, Dap } from "@octo/base"
+import { isBindEntry } from "@octo/login"
 import { listen } from '@tauri-apps/api/event'
 import { MainPage } from "../Pages/Main";
 import SpaceGate from "../Components/SpaceGate";
 import { Notification as NotificationUI, Button } from '@douyinfe/semi-ui';
+import { IconInfoCircle } from '@douyinfe/semi-icons';
 import { checkUpdate, installUpdate, UpdateManifest } from '@tauri-apps/api/updater'
 import { relaunch } from '@tauri-apps/api/process'
 import { os } from "@tauri-apps/api";
-import { getSid, getQueryParam, computeAndSaveJoinSuccess } from "@octo/base";
+import { getQueryParam, computeAndSaveJoinSuccess, removeSidFromPath, setSessionSid } from "@octo/base";
 import type { JoinApprovalStatus } from "@octo/base";
 import { toJoinApprovalStatus } from "@octo/base";
 import InviteLanding from "../Components/InviteLanding";
 import JoinSpacePage from "../Components/JoinSpacePage";
 import JoinApprovalResult from "../Components/JoinApprovalResult";
+import { getEnterpriseStandaloneHandlers } from "virtual:octo-enterprise-modules";
+import { SummaryDetailPage, SummaryShareDetailPage } from "@dmwork/summary";
+import { adoptStoredSession, findSidForToken, clearSessionsWithToken } from "./recoverSession";
+import { buildPostLoginRedirectUrl } from "./postLoginRedirect";
+import {
+    getMailAuthorizationSessionStorage,
+    isMailAuthorizePath,
+    mailAuthorizeCode,
+    mailAuthorizeMailbox,
+    mailAuthorizeSpaceId,
+    MAIL_AUTHORIZATION_RESOLVED_EVENT,
+    MAIL_AUTHORIZE_PATH,
+    resolveMailAuthorizeSearch,
+} from "@octo/mail";
+import { consumeStandaloneReturn, persistStandaloneReturn, clearStandaloneReturn } from "./standaloneReturn";
 
 interface AppLayoutState {
     showJoinSpace: boolean;
     joinApproval?: { status: JoinApprovalStatus; inviteCode: string };
+}
+
+/**
+ * Recover an octo session for a clean deep-link that carries no `?sid=` in the URL.
+ *
+ * Both `/d/:docId` (standalone doc, #512) and `?invite=` links can be opened in a fresh tab where
+ * the URL has no `sid`, so the sid-keyed `WKApp.loginInfo.load()` reads nothing even when the user
+ * is signed in — their token lives under a `token{sid}` key in localStorage. Adopt the stored
+ * session (token + uid + name) so the deep-link's authenticated requests succeed instead of
+ * returning 401 for everyone. No-op when a token is already present or none is stored (a genuinely
+ * anonymous visitor). The scan itself lives in recoverSession.ts (pure + unit-tested).
+ *
+ * `persist` distinguishes the two callers (XIN-392 P1-2 / XIN-519 blocker 2):
+ *   - standalone (`persist: true`): recover a signed-in user's session on the sid-less cold load.
+ *     One stored bucket → adopt and persist it back to the empty-sid slot so the page's Back → /docs
+ *     full reload stays authenticated (XIN-390). Several buckets that all belong to the SAME identity
+ *     (same uid — one person signed in across e.g. two spaces, the real-device multi-space case) →
+ *     adopt the first IN MEMORY ONLY, so the link opens the doc instead of bouncing to login, without
+ *     pinning a multi-bucket pick into the cross-tab slot. Buckets spanning DIFFERENT identities stay
+ *     ambiguous → fall through to login (never guess a person). The doc's own space rides on `?sp`
+ *     (preflight addressing), not on bucket selection.
+ *   - invite (`persist: false`): adopts the first stored session IN MEMORY ONLY and never persists,
+ *     which is the invite branch's original pre-#512 behavior (it must not start persisting just
+ *     because both branches now share this helper).
+ */
+function recoverOctoSessionFromStorage(persist: boolean): void {
+    if (WKApp.loginInfo.token) return;
+    adoptStoredSession(WKApp.loginInfo, localStorage, { persist });
+}
+
+/**
+ * The standalone `/d/:docId` page reached a 401 while a token WAS loaded — the current session is
+ * expired (XIN-408). Clear that dead session and reload so the standalone branch below re-evaluates,
+ * finds no token, and falls through to the real login screen. The deep-link target was already
+ * stashed (persistStandaloneReturn) by the page, so the existing post-login bounce returns the user
+ * to the document after sign-in — no new return-path plumbing.
+ *
+ * Why clearing by token VALUE, not just `logout()`: `logout()` clears only the CURRENT `?sid=`
+ * bucket, but on a clean cold-load (no `?sid=`) the expired token was recovered from a `token{sid'}`
+ * bucket and mirrored into the empty-sid bucket, so it lives in two places. Clearing every bucket
+ * that holds this exact token (clearSessionsWithToken over both storages) tears down all copies, so
+ * the reload's recovery can't re-adopt it and loop. A DIFFERENT valid session has a different token
+ * and is left untouched (XIN-390/392: 只清当前过期 session，别误清有效 session).
+ */
+function clearExpiredStandaloneSessionAndReload(): void {
+    const expiredToken = WKApp.loginInfo.token || "";
+    // In-memory + current-sid bucket + cross-tab mirror (the sid-scoped part logout() handles).
+    WKApp.loginInfo.logout();
+    // Value-matched sweep for any remaining copies (the cold-load recover-then-persist case).
+    if (expiredToken && typeof window !== "undefined") {
+        clearSessionsWithToken(expiredToken, window.sessionStorage, window.localStorage);
+    }
+    if (typeof window !== "undefined") window.location.reload();
+}
+
+/** `/s/:taskNo` — summary taskNo is a single URL path segment, optional trailing slash. */
+const STANDALONE_SUMMARY_PATH = /^\/s\/([A-Za-z0-9_-]+)\/?$/;
+const STANDALONE_SUMMARY_SHARE_PATH = /^\/s\/share\/([A-Za-z0-9_-]+)\/?$/;
+
+export function parseStandaloneSummaryTaskNo(pathname: string): string | null {
+    if (typeof pathname !== "string") return null;
+    const m = STANDALONE_SUMMARY_PATH.exec(pathname);
+    return m ? m[1] : null;
+}
+
+// Only a well-formed single-segment `/s/<taskNo>` counts as standalone; `/s`,
+// `/s/`, and nested `/s/a/b` must fall through (else the render branch mounts
+// SummaryDetailPage with an undefined taskId).
+export function isStandaloneSummaryPath(pathname: string): boolean {
+    return parseStandaloneSummaryTaskNo(pathname) !== null;
+}
+
+export function parseStandaloneSummaryShareId(pathname: string): string | null {
+    if (typeof pathname !== "string") return null;
+    const match = STANDALONE_SUMMARY_SHARE_PATH.exec(pathname);
+    return match ? match[1] : null;
+}
+
+function applyStandaloneSummarySpaceFromQuery(): void {
+    const params = new URLSearchParams(window.location.search);
+    const spaceId = params.get("sp") || params.get("space") || "";
+    if (spaceId) WKApp.shared.currentSpaceId = spaceId;
 }
 
 export default class AppLayout extends Component<{}, AppLayoutState> {
@@ -26,8 +125,19 @@ export default class AppLayout extends Component<{}, AppLayoutState> {
     onNeedJoinSpace!: () => void
     onJoinApproval!: (status: JoinApprovalStatus, inviteCode: string) => void
     private _spaceChecked = false; // 冷启动 Space 检测只跑一次
+    private onMailAuthorizationResolved = () => clearStandaloneReturn();
 
     componentDidMount() {
+        window.addEventListener(
+            MAIL_AUTHORIZATION_RESOLVED_EVENT,
+            this.onMailAuthorizationResolved,
+        );
+        if (isMailAuthorizePath(window.location.pathname)) {
+            // Stash once for a possible expired-session round trip. Keeping this
+            // out of render prevents a later AppLayout state update from
+            // recreating a return target that the authorization page resolved.
+            persistStandaloneReturn();
+        }
         // Wave 2: 无 Space 时触发 JoinSpacePage 覆盖层
         this.onNeedJoinSpace = () => {
             this.setState({ showJoinSpace: true });
@@ -41,7 +151,10 @@ export default class AppLayout extends Component<{}, AppLayoutState> {
         WKApp.endpoints.addOnJoinApproval(this.onJoinApproval);
 
         // T5: 冷启动已登录检测 — 用户直接打开 App 恢复登录态时，检查是否有 Space
-        if (WKApp.shared.isLogined()) {
+        if (
+            WKApp.shared.isLogined() &&
+            !isMailAuthorizePath(window.location.pathname)
+        ) {
             this.checkSpaceOnColdStart();
         }
 
@@ -58,16 +171,73 @@ export default class AppLayout extends Component<{}, AppLayoutState> {
             const basePath = rawPath
                 .replace(/^\/api(?:\/v\d+)?(?=\/|$)/, '')
                 .replace(/\/+$/, '')
-            // 保留原始 sid（如果有），不随机生成新的
-            const existingSid = getQueryParam("sid") || ""
-            const sidParam = existingSid ? `?sid=${existingSid}` : ""
+            // #511 problem 2 (附带必修): a forwarded-doc link is `/docs?...&doc=<id>&sid=<space>`.
+            // A first-time recipient logs in, then the post-login redirect used to keep only ?sid=
+            // and drop ?doc=, landing them on the empty document list instead of the document they
+            // clicked. Carry the doc deep-link (doc + space/folder) through the redirect so login
+            // returns them to the target document.
+            const forwardDoc = getQueryParam("doc") || ""
+            const forwardSpace = getQueryParam("space") || ""
+            const forwardFolder = getQueryParam("folder") || ""
+            const forwardSp = getQueryParam("sp") || ""
+            const redirectQuery = new URLSearchParams()
+            if (forwardDoc) {
+                redirectQuery.set("doc", forwardDoc)
+                if (forwardSpace) redirectQuery.set("space", forwardSpace)
+                if (forwardFolder) redirectQuery.set("folder", forwardFolder)
+            }
+            if (isStandaloneSummaryPath(window.location.pathname)) {
+                // 与 applyStandaloneSummarySpaceFromQuery(sp||space) 对称：登录重定向也一并透传 space。
+                if (forwardSp) redirectQuery.set("sp", forwardSp)
+                if (forwardSpace) redirectQuery.set("space", forwardSpace)
+            }
+            if (isMailAuthorizePath(window.location.pathname)) {
+                const authorizationSearch = resolveMailAuthorizeSearch(
+                    window.location.pathname,
+                    window.location.search,
+                    getMailAuthorizationSessionStorage(),
+                );
+                const authorizationCode = mailAuthorizeCode(authorizationSearch);
+                if (authorizationCode) redirectQuery.set("code", authorizationCode);
+                const authorizationMailbox = mailAuthorizeMailbox(authorizationSearch);
+                if (authorizationMailbox) redirectQuery.set("mailbox", authorizationMailbox);
+                const authorizationSpaceId = mailAuthorizeSpaceId(authorizationSearch);
+                if (authorizationSpaceId) redirectQuery.set("space_id", authorizationSpaceId);
+            }
+            const redirectQs = redirectQuery.toString()
+            const redirectSearch = redirectQs ? `?${redirectQs}` : ""
 
             const goMain = () => {
+                // A user who signed in from a shared /d/:docId link (local OR SSO/OIDC, where the
+                // IdP returnTo lands back on /login) has a stashed standalone target — bounce them
+                // back to that exact document instead of the app root. consumeStandaloneReturn
+                // clears the key and only returns SAFE same-origin relative paths (open-redirect
+                // guard), so a tampered value can never redirect off-origin.
+                //
+                // Carry the just-authenticated session's own sid on the reload (XIN-398), but keep
+                // the URL clean: store the known bucket sid in SessionScope, then navigate to the
+                // sid-less return path. The reloaded page still hits the right sid-keyed session
+                // bucket, without exposing `?sid=` in the address bar.
+                const standaloneReturn = consumeStandaloneReturn([
+                    { match: isMailAuthorizePath, persistReturnOnAnonymous: true },
+                    ...getEnterpriseStandaloneHandlers(),
+                ]);
+                if (standaloneReturn) {
+                    const sessionSid = findSidForToken(localStorage, WKApp.loginInfo.token || "");
+                    if (sessionSid) setSessionSid(sessionSid);
+                    window.location.assign(removeSidFromPath(standaloneReturn))
+                    return
+                }
                 if ((window as any).__POWERED_EXTENSION__) {
                     window.location.reload()
                     return
                 }
-                window.location.href = `${window.location.origin}${basePath}/${sidParam}`
+                window.location.href = buildPostLoginRedirectUrl(
+                    window.location.href,
+                    window.location.origin,
+                    basePath,
+                    redirectSearch
+                )
             }
 
             // 检查是否有待处理的邀请码（验证格式防止 XSS/Open Redirect）
@@ -108,14 +278,17 @@ export default class AppLayout extends Component<{}, AppLayoutState> {
                             if (!notice.crossSpace && spaceId) {
                                 localStorage.setItem('currentSpaceId', spaceId);
                             }
+                            // 十二审 🔴 P1-4:space_join_new 命令式,仅真加入时计(审批态已在上方 early-return)。
+                            //   此为 auto-join(登录时用 pendingInviteCode 直发 POST /space/join)的成功分支。
+                            Dap.shared.track("space_join_new", {});
                             goMain();
                         })
                         .catch((e: any) => {
                             const msg = e?.msg || '';
-                            if (msg.includes('已满') || msg.includes('SPACE_FULL')) {
+                            if (msg.includes(t("app.invite.serverTerms.full", { locale: "zh-CN" })) || msg.includes('SPACE_FULL')) {
                                 // SPACE_FULL 保留 pendingInviteCode，让用户下次重试
-                                import('@douyinfe/semi-ui').then(({ Toast }) => Toast.error('空间已满，无法加入'));
-                            } else if (msg.includes('已是成员') || msg.includes('already')) {
+                                import('@douyinfe/semi-ui').then(({ Toast }) => Toast.error(t("app.invite.spaceFullCannotJoin")));
+                            } else if (msg.includes(t("app.joinSpace.serverTerms.alreadyMember", { locale: "zh-CN" })) || msg.includes('already')) {
                                 localStorage.removeItem("pendingInviteCode");
                                 if (e?.space_id) localStorage.setItem('currentSpaceId', e.space_id);
                             } else {
@@ -136,6 +309,10 @@ export default class AppLayout extends Component<{}, AppLayoutState> {
     }
 
     componentWillUnmount() {
+        window.removeEventListener(
+            MAIL_AUTHORIZATION_RESOLVED_EVENT,
+            this.onMailAuthorizationResolved,
+        );
         WKApp.endpoints.removeOnLogin(this.onLogin);
         WKApp.endpoints.removeOnNeedJoinSpace(this.onNeedJoinSpace);
         WKApp.endpoints.removeOnJoinApproval(this.onJoinApproval);
@@ -190,26 +367,28 @@ export default class AppLayout extends Component<{}, AppLayoutState> {
 
     showUpdateUI(manifest: UpdateManifest) {
       const notifyID =  NotificationUI.info({
-            title: `有新版本 ${manifest.version}`,
+            className: "wk-octo-notification",
+            icon: <IconInfoCircle className="wk-octo-notification__icon" />,
+            title: <span className="wk-octo-notification__title">{t("app.layout.update.newVersion", { values: { version: manifest.version } })}</span>,
             duration: 0,
             content: (
-                <>
-                    <div>{manifest.body}</div>
-                    <div style={{ marginTop: 8 }}>
-                        <Button onClick={ async () => {
+                <div className="wk-octo-notification__content">
+                    <div className="wk-octo-notification__body">{manifest.body}</div>
+                    <div className="wk-octo-notification__actions">
+                        <Button className="wk-octo-notification__action" onClick={ async () => {
                            // install complete, restart app
                            if(await os.platform() !== "darwin") {
                                 await installUpdate()
                             }
                           await relaunch()
-                        }}>更新</Button>
-                        <Button onClick={()=>{
+                        }}>{t("base.common.update")}</Button>
+                        <Button className="wk-octo-notification__action" onClick={()=>{
                             NotificationUI.close(notifyID)
-                        }} type="secondary" style={{ marginLeft: 20 }}>
-                            下次
+                        }} type="secondary">
+                            {t("app.layout.update.later")}
                         </Button>
                     </div>
-                </>
+                </div>
             ),
         })
     }
@@ -247,6 +426,107 @@ export default class AppLayout extends Component<{}, AppLayoutState> {
             );
         }
 
+        // OIDC bind page must take precedence over the invite-landing branch
+        // below: if a future URL composition (deep link, stale cookie) ever puts
+        // ?invite= on a /oidc/bind URL, we must still render the bind page —
+        // otherwise the bind token gets silently dropped on the floor. Defense
+        // in depth even though no documented flow constructs such a URL today.
+        // PR #72 review yujiawei #2.
+        // Two independent triggers on purpose:
+        //   - `pathname === '/oidc/bind'` covers browser flows where the URL
+        //     really lives on that path.
+        //   - `isBindEntry()` covers the Electron packaged shell, where the
+        //     bind callback is rewritten to `build/index.html?__octo_route=/oidc/bind&...`
+        //     by main/oidcRedirect, so `pathname` no longer matches.
+        // Either signal is authoritative on its own; both must render bind.
+        if (window.location.pathname === '/oidc/bind' || isBindEntry()) {
+            const bindComponent = WKApp.route.get('/oidc/bind')
+            if (bindComponent) {
+                return bindComponent
+            }
+        }
+
+        if (isMailAuthorizePath(window.location.pathname)) {
+            if (!WKApp.loginInfo.token) WKApp.loginInfo.load();
+            if (!WKApp.loginInfo.token) recoverOctoSessionFromStorage(true);
+            if (WKApp.loginInfo.token) {
+                if (!WKApp.shared.currentSpaceId) {
+                    const cachedSpaceId = localStorage.getItem("currentSpaceId") || "";
+                    if (cachedSpaceId) WKApp.shared.currentSpaceId = cachedSpaceId;
+                }
+                const mailAuthorizeComponent = WKApp.route.get(MAIL_AUTHORIZE_PATH, {
+                    onSessionExpired: clearExpiredStandaloneSessionAndReload,
+                });
+                if (mailAuthorizeComponent) return mailAuthorizeComponent;
+            }
+        }
+
+        // Enterprise full-page deep-links live outside the normal app shell. The host only owns
+        // the generic lifecycle (recover a clean sid-less session, hand over the expired-session
+        // callback, and optionally stash an anonymous return target). Concrete routes are owned by
+        // private modules, so adding a new enterprise module does not require another host branch.
+        const enterpriseStandaloneHandlers = getEnterpriseStandaloneHandlers();
+        const enterpriseStandaloneHandler = enterpriseStandaloneHandlers.find((handler) =>
+            handler.match(window.location.pathname)
+        );
+        if (enterpriseStandaloneHandler) {
+            if (!WKApp.loginInfo.token) WKApp.loginInfo.load();
+            if (!WKApp.loginInfo.token) recoverOctoSessionFromStorage(true);
+            if (WKApp.loginInfo.token) {
+                if (!WKApp.shared.currentSpaceId) {
+                    const cachedSpaceId = localStorage.getItem("currentSpaceId") || "";
+                    if (cachedSpaceId) WKApp.shared.currentSpaceId = cachedSpaceId;
+                }
+                const enterpriseStandalonePage = enterpriseStandaloneHandler.render({
+                    pathname: window.location.pathname,
+                    search: window.location.search,
+                    onSessionExpired: clearExpiredStandaloneSessionAndReload,
+                });
+                if (enterpriseStandalonePage) return enterpriseStandalonePage;
+            } else if (enterpriseStandaloneHandler.persistReturnOnAnonymous) {
+                persistStandaloneReturn();
+            }
+        }
+
+        // Read-only shared summary deep-link (`/s/share/:shareId`). It uses the same
+        // clean cold-load session recovery as task summary deep-links.
+        const standaloneShareId = parseStandaloneSummaryShareId(window.location.pathname);
+        if (standaloneShareId) {
+            if (!WKApp.loginInfo.token) WKApp.loginInfo.load();
+            if (!WKApp.loginInfo.token) recoverOctoSessionFromStorage(true);
+            if (WKApp.loginInfo.token) {
+                applyStandaloneSummarySpaceFromQuery();
+                return <SummaryShareDetailPage shareId={standaloneShareId} />;
+            }
+            persistStandaloneReturn();
+        }
+
+        // Standalone summary deep-link (`/s/:taskNo`): notification cards use task_no (not numeric
+        // task_id), so pass the raw path segment into the detail fetch. Auth/session recovery mirrors
+        // `/d/:docId`; anonymous visitors stash the exact target and return after login.
+        if (isStandaloneSummaryPath(window.location.pathname)) {
+            if (!WKApp.loginInfo.token) {
+                WKApp.loginInfo.load();
+            }
+            if (!WKApp.loginInfo.token) {
+                recoverOctoSessionFromStorage(true);
+            }
+            if (WKApp.loginInfo.token) {
+                applyStandaloneSummarySpaceFromQuery();
+                const standaloneTaskNo = parseStandaloneSummaryTaskNo(
+                    window.location.pathname
+                );
+                return (
+                    <SummaryDetailPage
+                        taskId={standaloneTaskNo ?? undefined}
+                        emitSelection
+                    />
+                );
+            }
+            persistStandaloneReturn();
+            // Anonymous: fall through to the login screen (below) without navigating away.
+        }
+
         // 邀请链接检测
         const urlParams = new URLSearchParams(window.location.search);
         const inviteCode = urlParams.get("invite");
@@ -256,22 +536,11 @@ export default class AppLayout extends Component<{}, AppLayoutState> {
             if (!WKApp.loginInfo.token) {
                 WKApp.loginInfo.load();
             }
-            // 如果 URL 没有 ?sid= 或 sid 不匹配，尝试从 localStorage 找正确的 token
+            // 如果 URL 没有 ?sid= 或 sid 不匹配，从 localStorage 恢复已登录会话
+            // （与 /d/:docId 直达同一套 clean 冷加载恢复逻辑，但只在内存恢复、不持久化——
+            //   invite 分支原本就不把恢复出来的 session 写回存储，共用 helper 后仍保持该语义，XIN-392 P1-2）
             if (!WKApp.loginInfo.token) {
-                for (let i = 0; i < localStorage.length; i++) {
-                    const key = localStorage.key(i);
-                    if (key && key.startsWith("token") && key !== "token") {
-                        const val = localStorage.getItem(key);
-                        if (val) {
-                            // 直接设置 token 和相关信息，不重定向
-                            const sid = key.substring(5);
-                            WKApp.loginInfo.token = val;
-                            WKApp.loginInfo.uid = localStorage.getItem("uid" + sid) || "";
-                            WKApp.loginInfo.name = localStorage.getItem("name" + sid) || "";
-                            break;
-                        }
-                    }
-                }
+                recoverOctoSessionFromStorage(false);
             }
             return <InviteLanding inviteCode={inviteCode} />;
         }
@@ -282,7 +551,7 @@ export default class AppLayout extends Component<{}, AppLayoutState> {
             if (!WKApp.shared.isLogined() || window.location.pathname.endsWith('/login')) {
                 const loginComponent = WKApp.route.get("/login")
                 if (!loginComponent) {
-                    return <div>没有登录模块！</div>
+                    return <div>{t("app.layout.noLoginModule")}</div>
                 }
                 return loginComponent
             }
@@ -298,7 +567,7 @@ export default class AppLayout extends Component<{}, AppLayoutState> {
             if (!WKApp.shared.currentSpaceId && !WKApp.shared.spaceChecked) {
                 return <SpaceGate />
             }
-            return <ErrorBoundary moduleName="应用">
+            return <ErrorBoundary moduleName={t("app.layout.errorBoundaryModuleName")}>
                 <WKBase onContext={(ctx) => {
                     WKApp.shared.baseContext = ctx
                 }}>

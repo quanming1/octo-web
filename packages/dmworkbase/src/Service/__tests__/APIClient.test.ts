@@ -84,4 +84,26 @@ describe("APIClient request interceptor — X-Space-Id (GH #1038)", () => {
         expect(captured.headers["token"]).toBe("tkn_abc123")
         expect(captured.headers["X-Space-Id"]).toBe("space-gamma")
     })
+
+    it("显式 X-Space-ID 不会被历史 currentSpaceId 覆盖", async () => {
+        client.config.spaceIdCallback = () => "stale-current-space"
+        await client.get("/ping", {
+            headers: { "X-Space-ID": "authorization-space" },
+        })
+        expect(captured.headers["X-Space-ID"]).toBe("authorization-space")
+        expect(captured.headers["X-Space-Id"]).toBeUndefined()
+    })
+})
+
+/**
+ * YUJ-2628 — 登录页一直转圈的根因：APIClient 没有任何请求超时。
+ * 请求永久挂起时 LoginVM.loginLoading 停在 true，按钮一直转圈无法恢复。
+ * 这里验证全局默认 timeout 已配置（超时/网络错误的归类见 apiError.test.ts）。
+ */
+describe("APIClient request timeout (YUJ-2628)", () => {
+    it("注册了全局默认超时（不再永久挂起）", () => {
+        // 触发单例构造 → initAxios 设置 axios.defaults.timeout
+        expect(APIClient.shared).toBeTruthy()
+        expect(axios.defaults.timeout).toBeGreaterThan(0)
+    })
 })

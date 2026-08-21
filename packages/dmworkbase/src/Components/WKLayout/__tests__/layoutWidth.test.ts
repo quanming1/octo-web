@@ -11,13 +11,29 @@ import {
     THREAD_MAX_WIDTH,
     THREAD_DEFAULT_WIDTH,
     THREAD_STORAGE_KEY,
+    SUMMARY_MIN_WIDTH,
+    SUMMARY_MAX_WIDTH,
+    SUMMARY_DEFAULT_WIDTH,
+    SUMMARY_STORAGE_KEY,
+    NAV_RAIL_MIN_WIDTH,
+    NAV_RAIL_MAX_WIDTH,
+    NAV_RAIL_EXPANDED_WIDTH,
+    NAV_RAIL_DEFAULT_WIDTH,
+    NAV_RAIL_STORAGE_KEY,
     getMaxLeftWidth,
     clampWidth,
     restoreWidth,
     persistWidth,
+    clampNavRailWidth,
+    getNavRailDragWidth,
+    restoreNavRailWidth,
+    persistNavRailWidth,
     clampThreadWidth,
     restoreThreadWidth,
     persistThreadWidth,
+    clampSummaryWidth,
+    restoreSummaryWidth,
+    persistSummaryWidth,
 } from '../layoutWidth'
 
 describe('layoutWidth', () => {
@@ -78,6 +94,52 @@ describe('layoutWidth', () => {
         })
     })
 
+    describe('nav rail', () => {
+        describe('clampNavRailWidth', () => {
+            it('snaps below threshold to collapsed width', () => {
+                expect(clampNavRailWidth(40, 1200)).toBe(NAV_RAIL_MIN_WIDTH)
+            })
+
+            it('snaps above threshold to expanded width', () => {
+                expect(clampNavRailWidth(400, 1200)).toBe(NAV_RAIL_MAX_WIDTH)
+            })
+
+            it('does not return intermediate widths', () => {
+                expect(clampNavRailWidth(120, 1200)).toBe(NAV_RAIL_EXPANDED_WIDTH)
+            })
+        })
+
+        describe('getNavRailDragWidth', () => {
+            it('expands when dragging right', () => {
+                expect(getNavRailDragWidth(NAV_RAIL_MIN_WIDTH, 1)).toBe(NAV_RAIL_EXPANDED_WIDTH)
+            })
+
+            it('collapses when dragging left', () => {
+                expect(getNavRailDragWidth(NAV_RAIL_EXPANDED_WIDTH, -1)).toBe(NAV_RAIL_MIN_WIDTH)
+            })
+        })
+
+        describe('restoreNavRailWidth / persistNavRailWidth', () => {
+            beforeEach(() => {
+                localStorage.clear()
+            })
+
+            it('returns default when nothing stored', () => {
+                expect(restoreNavRailWidth()).toBe(NAV_RAIL_DEFAULT_WIDTH)
+            })
+
+            it('restores a previously persisted value', () => {
+                persistNavRailWidth(NAV_RAIL_EXPANDED_WIDTH)
+                expect(restoreNavRailWidth()).toBe(NAV_RAIL_EXPANDED_WIDTH)
+            })
+
+            it('returns default for out-of-range stored values', () => {
+                localStorage.setItem(NAV_RAIL_STORAGE_KEY, '9999')
+                expect(restoreNavRailWidth()).toBe(NAV_RAIL_DEFAULT_WIDTH)
+            })
+        })
+    })
+
     describe('thread panel', () => {
         describe('clampThreadWidth', () => {
             it('clamps below minimum', () => {
@@ -121,6 +183,60 @@ describe('layoutWidth', () => {
             it('returns default for out-of-range stored values', () => {
                 localStorage.setItem(THREAD_STORAGE_KEY, '9999')
                 expect(restoreThreadWidth()).toBe(THREAD_DEFAULT_WIDTH)
+            })
+        })
+    })
+
+    describe('summary panel', () => {
+        describe('clampSummaryWidth', () => {
+            it('clamps below minimum', () => {
+                expect(clampSummaryWidth(100, 1200, 300)).toBe(SUMMARY_MIN_WIDTH)
+            })
+
+            it('passes through valid values', () => {
+                expect(clampSummaryWidth(500, 1600, 300)).toBe(500)
+            })
+
+            it('caps at SUMMARY_MAX_WIDTH even if 50% would be higher', () => {
+                // window=4000, left=300 → available=3700 → 50%=1850 > 720
+                expect(clampSummaryWidth(1000, 4000, 300)).toBe(SUMMARY_MAX_WIDTH)
+            })
+
+            it('limits to 50% of available space (window - left panel)', () => {
+                // window=1200, left=300 → available=900 → max=450
+                expect(clampSummaryWidth(700, 1200, 300)).toBe(450)
+            })
+
+            it('never goes below SUMMARY_MIN_WIDTH even on tiny screens', () => {
+                // window=600, left=300 → available=300 → 50%=150 < 320
+                expect(clampSummaryWidth(400, 600, 300)).toBe(SUMMARY_MIN_WIDTH)
+            })
+        })
+
+        describe('restoreSummaryWidth / persistSummaryWidth', () => {
+            beforeEach(() => {
+                localStorage.clear()
+            })
+
+            it('returns default when nothing stored', () => {
+                expect(restoreSummaryWidth()).toBe(SUMMARY_DEFAULT_WIDTH)
+            })
+
+            it('restores a previously persisted value', () => {
+                persistSummaryWidth(500)
+                expect(restoreSummaryWidth()).toBe(500)
+            })
+
+            it('returns default for out-of-range stored values', () => {
+                localStorage.setItem(SUMMARY_STORAGE_KEY, '9999')
+                expect(restoreSummaryWidth()).toBe(SUMMARY_DEFAULT_WIDTH)
+            })
+
+            it('does not collide with the thread panel storage key', () => {
+                persistSummaryWidth(500)
+                persistThreadWidth(700)
+                expect(restoreSummaryWidth()).toBe(500)
+                expect(restoreThreadWidth()).toBe(700)
             })
         })
     })

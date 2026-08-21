@@ -14,6 +14,14 @@ export interface FilePreviewInfo {
   messageId?: string;
   /** 文件分类（image/video/document/code 等，用于判断文件类型） */
   category?: string;
+  /** 预览封面图（视频等媒体预览使用） */
+  posterUrl?: string;
+  /** 媒体原始宽度 */
+  width?: number;
+  /** 媒体原始高度 */
+  height?: number;
+  /** 媒体时长（秒） */
+  duration?: number;
   /** 消息序号（用于回复功能） */
   messageSeq?: number;
   /** 发送者 UID（用于回复功能） */
@@ -66,6 +74,7 @@ export interface RendererRegistryItem {
 export interface FilePreviewPanelProps {
   file: FilePreviewInfo | null;
   onClose: () => void;
+  showOpenExternal?: boolean;
 }
 
 /** 加载状态 Props */
@@ -104,13 +113,24 @@ export function getLanguageFromExtension(ext: string): string {
 
 /**
  * 从扩展名或文件名中提取扩展名
+ *
+ * 优先级: 文件名后缀 > content.extension。
+ * 服务端返回的 extension 字段不可靠 (可能为空、或是 "file" 等占位值,
+ * 见 issue #143), 用文件名后缀更稳妥; 文件名无可用后缀时再 fallback 到 extension。
+ *
+ * 后缀提取边界:
+ *   - dot > 0       : 排除前导点的 dotfile (如 ".env" / ".bashrc"),
+ *                     这类文件按 POSIX 语义没有"扩展名", 该 fallback。
+ *   - dot < len-1   : 排除尾部点 (如 "report."), 提取出来是空串, 也该 fallback。
  */
 export function getExtension(ext: string, name?: string): string {
-  const e = (ext || "").toLowerCase();
-  if (e) return e;
   if (name) {
     const dot = name.lastIndexOf(".");
-    if (dot >= 0) return name.substring(dot + 1).toLowerCase();
+    if (dot > 0 && dot < name.length - 1) {
+      return name.substring(dot + 1).toLowerCase();
+    }
   }
+  const e = (ext || "").toLowerCase();
+  if (e) return e;
   return "";
 }

@@ -1,4 +1,5 @@
 import React from "react"
+import { useI18n } from "../../i18n"
 import "./index.css"
 
 export interface Category {
@@ -17,6 +18,7 @@ const MoveToGroupMenu: React.FC<MoveToGroupMenuProps> = ({
     onSelect,
     onCreateNew,
 }) => {
+    const { t } = useI18n()
     return (
         <div className="wk-move-to-group-menu">
             {categories.map((cat) => (
@@ -33,7 +35,7 @@ const MoveToGroupMenu: React.FC<MoveToGroupMenuProps> = ({
                 className="wk-move-to-group-menu__item wk-move-to-group-menu__create"
                 onClick={onCreateNew}
             >
-                + 新建分组
+                {t("base.chatSidebar.context.createCategory")}
             </div>
         </div>
     )

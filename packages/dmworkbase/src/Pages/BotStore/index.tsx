@@ -2,6 +2,7 @@ import React, { Component } from "react"
 import { Channel, ChannelTypePerson } from "wukongimjssdk"
 import WKApp from "../../App"
 import BotDetailModal from "../../Components/BotDetailModal"
+import { I18nContext } from "../../i18n"
 import "./index.css"
 
 interface BotInfo {
@@ -26,6 +27,9 @@ interface BotStoreState {
 }
 
 export default class BotStore extends Component<{}, BotStoreState> {
+    static contextType = I18nContext
+    declare context: React.ContextType<typeof I18nContext>
+
     state: BotStoreState = {
         myBots: [],
         spaceBots: [],
@@ -82,6 +86,7 @@ export default class BotStore extends Component<{}, BotStoreState> {
 
     renderBotCard(bot: BotInfo, showAction: boolean) {
         const { applyingUid } = this.state
+        const { t } = this.context
         const isAdded = bot.status === "added"
         const isPending = bot.status === "pending"
         const isApplying = applyingUid === bot.uid
@@ -96,20 +101,24 @@ export default class BotStore extends Component<{}, BotStoreState> {
                         {bot.name || bot.uid}
                         <span className="wk-bot-card-badge">AI</span>
                     </div>
-                    <div className="wk-bot-card-desc">{bot.description || "暂无简介"}</div>
+                    <div className="wk-bot-card-desc">
+                        {bot.description || t("base.botStore.noDescription")}
+                    </div>
                     {bot.creator_name && (
-                        <div className="wk-bot-card-creator">创建者: {bot.creator_name}</div>
+                        <div className="wk-bot-card-creator">
+                            {t("base.botStore.creator")} {bot.creator_name}
+                        </div>
                     )}
                 </div>
                 <div className="wk-bot-card-action">
                     {showAction && isAdded && (
                         <button className="wk-bot-btn wk-bot-btn-chat" onClick={() => this.handleChat(bot.uid)}>
-                            发消息
+                            {t("base.botStore.chat")}
                         </button>
                     )}
                     {showAction && isPending && (
                         <button className="wk-bot-btn wk-bot-btn-pending" disabled>
-                            审批中
+                            {t("base.botStore.pending")}
                         </button>
                     )}
                     {showAction && !isAdded && !isPending && (
@@ -118,12 +127,12 @@ export default class BotStore extends Component<{}, BotStoreState> {
                             disabled={isApplying}
                             onClick={() => this.handleAddFriend(bot.uid)}
                         >
-                            {isApplying ? "申请中..." : "添加"}
+                            {isApplying ? t("base.botStore.applying") : t("base.botStore.add")}
                         </button>
                     )}
                     {!showAction && (
                         <button className="wk-bot-btn wk-bot-btn-chat" onClick={() => this.handleChat(bot.uid)}>
-                            发消息
+                            {t("base.botStore.chat")}
                         </button>
                     )}
                 </div>
@@ -133,6 +142,7 @@ export default class BotStore extends Component<{}, BotStoreState> {
 
     render() {
         const { myBots, spaceBots, loading, activeTab } = this.state
+        const { t } = this.context
 
         return (
             <div className="wk-bot-store">
@@ -141,7 +151,9 @@ export default class BotStore extends Component<{}, BotStoreState> {
                     <div className="wk-bot-father-avatar">⚙️</div>
                     <div className="wk-bot-father-info">
                         <div className="wk-bot-father-name">BotFather</div>
-                        <div className="wk-bot-father-desc">创建和管理你的 AI 机器人</div>
+                        <div className="wk-bot-father-desc">
+                            {t("base.botStore.botFatherDesc")}
+                        </div>
                     </div>
                     <div className="wk-bot-father-arrow">›</div>
                 </div>
@@ -152,24 +164,26 @@ export default class BotStore extends Component<{}, BotStoreState> {
                         className={`wk-bot-tab ${activeTab === "my" ? "active" : ""}`}
                         onClick={() => this.setState({ activeTab: "my" })}
                     >
-                        我的 AI ({myBots.length})
+                        {t("base.botStore.myAI", { values: { count: myBots.length } })}
                     </div>
                     <div
                         className={`wk-bot-tab ${activeTab === "store" ? "active" : ""}`}
                         onClick={() => this.setState({ activeTab: "store" })}
                     >
-                        AI 广场 ({spaceBots.length})
+                        {t("base.botStore.aiPlaza", { values: { count: spaceBots.length } })}
                     </div>
                 </div>
 
                 {/* 列表 */}
                 <div className="wk-bot-list">
-                    {loading && <div className="wk-bot-loading">加载中...</div>}
+                    {loading && <div className="wk-bot-loading">{t("base.botStore.loading")}</div>}
                     {!loading && activeTab === "my" && myBots.length === 0 && (
-                        <div className="wk-bot-empty">还没有添加任何 AI<br/>去 AI 广场看看吧</div>
+                        <div className="wk-bot-empty">
+                            {t("base.botStore.myEmptyTitle")}<br/>{t("base.botStore.myEmptyHint")}
+                        </div>
                     )}
                     {!loading && activeTab === "store" && spaceBots.length === 0 && (
-                        <div className="wk-bot-empty">当前 Space 暂无可用 AI</div>
+                        <div className="wk-bot-empty">{t("base.botStore.storeEmpty")}</div>
                     )}
                     {!loading && activeTab === "my" && myBots.map(bot => this.renderBotCard(bot, false))}
                     {!loading && activeTab === "store" && spaceBots.map(bot => this.renderBotCard(bot, true))}

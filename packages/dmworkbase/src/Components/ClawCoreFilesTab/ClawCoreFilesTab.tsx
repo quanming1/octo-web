@@ -3,6 +3,7 @@ import FileViewer from '../FileViewer/FileViewer';
 import '../FileViewer/FileViewer.css';
 import type { FileGroup, FileContent } from '../FileViewer/FileViewer';
 import AgentCardService, { type AgentCardData } from '../../Service/AgentCardService';
+import { useI18n } from '../../i18n';
 import './ClawCoreFilesTab.css';
 
 export interface ClawCoreFilesTabProps {
@@ -30,13 +31,14 @@ export interface ClawCoreFilesTabProps {
  * ```
  */
 export default function ClawCoreFilesTab({ botId, height = '100%', agentCardData }: ClawCoreFilesTabProps) {
+  const { t } = useI18n();
   const [fileGroups, setFileGroups] = useState<FileGroup[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState(false);
 
   const loadFileGroups = useCallback(async (signal?: { cancelled: boolean }) => {
     setLoading(true);
-    setError(null);
+    setError(false);
 
     try {
       // 优先使用传入的 agentCardData（避免重复请求）
@@ -55,7 +57,7 @@ export default function ClawCoreFilesTab({ botId, height = '100%', agentCardData
     } catch (err) {
       if (signal?.cancelled) return;
       console.error('Failed to load file groups:', err);
-      setError('加载文件列表失败，请稍后重试');
+      setError(true);
     } finally {
       if (!signal?.cancelled) {
         setLoading(false);
@@ -80,7 +82,7 @@ export default function ClawCoreFilesTab({ botId, height = '100%', agentCardData
       <div className="claw-core-files-tab" data-testid="claw-core-files-tab-loading" style={{ height }}>
         <div className="loading-state">
           <div className="loading-spinner" />
-          <div className="loading-text">加载中...</div>
+          <div className="loading-text">{t("base.claw.loading")}</div>
         </div>
       </div>
     );
@@ -103,12 +105,12 @@ export default function ClawCoreFilesTab({ botId, height = '100%', agentCardData
             <line x1="12" y1="8" x2="12" y2="12" />
             <line x1="12" y1="16" x2="12.01" y2="16" />
           </svg>
-          <div className="error-text">{error}</div>
+          <div className="error-text">{t("base.claw.coreFiles.loadFailed")}</div>
           <button 
             className="retry-button" 
             onClick={() => loadFileGroups({ cancelled: false })}
           >
-            重试
+            {t("base.claw.coreFiles.retry")}
           </button>
         </div>
       </div>
@@ -131,7 +133,7 @@ export default function ClawCoreFilesTab({ botId, height = '100%', agentCardData
             <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
             <polyline points="14 2 14 8 20 8" />
           </svg>
-          <div className="empty-text">暂无核心文件</div>
+          <div className="empty-text">{t("base.claw.coreFiles.empty")}</div>
         </div>
       </div>
     );

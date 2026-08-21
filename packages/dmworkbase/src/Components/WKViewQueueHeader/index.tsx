@@ -3,6 +3,7 @@ import React from "react"
 import { Component, ReactNode } from "react"
 import WKApp,{ThemeMode} from "../../App"
 import { FinishButtonContext } from "../../Service/Context"
+import { I18nContext } from "../../i18n"
 
 import "./index.css"
 
@@ -22,6 +23,9 @@ export interface WKViewQueueHeaderState {
 }
 
 export default class WKViewQueueHeader extends Component<WKViewQueueHeaderProps,WKViewQueueHeaderState> implements FinishButtonContext {
+    static contextType = I18nContext
+    declare context: React.ContextType<typeof I18nContext>
+
     constructor(props:any) {
         super(props)
         this.state = {
@@ -72,7 +76,7 @@ export default class WKViewQueueHeader extends Component<WKViewQueueHeaderProps,
                                 onFinished()
                             }
                         }}>
-                            完成
+                            {this.context.t("base.common.done")}
                         </Button>
                     </div>:undefined
                     }

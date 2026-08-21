@@ -6,6 +6,7 @@ import { TooltipCell } from "./TooltipCell";
 import { RendererState } from "./RendererState";
 import { useFileContent } from "../hooks/useFileContent";
 import FileTooLarge from "./FileTooLarge";
+import { t, useI18n } from "../../../i18n";
 import "./ExcelRenderer.css";
 
 export interface ExcelRendererProps extends BaseRendererProps {}
@@ -137,17 +138,19 @@ function parseWorkbook(
  */
 function SheetTable({ sheetData }: { sheetData: SheetData }) {
   const { data, columns } = sheetData;
+  const { t } = useI18n();
 
   const renderCellContent = (value: unknown): string => {
-    if (value === null || value === undefined) return "-";
+    if (value === null || value === undefined || value === "") return "-";
     if (typeof value === "object") return JSON.stringify(value);
-    return String(value);
+    const str = String(value);
+    return str.trim() === "" ? "-" : str;
   };
 
   if (!data || data.length === 0) {
     return (
       <div className="wk-file-preview-excel-renderer--empty">
-        <span>暂无内容</span>
+        <span>{t("base.filePreview.empty")}</span>
       </div>
     );
   }
@@ -184,23 +187,13 @@ function SheetTable({ sheetData }: { sheetData: SheetData }) {
  * 使用虚拟滚动高效渲染大数据量
  */
 const ExcelRenderer: React.FC<ExcelRendererProps> = ({ file, onError }) => {
-  // 文件大小检查（超过 20MB 不渲染）
-  if (file.size && isFileTooLarge(file.size)) {
-    return (
-      <FileTooLarge
-        fileName={file.name}
-        fileSize={file.size}
-        fileUrl={file.url}
-      />
-    );
-  }
-
   const [parseError, setParseError] = useState<string | null>(null);
   const [sheets, setSheets] = useState<SheetData[]>([]);
   const [activeSheet, setActiveSheet] = useState(0);
   const [parsing, setParsing] = useState(false);
 
-  // 使用共享 Hook 加载文件内容
+  // 使用共享 Hook 加载文件内容（大文件跳过 fetch，避免下载+解析开销）
+  const tooLarge = !!(file.size && isFileTooLarge(file.size));
   const {
     content: buffer,
     loading: fetching,
@@ -209,6 +202,7 @@ const ExcelRenderer: React.FC<ExcelRendererProps> = ({ file, onError }) => {
   } = useFileContent({
     url: file.url,
     responseType: "arraybuffer",
+    enabled: !tooLarge,
   });
 
   // 解析 Excel 内容
@@ -224,12 +218,14 @@ const ExcelRenderer: React.FC<ExcelRendererProps> = ({ file, onError }) => {
         const parsedSheets = parseWorkbook(XLSX, new Uint8Array(data));
 
         if (parsedSheets.length === 0) {
-          throw new Error("工作表为空");
+          throw new Error(t("base.filePreview.excel.emptySheet"));
         }
 
         setSheets(parsedSheets);
       } catch (err) {
-        const message = err instanceof Error ? err.message : "解析失败";
+        const message = err instanceof Error
+          ? err.message
+          : t("base.filePreview.excel.parseFailed");
         setParseError(message);
         onError?.(message);
       } finally {
@@ -239,16 +235,27 @@ const ExcelRenderer: React.FC<ExcelRendererProps> = ({ file, onError }) => {
     [onError]
   );
 
-  // 当内容加载完成后解析
+  // 当内容加载完成后解析（大文件跳过）
   useEffect(() => {
-    if (buffer) {
+    if (buffer && !tooLarge) {
       parseContent(buffer);
     }
-  }, [buffer, parseContent]);
+  }, [buffer, parseContent, tooLarge]);
 
   // 合并加载和解析状态
   const loading = fetching || parsing;
   const error = fetchError || parseError;
+
+  // 文件大小检查（hooks 之后 return，避免 Rules-of-Hooks 违规）
+  if (tooLarge) {
+    return (
+      <FileTooLarge
+        fileName={file.name}
+        fileSize={file.size}
+        fileUrl={file.url}
+      />
+    );
+  }
 
   if (loading) {
     return <RendererState type="loading" />;
@@ -272,7 +279,9 @@ const ExcelRenderer: React.FC<ExcelRendererProps> = ({ file, onError }) => {
       {/* 底部信息栏：行数 + 工作表切换 */}
       <div className="wk-file-preview-excel-renderer__footer">
         <span className="wk-file-preview-excel-renderer__row-count">
-          共 {sheets[activeSheet]?.data.length ?? 0} 行
+          {t("base.filePreview.rowsCount", {
+            values: { count: sheets[activeSheet]?.data.length ?? 0 },
+          })}
         </span>
         {sheets.length > 1 && (
           <div className="wk-file-preview-excel-renderer__tabs">

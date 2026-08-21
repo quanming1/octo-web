@@ -1,20 +1,53 @@
 import mitt, { Emitter } from "mitt";
+import { getSessionSid, setSessionSid } from "./Service/SessionScope";
+import { replaceWithShellDocument } from "./Service/ShellDocument";
+import { runLogoutCleanup } from "./Service/logoutCleanup";
+import {
+  clearElectronAuthSession as clearElectronAuthSessionBridge,
+  getElectronIpcBridge,
+  getOctoElectronBridge,
+  isElectronPowered,
+  isElectronShellBridgeAvailable,
+} from "./electron/desktopBridge";
 
 /** mittBus 全局事件类型表 */
 export type MittEvents = {
   "friend-applys-unread-count": number;
   "space-changed": unknown;
+  /** Initial Space resolution completed during app startup. */
+  "space-ready": unknown;
   "task-upload-failed": { channelKey: string };
+  /** 内置表情清单(GET /v1/common/emojis)异步到达并发生变化:已渲染消息与表情选择器据此重渲染一次 */
+  "emoji-manifest-updated": undefined;
+  /** 收藏他人贴纸成功后广播,已加载过「我的贴纸」的 EmojiPanel 据此重拉列表 */
+  "stickers-updated": undefined;
+  /** App 回前台(visibilitychange/focus):打开中的会话据此重同步成员列表,
+   * 修复合盖/息屏久后 WS 断连期间成员变更 CMD 丢失导致 @ 搜不到新成员(octo-web#567) */
+  "wk:app-foreground": undefined;
+  /** 当前会话消息 DOM/滚动位置变化，供待决的多标签页提醒尽早登记前台抑制。 */
+  "wk:message-attention-state-changed": undefined;
+  /** 消息 reaction 乐观更新或服务端对账完成，携带 messageId 做局部刷新 */
+  "message-reaction-updated": string;
   "wk:pending-thread": {
     groupNo: string;
     thread: import("./Service/Thread").Thread | null;
   };
+  "wk:thread-created": {
+    groupNo: string;
+    threadChannelId: string;
+    shortId?: string;
+    thread?: import("./Service/Thread").Thread;
+  };
+  "wk:thread-deleted": {
+    groupNo: string;
+    threadChannelId: string;
+    shortId?: string;
+  };
   "wk:close-thread-panel": undefined;
-  "wk:toggle-matter-panel": { channelId: string; channelType: number };
-  /** v0.7 Matter 详情面板切换（跟子区/文件预览/任务列表可并存） */
-  "wk:toggle-matter-detail-panel": { channelId: string; channelType: number };
-  /** 打开多选→添加到事项的弹出菜单（由 dmworktodo 模块接管渲染） */
-  "wk:open-matter-link-menu": { anchor: HTMLElement; channelId: string; channelType: number; messages?: Array<{ messageSeq?: number; messageID?: string; fromUID?: string; fromUName?: string; content?: string; timestamp?: number; attachments?: any[] }> };
+  "wk:toggle-summary-panel": { channelId: string; channelType: number; summaryPanelView: 'history' | 'new'; forceOpen?: boolean };
+  "wk:open-summary-modal": { channelId: string; channelType: number };
+  /** 主聊天框头部搜索入口点击：请求打开该频道的会话内搜索面板（与信息栏「查找聊天内容」同一效果）。 */
+  "wk:open-channel-search": { channelId: string; channelType: number };
   "wk:switch-sidebar-tab": string;
   "wk:file-preview": {
     url: string;
@@ -34,25 +67,55 @@ export type MittEvents = {
     /** 消息摘要（用于回复时显示） */
     conversationDigest?: string;
   } | null;
-  'wk:open-create-matter-modal': { channelId: string; channelType: number; channelName?: string; prefillTitle?: string; prefillAssigneeUids?: string[]; clearOnConfirm?: boolean };
-  /** After matter created from toolbar/Alt+Enter, send editor content then clear */
-  'wk:matter-created-from-input': { channelId: string; channelType: number };
   /**
    * NavRail 菜单按钮被点击 (不论是切换到该菜单还是重复点击当前菜单)。
    * 接收方可以据此刷新数据 — 同一路由长期挂载时用户重进菜单的场景下, 组件
    * 不会自动 remount, 接收方需要主动 reload。
    */
   'wk:nav-menu-activated': { menuId: string };
+  /** The canonical active top-level page changed (including boot, history and config reconciliation). */
+  'wk:active-menu-changed': { menuId?: string };
+  /** Login, logout or account replacement changed the identity that owns page-level state. */
+  'wk:auth-state-changed': undefined;
   /**
-   * Matter 任一字段被编辑后广播 (标题 / 主要目标 / DDL / 状态 / 负责人 /
-   * 关联群聊等)。接收方 (通常是左侧事项列表) 据此 reload, 避免跨 React
-   * 子树数据不同步 — 详情面板和列表分别挂在 routeRight / routeLeft, 不共
-   * 享 state, 列表接口返回的字段也不会被详情页的 setMatter 影响。
+   * A chat file's drive-transferred state flipped (unsaved → saved) — either
+   * via the icon (quick-save personal root) or the right-click picker (chosen
+   * space + folder). The payload carries the `source_key`
+   * (channelType#channelID#msgID, the IM identity used as the drive cache key)
+   * plus the resulting drive coordinates so listeners can update in place
+   * without a follow-up backend call. FileCell subscribes and setState on a
+   * matching source_key so its icon flips the moment ANY save path wins,
+   * regardless of which entry the user used. The private Drive module owns
+   * the producer-side transferred cache.
    */
-  'wk:matter-updated': { matterId: string };
-  /** Matter 被删除后广播, 接收方据此从列表移除 */
-  'wk:matter-deleted': { matterId: string };
+  'wk:drive-transferred-changed': {
+    sourceKey: string;
+    entry: { file_id: number; space_id: string; parent_id: number };
+  };
+  /**
+   * dmloop 派单(quick-create)后的看板补刷协议。派单是异步的(agent 稍后建 issue,dmloop 暂无 WS 推送):
+   * NewLoopPage 派单成功发 `wk:loop-issues-dispatched`;常驻的 LoopPage 据此有界补发 `wk:loop-issues-refresh`,
+   * 当前挂载的看板(IssuePage)订阅后重取,使新回路自动出现——统一覆盖看板内/侧栏两个建单入口。
+   */
+  'wk:loop-issues-dispatched': void;
+  'wk:loop-issues-refresh': void;
+  /**
+   * 打开「密钥 / Secrets」管理面板（YUJ-3539）。由聊天反向跳转（bot 消息里的
+   * 「去添加密钥」按钮）或输入框防手滑提示触发；payload 可携带预填名字 / 明文，
+   * 设置中心据此打开密钥二级页并预填新增弹窗（绝不自动发送/保存）。
+   */
+  'wk:open-secrets': {
+    create?: boolean;
+    name?: string;
+    value?: string;
+  } | undefined;
   "summary-space-changed": undefined;
+  /**
+   * Chat VM 完成 requestConversationList()（切 Space / 重连后会触发）后广播。
+   * 用于让那些一次性读取 WKSDK.conversationManager.conversations 缓存的消费者
+   * （如合并转发选择器）在缓存被回填后再 load 一次,避免读到清空中间态。
+   */
+  "conversation-list-refreshed": undefined;
   /**
    * 频道头像发生变化（上传/更新）时广播。订阅者（例如 WKAvatar）可依据 channelID +
    * channelType 匹配后刷新自身缓存的 avatar URL，避免整页刷新。
@@ -61,6 +124,7 @@ export type MittEvents = {
 };
 import { EndpointCommon } from "./EndpointCommon";
 import APIClient from "./Service/APIClient";
+import { Dap } from "./Service/Dap";
 import MenusManager from "./Service/Menus";
 import { EndpointManager, IModule, ModuleManager } from "./Service/Module";
 import { ProviderListener } from "./Service/Provider";
@@ -80,15 +144,52 @@ import SectionManager, { Row, Section } from "./Service/Section";
 import { EndpointCategory, ChannelTypeCommunityTopic } from "./Service/Const";
 import { parseThreadChannelId } from "./Service/Thread";
 import { DataSource } from "./Service/DataSource/DataSource";
-import { ConnectAddrCallback } from "wukongimjssdk";
 
 import "animate.css";
 import "./App.css";
 import RouteContext from "./Service/Context";
-import { ConnectStatus } from "wukongimjssdk";
+import { GroupStatusDisband } from "./Utils/groupDisband";
+
+// 解散群的默认灰色头像（内联 SVG data-URI，避免新增二进制资源）。
+const DISBANDED_GROUP_AVATAR =
+  "data:image/svg+xml;charset=utf-8," +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">' +
+      '<rect width="80" height="80" fill="#E5E6EB"/>' +
+      '<g fill="#A9AEB8">' +
+      '<circle cx="40" cy="33" r="14"/>' +
+      '<path d="M16 66c0-13 11-21 24-21s24 8 24 21z"/>' +
+      "</g></svg>"
+  );
 import { WKBaseContext } from "./Components/WKBase";
 import StorageService from "./Service/StorageService";
 import { ProhibitwordsService } from "./Service/ProhibitwordsService";
+import { TypingManager } from "./Service/TypingManager";
+import { syncClientMsgDeviceId } from "./im-runtime/clientMsgDevice";
+import { getImChannelInfo } from "./im-runtime/channelRuntime";
+import {
+  ImConnectAddressManager,
+  registerImConnectAddressProvider,
+} from "./im-runtime/connectAddress";
+import { connectImClient } from "./im-runtime/connectClient";
+import { registerImConnectStatusListener } from "./im-runtime/connectStatus";
+import {
+  clearAuthStorage,
+  consumeOidcPostLogoutCleanup,
+  markOidcPostLogoutCleanup,
+  performOidcUserInitiatedLogout,
+} from "./Service/oidcLogout";
+import {
+  getExpectedImDeviceFlag,
+  clearDeviceFlagMigration,
+  hasDeviceFlagMigration,
+  hasImDeviceFlagMismatch,
+  markDeviceFlagMigration,
+  IM_DEVICE_FLAG_PC,
+  IM_DEVICE_FLAG_WEB,
+} from "./Service/deviceFlags";
+
+export { IM_DEVICE_FLAG_PC, IM_DEVICE_FLAG_WEB } from "./Service/deviceFlags";
 
 export enum ThemeMode {
   light,
@@ -97,6 +198,7 @@ export enum ThemeMode {
 export class WKConfig {
   appName: string = "DMWork";
   appVersion: string = "0.0.0"; // app版本
+  locale: string = "zh-CN"; // 当前语言
   themeColor: string = "#1C1C23"; // 主题颜色
   secondColor: string = "rgba(232, 234, 237)";
   pageSize: number = 15; // 数据页大小
@@ -135,15 +237,189 @@ import {
   parseOidcProviders,
   type OidcProviderConfig,
 } from "./Service/OidcConfig";
+import { parseRemoteBool } from "./Utils/remoteConfig";
 export {
   sanitizeHttpUrl,
   parseOidcProviders,
 } from "./Service/OidcConfig";
 export type { OidcProviderConfig } from "./Service/OidcConfig";
 
+function oidcProvidersEqual(
+  a: OidcProviderConfig[],
+  b: OidcProviderConfig[]
+): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((item, index) => {
+    const other = b[index];
+    if (!other) return false;
+    return (
+      item.id === other.id &&
+      item.name === other.name &&
+      item.authorizePath === other.authorizePath &&
+      item.accountUrl === other.accountUrl &&
+      item.resetPasswordUrl === other.resetPasswordUrl
+    );
+  });
+}
+
+/**
+ * 解析后端下发的 octo_assistant_uids 字段。后端可能下发数组或逗号分隔字符串，
+ * 前端统一转为 string[]。字段缺失或非数组/字符串时返回空数组。
+ */
+function parseOctoAssistantUids(raw: unknown): string[] {
+  if (Array.isArray(raw)) {
+    return raw.filter((v): v is string => typeof v === "string" && v.length > 0);
+  }
+  if (typeof raw === "string" && raw.length > 0) {
+    return raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+  }
+  return [];
+}
+
+/** 两个字符串数组作为**无序集合**是否相等。octoAssistantUids 等 uid 名单语义上是集合,
+ * 顺序不代表变化;顺序敏感比较会把后端仅重排的下发误判为「变了」而触发无谓刷新(#1452 review P2-7)。
+ * 允许重复元素:按计数比较(而非仅 Set),两侧同一 uid 出现次数须一致。 */
+function stringArraysEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const counts = new Map<string, number>();
+  for (const v of a) counts.set(v, (counts.get(v) ?? 0) + 1);
+  for (const v of b) {
+    const n = counts.get(v);
+    if (!n) return false;
+    counts.set(v, n - 1);
+  }
+  return true;
+}
+
+// StickerUploadLimits 解析同理抽到 ./Service/StickerUploadConfig：独立 leaf 文件,
+// 不拖 App.tsx 的重依赖链路, EmojiToolbar 的 vitest 可以直接测 parse 的边界情况。
+import {
+  DEFAULT_STICKER_UPLOAD_LIMITS,
+  parseStickerUploadLimits,
+  stickerUploadLimitsEqual,
+  type StickerUploadLimits,
+} from "./Service/StickerUploadConfig";
+export {
+  DEFAULT_STICKER_UPLOAD_LIMITS,
+  parseStickerUploadLimits,
+  stickerUploadLimitsEqual,
+} from "./Service/StickerUploadConfig";
+export type { StickerUploadLimits } from "./Service/StickerUploadConfig";
+
+import {
+  DEFAULT_MESSAGE_REACTION_CAPABILITY,
+  messageReactionCapabilityEqual,
+  parseMessageReactionCapability,
+  type MessageReactionCapability,
+} from "./Service/MessageReactionConfig";
+export {
+  DEFAULT_MESSAGE_REACTION_CAPABILITY,
+  messageReactionCapabilityEqual,
+  parseMessageReactionCapability,
+} from "./Service/MessageReactionConfig";
+export type {
+  MessageReactionCapability,
+} from "./Service/MessageReactionConfig";
+
 export class WKRemoteConfig {
   revokeSecond: number = 2 * 60; // 撤回时间
   threadOn: boolean = false; // 子区功能开关，默认关闭
+  messagesSearchOn: boolean = false; // 会话内聊天记录搜索开关，默认关闭
+  docsSearchOn: boolean = false; // 云文档全文搜索开关，默认关闭；与 docsOn(模块入口)解耦，独立灰度
+  disableUserCreateSpace: boolean = false; // 是否关闭普通用户创建 Space 入口
+  /**
+   * 埋点采集总开关(ship dark, fail-closed)。经 GET common/appconfig
+   * (生产即 https://im.deepminer.com.cn/api/v1/common/appconfig)下发的
+   * tracking_enabled 控制:true 才开采;字段缺失/false = 不采,前端一个请求都不发。
+   * 采集端(octo-dap /v1/e/b)就绪前保持缺省关闭;要停采只需把此位置 false
+   * (远程配置即时生效、无需回滚前端),故不再单设 kill switch。一期全量开/关,
+   * 按 event 粒度放二期。
+   */
+  trackingEnabled: boolean = false;
+  /**
+   * 自定义贴纸管理入口开关。后端字段 sticker_custom_enabled 为 true 时，前端展示
+   * 「我的贴纸」tab 及上传/删除入口；false 或字段缺失时隐藏。
+   *
+   * 纯 UI 展示开关，不承担鉴权语义: /v1/sticker/user 相关接口的权限/限流/所有权
+   * 校验仍由后端负责，前端不能据此推断用户是否具备上传能力。
+   */
+  stickerCustomEnabled: boolean = false;
+  /**
+   * 消息 Reaction 的展示/写入能力。字段缺失时按服务端契约降级为只读；write
+   * 仅控制客户端入口和请求前守卫，不替代服务端写接口的权限校验。
+   */
+  messageReaction: MessageReactionCapability = {
+    ...DEFAULT_MESSAGE_REACTION_CAPABILITY,
+  };
+  /**
+   * 自定义贴纸上传的操作端可调上限（最大体积 KB / 最长边 px / 允许的扩展名），后端
+   * 字段 sticker_upload_limits，与 SystemSettings.StickerUpload{MaxSizeKB,
+   * MaxDimension,AllowedFormats} 同源（octo-server #544/#547）。
+   *
+   * 纯客户端预校验用：EmojiPanel 在用户选完文件后据此本地立即校验，避免大图/非法
+   * 格式先跑完一次 HTTP 上传才被服务端拒绝。服务端 modules/file 侧仍对每次 sticker
+   * upload 请求做同一份 stickerLimits 快照兜底，这份缓存过期或被绕过都不影响安全
+   * 边界，前端不能据此推断上传一定会成功。
+   *
+   * 默认值 = 字段缺失/appconfig 请求失败时的回退值，与 PR #544 之前的历史硬编码
+   * （1024 KB / 512 px / gif,png,jpg,jpeg,webp）严格等价，行为无回归。
+   */
+  stickerUploadLimits: StickerUploadLimits = { ...DEFAULT_STICKER_UPLOAD_LIMITS };
+  /**
+   * Docs 协作文档模块展示开关。后端字段 docs_on 为 true 时，前端在侧边栏 NavRail
+   * 展示 Docs 入口；false 或字段缺失时隐藏。
+   *
+   * 默认 false(fail-safe): docs-backend 是独立服务，其反向代理路由、Hocuspocus
+   * WS(:1234) 暴露、MySQL/Redis/对象存储依赖未就绪前保持隐藏，避免用户点进去卡在
+   * "Loading document…" 或报错。运维在 docs-backend 部署就绪后再下发 docs_on=true。
+   *
+   * 纯 UI 展示开关，不承担鉴权语义: /api/v1/docs 相关接口的权限校验仍由 docs-backend
+   * 负责，前端不能据此推断用户是否具备文档访问能力。
+   */
+  docsOn: boolean = false;
+  /**
+   * Loop(回路)模块展示开关。后端字段 dmloop_on 为 true 时，前端在侧边栏 NavRail
+   * 展示企业「回路」入口；false 或字段缺失时隐藏。
+   *
+   * 默认 false(fail-safe): loop 依赖后端服务 + fleet 代理 + daemon 运行时一整套未就绪前保持隐藏——
+   * feature 分支合入 main 也不对用户暴露；运维在依赖部署就绪后再下发 dmloop_on=true 放量。
+   * 镜像 docs_on(system_setting dmloop.enabled),纯 UI 展示门,不承担鉴权:/fleet/api 相关接口的
+   * 权限校验仍由后端负责。
+   */
+  dmloopOn: boolean = false;
+  /**
+   * 企业「我的 / 运行时」入口展示开关。后端字段 dmpersonal_on 为 true 时展示入口。
+   * 与 dmloop_on 分开:「我的」后续会重新设计、脱离 loop 独立演进,故独立门控(可分阶段放量)。
+   * 默认 false(fail-safe),运维就绪后下发 dmpersonal_on=true。纯 UI 展示门,不承担鉴权。
+   */
+  dmpersonalOn: boolean = false;
+  /**
+   * 网盘(DriveModule)模块展示开关。后端字段 drive_on 为 true 时，前端在侧边栏 NavRail
+   * 展示网盘入口；false 或字段缺失时隐藏。
+   *
+   * 默认 false(fail-safe): drive 是独立部署的服务，其反向代理路由(/v1/drive)、对象存储 /
+   * docs-backend 只读依赖未就绪前保持隐藏——feature 分支合入 main 也不对用户暴露(后端
+   * DRIVE_API_URL 为空时 fail-closed 返 503)；运维在 drive 部署就绪后再下发 drive_on=true。
+   * 镜像 docs_on / dmloop_on,纯 UI 展示门,不承担鉴权:/v1/drive 相关接口的权限校验仍由
+   * drive 服务负责。
+   */
+  driveOn: boolean = false;
+  /**
+   * Agent Mail 模块展示开关。后端字段 mail_on 为 true 时，前端在侧边栏 NavRail
+   * 展示邮件入口；false 或字段缺失时隐藏。
+   *
+   * 默认 false(fail-safe)，仅控制前端入口展示，不承担权限校验。
+   */
+  mailOn: boolean = false;
+  /**
+   * Octo Assistant UID 列表。后端字段 octo_assistant_uids，来源 env
+   * DM_OCTO_ASSISTANT_UIDS。前端据此判别当前打开的应用 bot 是否为 Octo Assistant，
+   * 决定发 octo_assistant_opened 还是 app_opened 埋点事件（octo-dap S3 / YUJ-277）。
+   *
+   * 默认空数组（env 未设或后端未下发）。与 app_config.version 解耦，两个 appconfig
+   * 分支都下发，避免 version 缓存阻止 UID 列表更新。
+   */
+  octoAssistantUids: string[] = [];
   /**
    * OIDC provider 元数据数组, 由后端 /v1/common/appconfig 的 oidc_providers 字段下发。
    * OIDC 关闭时为空数组。前端不再硬编码具体 IdP, 部署 env 切 provider。
@@ -151,26 +427,28 @@ export class WKRemoteConfig {
    */
   oidcProviders: OidcProviderConfig[] = [];
   requestSuccess: boolean = false;
+  requestFailed: boolean = false;
   private retryCount: number = 0;
   private maxRetries: number = 5; // 最大重试次数
-  // listeners 仅在 appconfig 首次成功时触发, 用来通知像登录页这种在首屏前就渲染、
-  // 而其内容(SSO 按钮文案/可见性)依赖 appconfig 字段的组件去 re-render。
+  // listeners 在 appconfig 首次完成(成功或重试耗尽失败)时触发, 用来通知像登录页这种
+  // 在首屏前就渲染、而其内容(SSO 按钮文案/可见性)依赖 appconfig 字段的组件去 re-render。
   // 不在每次失败重试上 fire, 避免重复刷新。
   private listeners: Array<() => void> = [];
+  private configChangeListeners: Array<() => void> = [];
 
   /**
-   * addListener 订阅 appconfig **首次** 加载完成事件——只 fire 一次 (后续重连/手动 refetch 不再触发)。
+   * addListener 订阅 appconfig **首次** 完成事件——只 fire 一次 (后续重连/手动 refetch 不再触发)。
    * 返回 unsubscribe 函数, 调用方在卸载时务必调用。
    *
-   * 调用方契约: 订阅前应先检查 requestSuccess——已 true 时跳过订阅, 自行处理初始状态。
-   * 这里在 requestSuccess 已为 true 时返回 noop 是防御性兜底, 不构成「at-least-once 必通知」的语义。
+   * 调用方契约: 订阅前应先检查 requestSuccess / requestFailed——已完成时跳过订阅, 自行处理初始状态。
+   * 这里在已完成时返回 noop 是防御性兜底, 不构成「at-least-once 必通知」的语义。
    *
    * 为什么不在已加载时同步调一次 cb 来给「at-least-once」: cb 通常是 forceUpdate / setState,
    * 在调用方的 componentDidMount 同步栈里触发是 React 反模式; 用 microtask 又得给 cb 加
    * unmount 防护。当前唯一调用方 (Login) 已自检 requestSuccess, 不值得为此引入复杂度。
    */
   addListener(cb: () => void): () => void {
-    if (this.requestSuccess) {
+    if (this.requestSuccess || this.requestFailed) {
       return () => {
         /* noop */
       };
@@ -197,6 +475,25 @@ export class WKRemoteConfig {
     }
   }
 
+  addConfigChangeListener(cb: () => void): () => void {
+    this.configChangeListeners.push(cb);
+    return () => {
+      const i = this.configChangeListeners.indexOf(cb);
+      if (i >= 0) this.configChangeListeners.splice(i, 1);
+    };
+  }
+
+  private notifyConfigChangeListeners() {
+    const snapshot = [...this.configChangeListeners];
+    for (const cb of snapshot) {
+      try {
+        cb();
+      } catch (e) {
+        console.error("[WKRemoteConfig] config change listener threw", e);
+      }
+    }
+  }
+
   async startRequestConfig() {
     // 吃掉 requestConfig 的 reject: 否则 await 直接抛出, 后面的 retry 分支根本到不了——
     // 网络错误下指数退避就成了死代码。requestSuccess 在出错时保持 false, retry 分支负责重排。
@@ -213,18 +510,86 @@ export class WKRemoteConfig {
       setTimeout(() => {
         this.startRequestConfig();
       }, delay);
+    } else if (!this.requestSuccess && !this.requestFailed) {
+      this.requestFailed = true;
+      console.warn("[WKRemoteConfig] requestConfig failed after max retries");
+      this.notifyListeners();
     }
   }
 
   requestConfig() {
     return WKApp.apiClient.get("common/appconfig").then((result) => {
       const wasSuccessful = this.requestSuccess;
+      const previousDisableUserCreateSpace = this.disableUserCreateSpace;
+      const previousMessagesSearchOn = this.messagesSearchOn;
+      const previousStickerCustomEnabled = this.stickerCustomEnabled;
+      const previousMessageReaction = this.messageReaction;
+      const previousStickerUploadLimits = this.stickerUploadLimits;
+      const previousDocsOn = this.docsOn;
+      const previousDocsSearchOn = this.docsSearchOn;
+      const previousDmloopOn = this.dmloopOn;
+      const previousDmpersonalOn = this.dmpersonalOn;
+      const previousDriveOn = this.driveOn;
+      const previousMailOn = this.mailOn;
+      const previousOctoAssistantUids = this.octoAssistantUids;
+      const previousRequestFailed = this.requestFailed;
+      const previousOidcProviders = this.oidcProviders;
       this.requestSuccess = true;
+      this.requestFailed = false;
       this.revokeSecond = result["revoke_second"];
       this.threadOn = !!result["thread_on"];
+      this.messagesSearchOn = parseRemoteBool(result["messages_search_on"]);
+      this.disableUserCreateSpace = parseRemoteBool(
+        result["disable_user_create_space"]
+      );
+      // 埋点采集 ship dark(fail-closed):采集 iff appconfig 下发 tracking_enabled 为真
+      this.trackingEnabled = parseRemoteBool(result["tracking_enabled"]);
+      Dap.shared.setEnabled(this.trackingEnabled);
+      this.stickerCustomEnabled = parseRemoteBool(
+        result["sticker_custom_enabled"]
+      );
+      this.messageReaction = parseMessageReactionCapability(
+        result["message_reaction"]
+      );
+      this.stickerUploadLimits = parseStickerUploadLimits(
+        result["sticker_upload_limits"]
+      );
+      this.docsOn = parseRemoteBool(result["docs_on"]);
+      this.docsSearchOn = parseRemoteBool(result["docs_search_on"]);
+      this.dmloopOn = parseRemoteBool(result["dmloop_on"]);
+      this.dmpersonalOn = parseRemoteBool(result["dmpersonal_on"]);
+      this.driveOn = parseRemoteBool(result["drive_on"]);
+      this.mailOn = parseRemoteBool(result["mail_on"]);
+      // Octo Assistant UID 列表：后端下发 octo_assistant_uids（逗号分隔字符串或数组），
+      // 前端据此判别当前打开的应用 bot 是否为 Octo Assistant（octo-dap S3 / YUJ-277）。
+      this.octoAssistantUids = parseOctoAssistantUids(result["octo_assistant_uids"]);
       this.oidcProviders = parseOidcProviders(result["oidc_providers"]);
       // 仅首次成功通知, 后续重新拉取(重连/手动刷新)不重复打扰订阅方。
       if (!wasSuccessful) this.notifyListeners();
+      if (
+        previousDisableUserCreateSpace !== this.disableUserCreateSpace ||
+        previousMessagesSearchOn !== this.messagesSearchOn ||
+        previousStickerCustomEnabled !== this.stickerCustomEnabled ||
+        !messageReactionCapabilityEqual(
+          previousMessageReaction,
+          this.messageReaction
+        ) ||
+        !stickerUploadLimitsEqual(
+          previousStickerUploadLimits,
+          this.stickerUploadLimits
+        ) ||
+        previousDocsOn !== this.docsOn ||
+        previousDocsSearchOn !== this.docsSearchOn ||
+        previousDmloopOn !== this.dmloopOn ||
+        previousDmpersonalOn !== this.dmpersonalOn ||
+        previousDriveOn !== this.driveOn ||
+        previousMailOn !== this.mailOn ||
+        !stringArraysEqual(previousOctoAssistantUids, this.octoAssistantUids) ||
+        previousRequestFailed !== this.requestFailed ||
+        !oidcProvidersEqual(previousOidcProviders, this.oidcProviders)
+      ) {
+        this.notifyConfigChangeListeners();
+      }
     });
   }
 }
@@ -249,6 +614,7 @@ export class LoginInfo {
    * 用于 UI 区分入口（如 OIDC 用户跳转对应 IdP 的账户中心修改密码）。
    */
   loginProvider?: string;
+  deviceFlag?: number;
 
   /**
    * OCTO 实名认证状态缓存（GH #1121）。
@@ -289,6 +655,7 @@ export class LoginInfo {
     this.setStorageItemForSID("is_work", this.isWork ? "1" : "0");
     this.setStorageItemForSID("sex", this.sex === 1 ? "1" : "0");
     this.setStorageItemForSID("login_provider", this.loginProvider ?? "");
+    this.setStorageItemForSID("device_flag", this.deviceFlag ? String(this.deviceFlag) : "");
     // 实名认证状态 — 严格 tri-state 持久化。
     //   undefined → 删除 key（区别于「明确未实名」）
     //   true      → "1"
@@ -341,8 +708,7 @@ export class LoginInfo {
   }
 
   public getSID(): string {
-    let sid = this.getQueryVariable("sid") || "";
-    return sid;
+    return getSessionSid();
   }
 
   public setStorageItem(key: string, value: string) {
@@ -359,6 +725,10 @@ export class LoginInfo {
    * load 加载登录信息
    */
   public load() {
+    if (consumeOidcPostLogoutCleanup()) {
+      this.logout();
+      clearAuthStorage();
+    }
     this.uid = this.getStorageItemForSID("uid") || "";
     this.shortNo = this.getStorageItemForSID("short_no") || "";
     this.token = this.getStorageItemForSID("token") || "";
@@ -380,6 +750,8 @@ export class LoginInfo {
     }
     const provider = this.getStorageItemForSID("login_provider");
     this.loginProvider = provider ? provider : undefined;
+    const deviceFlag = this.getStorageItemForSID("device_flag");
+    this.deviceFlag = deviceFlag ? Number(deviceFlag) : undefined;
     // 恢复实名认证状态缓存 — 严格 tri-state。
     //   key 缺失（getStorageItemForSID 返回 null） → undefined（未知，保持空白）
     //   "1" → true
@@ -416,7 +788,13 @@ export class LoginInfo {
     this.token = undefined;
     this.appID = "";
     this.role = "";
+    this.uid = "";
+    this.shortNo = "";
+    this.name = "";
+    this.isWork = false;
+    this.sex = 0;
     this.loginProvider = undefined;
+    this.deviceFlag = undefined;
     this.removeStorageItemForSID("token");
     this.removeStorageItemForSID("app_id");
     this.removeStorageItemForSID("role");
@@ -427,6 +805,7 @@ export class LoginInfo {
     this.removeStorageItemForSID("name");
     this.removeStorageItemForSID("sex");
     this.removeStorageItemForSID("login_provider");
+    this.removeStorageItemForSID("device_flag");
     // 清除实名认证缓存
     this.realnameVerified = undefined;
     this.realName = undefined;
@@ -476,9 +855,56 @@ export default class WKApp extends ProviderListener {
   static routeRight = new ContextRouteManager(); // 右边（main）页面路由
   static menus = MenusManager.shared; // 菜单
   // Callback to switch the active sidebar menu by id (set by Main page)
-  static switchToMenuById?: (menuId: string) => void;
-  static openSummaryDetail?: (taskId: number) => void;
+  static switchToMenuById?: (menuId: string, afterSwitch?: () => void) => void;
+  static openSummaryDetail?: (
+    taskId: number | string,
+    spaceId?: string,
+    originChannel?: { channelId: string; channelType: number },
+  ) => void;
+  static openSummarySharePreview?: (
+    shareId: string,
+    spaceId?: string,
+    originChannel?: { channelId: string; channelType: number },
+  ) => void;
+  static openSummaryShareDetail?: (
+    shareId: string,
+    spaceId?: string,
+    originChannel?: { channelId: string; channelType: number },
+  ) => void;
   static searchChatCandidates?: (params: { keyword?: string; chat_type?: string; space_id?: string }) => Promise<any[]>;
+  // Transfer an IM file message into the drive's personal space. Set by
+  // DriveModule.init(). Absent when the drive module isn't registered or the
+  // `drive_on` remote flag is false — callers must guard on presence.
+  // Returns the resulting drive file coordinates so the caller can flip its UI
+  // state to "view in drive" without a follow-up query.
+  static saveMessageToDrive?: (params: { im_group_no: string; im_channel_type: number; im_msg_id: string }) => Promise<{ file_id: number; space_id: string; parent_id: number }>;
+  // Save-to-drive with a target picker. Opens a modal where the caller
+  // chooses target space + folder; resolves after the transfer POST
+  // returns. Rejects ONLY on cancel — a backend failure surfaces via
+  // Toast.error and leaves the modal open for retry (a later successful
+  // retry then resolves the same promise). This inversion vs the earlier
+  // "reject on any failure" contract matches how the picker actually
+  // stays interactive; see PR #1322 review discussion.
+  static saveMessageToDriveAt?: (params: { im_group_no: string; im_channel_type: number; im_msg_id: string }) => Promise<{ file_id: number; space_id: string; parent_id: number }>;
+  // Query whether an IM file (identified by the (channelType, channelID, msgID)
+  // triple the backend uses to derive its source_key) is already transferred
+  // into ANY drive space the caller can see. Cross-space evolution of the
+  // earlier personal-only lookup: personal wins the tie-break, then the
+  // freshest shared save. Registered by DriveModule; the chat file card
+  // uses it to switch its icon action between "save" and "view".
+  static checkDriveTransferred?: (msg: { im_group_no: string; im_channel_type: number; im_msg_id: string }) => Promise<{ file_id: number; space_id: string; parent_id: number } | null>;
+  // Synchronous cache probe of the drive-transferred state — returns the
+  // known entry, `null` for confirmed-not-transferred, or `undefined` when
+  // the cache has no answer yet. Registered by DriveModule; the right-click
+  // menu factory uses this because it runs synchronously (can't await the
+  // async checkDriveTransferred) and needs the current answer, if any, to
+  // decide between "存到云盘…" and "在云盘中查看" at menu open time.
+  static getDriveTransferred?: (msg: { im_group_no: string; im_channel_type: number; im_msg_id: string }) => { file_id: number; space_id: string; parent_id: number } | null | undefined;
+  // Open the drive UI and focus/flash a specific file. Registered by DriveModule.
+  // parent_id is optional — when the file lives at the space root pass 0 or omit;
+  // when the file is buried in nested folders pass the immediate parent so the
+  // drive VM can rebuild the breadcrumb via GET /files/:id/ancestors.
+  static openDriveFile?: (params: { space_id: string; file_id: number; parent_id?: number }) => void;
   // Id of the currently active sidebar menu (kept in sync by Main page)
   static currentMenuId?: string;
   static apiClient = APIClient.shared; // api客户端
@@ -505,7 +931,8 @@ export default class WKApp extends ProviderListener {
 
   /**
    * 附件发送守卫（#143/#144）
-   * Conversation 在有未发送附件时注册此回调，返回 true 表示可以切换，false 表示有附件待确认。
+   * Conversation 在有未发送附件或尚未入队的 compose 时注册此回调。
+   * 返回 true 表示可以切换，false 表示需要确认。
    * componentDidMount 注册，componentWillUnmount 清空（仅注册者可清空，防止新实例 guard 被旧实例覆盖）。
    */
   pendingAttachmentGuard?: () => boolean;
@@ -513,6 +940,13 @@ export default class WKApp extends ProviderListener {
 
   /** 待打开子区面板的群组 ID，ChatContentPage 挂载时检查并消费 */
   pendingThreadPanel?: string;
+
+  /**
+   * subchannel_opened 去重 sentinel：由「已打开面板子区」再导航(打开完整视图/页内搜索/
+   * 文件预览)的三个调用点写入目标子区 channelID，ChatContentPage 挂载时消费。命中则跳过
+   * 挂载处的 subchannel_opened(didUpdate 已发过)，保证一次开子区手势只发一次。见 #1452 R10 P1-1。
+   */
+  pendingSubchannelOpenTracked?: string;
 
   /** 待打开的具体子区，ChatContentPage 挂载时检查并消费 */
   pendingThread?: {
@@ -543,16 +977,32 @@ export default class WKApp extends ProviderListener {
 
   private _notificationIsClose: boolean = false; // 通知是否关闭
 
-  private wsaddrs = new Array<string>(); // ws的连接地址
-  private addrUsed = false; // 地址是否被使用
+  private imConnectAddressManager = new ImConnectAddressManager({
+    getConnectAddrs: () => WKApp.dataSource.commonDataSource.imConnectAddrs(),
+  });
 
   isPC = false; // 是否是PC端
   deviceId: string = ""; // 设备ID
   currentSpaceId: string = ""; // 当前选中的 Space ID
   channelSpaceMap: Map<string, string> = new Map(); // channelID_channelType → spaceID 缓存
+  // channelID_channelType → my source_space_id 缓存（仅在我作为外部成员加入该群时有值）
+  // 由 conversation sync 响应（octo-server PR#154 起携带 my_source_space_id）预填，
+  // 用于在 subscriber.orgData 未加载完成时避免 shouldSkipChannelForSpace 误过滤外部群。
+  channelMySourceSpaceMap: Map<string, string> = new Map();
   spaceChecked: boolean = false; // Space 检查是否完成
   deviceName: string = ""; // 设备名称
   deviceModel: string = ""; // 设备型号
+  private remoteConfigForegroundRefreshStarted: boolean = false;
+  private lastRemoteConfigForegroundRefreshAt: number = 0;
+  // 幂等登出闸门：token 过期后往往有多个并发请求同时 401，各自触发一次
+  // logoutCallback → logout()。若不加护栏，window.location.replace("/login")
+  // 会被连发多次，且导航是异步的、飞行中的请求继续 reject 继续 logout，
+  // 造成"登录页反复跳转 / 控制台疯狂刷 401"的死循环。首次进入即置位，后续重入直接返回。
+  private _loggingOut: boolean = false;
+  // Startup and connectIM can both observe the legacy desktop session during
+  // boot.  The migration is intentionally one-shot per app instance; after
+  // the first logout there must not be a second logout/navigation race.
+  private _deviceFlagMigrationHandled: boolean = false;
 
   set notificationIsClose(v: boolean) {
     this._notificationIsClose = v;
@@ -565,59 +1015,78 @@ export default class WKApp extends ProviderListener {
 
   // app启动
   startup() {
+    if (consumeOidcPostLogoutCleanup()) {
+      void this.clearLocalLoginState();
+    }
     WKApp.loginInfo.load(); // 加载登录信息
 
     // 是否是PC端
     if (
-      (window as any)?.__POWERED_ELECTRON__ ||
+      isElectronPowered() ||
       (window as any).__TAURI_IPC__
     ) {
       this.isPC = true;
+    }
+    const expectedDeviceFlag = getExpectedImDeviceFlag(this.isPC);
+    WKSDK.shared().config.deviceFlag = expectedDeviceFlag;
+    // Tokens issued before the desktop device-slot migration do not carry a
+    // marker. Re-authenticate once instead of reconnecting with an ambiguous
+    // token/device tuple and silently losing the IM connection.
+    const migrationSid = getSessionSid();
+    const hasDeviceFlagMismatch = hasImDeviceFlagMismatch(
+      WKApp.loginInfo.isLogined(),
+      WKApp.loginInfo.deviceFlag,
+      expectedDeviceFlag,
+    );
+    if (!this._deviceFlagMigrationHandled && this.isPC && hasDeviceFlagMismatch) {
+      const alreadyMigrated = hasDeviceFlagMigration(migrationSid);
+      console.warn(
+        `[im] device flag mismatch detected at startup (stored=${String(WKApp.loginInfo.deviceFlag)}, expected=${expectedDeviceFlag}); ${alreadyMigrated ? "cleaning up an interrupted" : "starting"} one-shot re-login`,
+      );
+      this._deviceFlagMigrationHandled = true;
+      markDeviceFlagMigration(migrationSid);
+      WKApp.loginInfo.logout();
+    } else if (!hasDeviceFlagMismatch && WKApp.loginInfo.isLogined()) {
+      // A matching session supersedes any marker left by an interrupted boot.
+      clearDeviceFlagMigration(migrationSid);
     }
     this.deviceId = this.getDeviceIdFromStorage();
     this.deviceName = this.getOSAndVersion();
     this.deviceModel = this.getBrandsFromUserAgent();
 
-    // 暗黑模式已关闭，强制亮色
-    WKApp.config.themeMode = ThemeMode.light;
+    const storedThemeMode = StorageService.shared.getItem("theme-mode");
+    WKApp.config.themeMode =
+      storedThemeMode === `${ThemeMode.dark}` || storedThemeMode === "dark"
+        ? ThemeMode.dark
+        : ThemeMode.light;
 
-    WKSDK.shared().config.provider.connectAddrCallback = async (
-      callback: ConnectAddrCallback
-    ) => {
-      if (!this.wsaddrs || this.wsaddrs.length === 0) {
-        this.wsaddrs = await WKApp.dataSource.commonDataSource.imConnectAddrs();
-      }
-      if (this.wsaddrs.length > 0) {
-        this.addrUsed = true;
-        callback(this.wsaddrs[0]);
-      }
-    };
+    registerImConnectAddressProvider(
+      WKSDK.shared(),
+      this.imConnectAddressManager.connectAddrCallback
+    );
 
     WKApp.endpoints.addOnLogin(() => {
+      // The replacement session has now been persisted with its device flag;
+      // do not carry the legacy-session migration marker into its lifecycle.
+      clearDeviceFlagMigration(getSessionSid());
+      this._deviceFlagMigrationHandled = false;
+      WKApp.mittBus.emit("wk:auth-state-changed");
       this.startMain();
     });
 
     if (WKApp.loginInfo.isLogined()) {
+      // Module init runs before loginInfo.load(). Re-emit the auth lifecycle
+      // after restore so user-scoped stores bind to the loaded uid too.
+      WKApp.mittBus.emit("wk:auth-state-changed");
       this.startMain();
     }
 
-    WKSDK.shared().connectManager.addConnectStatusListener(
-      (status: ConnectStatus, reasonCode?: number) => {
-        if (status === ConnectStatus.ConnectKick) {
-          WKApp.shared.logout();
-        } else if (reasonCode === 2) {
-          // 认证失败！
-          WKApp.shared.logout();
-        } else if (status === ConnectStatus.Disconnect) {
-          if (this.addrUsed && this.wsaddrs.length > 1) {
-            const oldwsAddr = this.wsaddrs[0];
-            this.wsaddrs.splice(0, 1);
-            this.wsaddrs.push(oldwsAddr);
-            this.addrUsed = false;
-          }
-        }
-      }
-    );
+    registerImConnectStatusListener(WKSDK.shared(), {
+      logout: () => WKApp.shared.logout(),
+      resetTyping: () => TypingManager.shared.resetAll(),
+      rotateConnectAddress: () =>
+        this.imConnectAddressManager.rotateAfterDisconnect(),
+    });
 
     // 通知设置
     const notificationIsClose = StorageService.shared.getItem(
@@ -630,6 +1099,43 @@ export default class WKApp extends ProviderListener {
     }
 
     WKApp.remoteConfig.startRequestConfig();
+    this.setupRemoteConfigForegroundRefresh();
+  }
+
+  private setupRemoteConfigForegroundRefresh() {
+    if (
+      this.remoteConfigForegroundRefreshStarted ||
+      typeof window === "undefined" ||
+      typeof document === "undefined"
+    ) {
+      return;
+    }
+    this.remoteConfigForegroundRefreshStarted = true;
+
+    const refresh = () => {
+      this.refreshRemoteConfigOnForeground();
+      // 回前台时通知当前会话重同步成员列表。合盖/息屏久后 WS 可能已断、
+      // 断连期间的成员变更 CMD 已丢失，仅靠 remoteConfig 刷新不会补成员，
+      // 导致 @ 提及弹窗搜不到新龙虾/成员（octo-web#567）。
+      WKApp.mittBus.emit("wk:app-foreground");
+    };
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) {
+        refresh();
+        // 第一层防御：回前台清除所有残留 typing，对齐 iOS appDidBecomeActive。
+        TypingManager.shared.resetAll();
+      }
+    });
+    window.addEventListener("focus", refresh);
+  }
+
+  private refreshRemoteConfigOnForeground() {
+    const now = Date.now();
+    if (now - this.lastRemoteConfigForegroundRefreshAt < 5000) return;
+    this.lastRemoteConfigForegroundRefreshAt = now;
+    WKApp.remoteConfig.requestConfig().catch((e) => {
+      console.warn("[WKRemoteConfig] foreground refresh failed", e);
+    });
   }
 
   getDeviceIdFromStorage() {
@@ -712,19 +1218,43 @@ export default class WKApp extends ProviderListener {
     WKApp.dataSource.contactsSync(); // 同步通讯录
     ProhibitwordsService.shared.sync(); // 同步敏感词
 
-    WKApp.apiClient
-      .get(`/user/devices/${WKApp.shared.deviceId}`)
-      .then((res) => {
-        if (res.id) {
-          WKSDK.shared().config.clientMsgDeviceId = res.id;
-        }
-      });
+    // 设备记录不存在（status===400）或其它读取失败时，仅记录告警以消除
+    // unhandled promise rejection；不写 clientMsgDeviceId，保持原值降级运行。
+    // 服务端暂无设备注册端点，此处不做注册，仅兜底。
+    syncClientMsgDeviceId({
+      deviceId: WKApp.shared.deviceId,
+      fetchDevice: (path) => WKApp.apiClient.get(path),
+      setClientMsgDeviceId: (id) => {
+        WKSDK.shared().config.clientMsgDeviceId = id;
+      },
+    });
   }
 
   connectIM() {
-    WKSDK.shared().config.uid = WKApp.loginInfo.uid;
-    WKSDK.shared().config.token = WKApp.loginInfo.token;
-    WKSDK.shared().connect();
+    const expectedDeviceFlag = getExpectedImDeviceFlag(this.isPC);
+    if (!this._deviceFlagMigrationHandled && this.isPC && hasImDeviceFlagMismatch(
+      WKApp.loginInfo.isLogined(),
+      WKApp.loginInfo.deviceFlag,
+      expectedDeviceFlag,
+    )) {
+      console.error(
+        `[im] refusing to connect with mismatched device flag (stored=${String(WKApp.loginInfo.deviceFlag)}, expected=${expectedDeviceFlag}); forcing re-login`,
+      );
+      this._deviceFlagMigrationHandled = true;
+      markDeviceFlagMigration(getSessionSid());
+      this.logout();
+      return;
+    }
+    // e2e: mock-im-runtime 已 short-circuit connect → Connected (fake-provider install 时做),
+    // 这里跳过真实 sdk.connect() 免真去建 WebSocket / 覆盖 mock 的 connect status.
+    // dev / prod 完全走 tree-shake 分支, 无副作用.
+    if (import.meta.env.VITE_E2E_MOCK_IM === "1") {
+      return;
+    }
+    connectImClient({
+      sdk: WKSDK.shared(),
+      loginInfo: WKApp.loginInfo,
+    });
   }
 
   registerModule(module: IModule) {
@@ -740,13 +1270,95 @@ export default class WKApp extends ProviderListener {
   isLogined() {
     return WKApp.loginInfo.isLogined();
   }
-  // 登出
-  logout() {
+  private async clearLocalLoginState() {
     WKApp.loginInfo.logout();
-    localStorage.removeItem("currentSpaceId");
+    clearAuthStorage();
+    setSessionSid("");
     this.currentSpaceId = "";
+    this.channelSpaceMap.clear();
+    this.channelMySourceSpaceMap.clear();
     this.spaceChecked = false;
-    window.location.reload();
+    WKApp.mittBus.emit("wk:auth-state-changed");
+  }
+
+  private async clearElectronAuthSession() {
+    if (isElectronPowered()) {
+      try {
+        const result = (await clearElectronAuthSessionBridge()) as
+          | { ok?: boolean; partial?: boolean }
+          | undefined;
+        if (result && (result.ok !== true || result.partial === true)) {
+          console.warn("[auth] Electron auth-session cleanup was incomplete", result);
+        }
+      } catch {
+        // Local storage cleanup must still complete if the main process is
+        // unavailable; callers await this before reloading the shell.
+      }
+    }
+  }
+
+  // 登出
+  async logout() {
+    // 幂等守卫：并发 401 会重复调用本方法，只允许第一次真正执行清理与跳转，
+    // 后续重入直接返回，避免 window.location.replace 被连发导致的反复跳转/刷屏。
+    if (this._loggingOut) return;
+    this._loggingOut = true;
+    await runLogoutCleanup(
+      () => this.clearLocalLoginState(),
+      () => this.clearElectronAuthSession(),
+    );
+    // Packaged Electron shell loads via `file://` and has no `/login` route
+    // on disk, so `location.replace("/login")` navigates to
+    // `file:///login` and hangs on ERR_FILE_NOT_FOUND — the interceptor's
+    // will-navigate hook then no longer runs because there's no armed flow.
+    // Reload the trusted shell instead; the renderer boot decides which
+    // login UI to render based on the cleared credentials.
+    //
+    // Web (http[s]) keeps the original behavior because the login route
+    // *is* served by the SPA host and a reload would drop deep-link state
+    // that the login page may still want to consume (e.g. `?returnTo=`).
+    if (this.isElectronShell()) {
+      replaceWithShellDocument();
+      return;
+    }
+    window.location.replace("/login");
+  }
+
+  /**
+   * Electron dev mode serves the renderer from http://localhost, just like a
+   * browser. The preload marker is the authoritative signal that this window
+   * is still inside the desktop shell; checking only file:// sends dev-shell
+   * logout through the web redirect path.
+   */
+  private isElectronShell() {
+    return isElectronShellBridgeAvailable();
+  }
+
+  async logoutUserInitiated() {
+    // Thin wrapper around performOidcUserInitiatedLogout so the packaged
+    // desktop / web branching and end-session URL policy can be exercised
+    // by unit tests without booting WKApp. All side-effects on WKApp state
+    // are done through the injected callbacks below.
+    await performOidcUserInitiatedLogout({
+      loginProvider: WKApp.loginInfo.loginProvider,
+      token: WKApp.loginInfo.token || "",
+      apiURL: WKApp.apiClient.config.apiURL || "",
+      ipc: getOctoElectronBridge()?.oidc ?? getElectronIpcBridge(),
+      env: this.isElectronShell() ? "desktop-shell" : "web",
+      // Only forward the dev override when actually in a dev build; in
+      // production `import.meta.env.DEV` is false and we must not read the
+      // VITE_ env var (it may leak into production bundles as `undefined`
+      // and cause spurious overridePostLogoutRedirectUri no-ops).
+      devPostLogoutRedirectUriOverride: import.meta.env.DEV
+        ? import.meta.env.VITE_OIDC_POST_LOGOUT_REDIRECT_URI
+        : undefined,
+      clearLocalLoginState: () => this.clearLocalLoginState(),
+      clearElectronAuthSession: () => this.clearElectronAuthSession(),
+      reloadShell: replaceWithShellDocument,
+      navigateExternal: (url) => { window.location.href = url; },
+      markPostLogoutCleanup: () => { markOidcPostLogoutCleanup(); },
+      fallbackLogout: () => this.logout(),
+    });
   }
 
   avatarChannel(channel: Channel) {
@@ -754,7 +1366,15 @@ export default class WKApp extends ProviderListener {
       return "";
     }
     let avatarTag = this.getChannelAvatarTag(channel);
-    const channelInfo = WKSDK.shared().channelManager.getChannelInfo(channel);
+    const channelInfo = getImChannelInfo(WKSDK.shared(), channel);
+    // 群已解散（企业微信式只读态）：用默认灰色头像替代群 logo，视觉上"群已遣散"。
+    // 放在 logo 判断之前，确保即便缓存里残留旧 logo 也会被覆盖（A 数据 + B 皮肤）。
+    if (
+      channel.channelType === ChannelTypeGroup &&
+      channelInfo?.orgData?.status === GroupStatusDisband
+    ) {
+      return DISBANDED_GROUP_AVATAR;
+    }
     if (channelInfo && channelInfo.logo && channelInfo.logo !== "") {
       let logo = channelInfo.logo;
       // Data URIs are self-contained — return as-is without query params or URL rewriting
@@ -776,7 +1396,7 @@ export default class WKApp extends ProviderListener {
       if (spaceId && uid.startsWith(`s${spaceId}_`)) {
         uid = uid.substring(spaceId.length + 2);
       }
-      if (!uid) uid = channel.channelID; // fallback
+      if (!uid) return "";
       return `${baseURL}users/${uid}/avatar?v=${avatarTag}`;
     } else if (channel.channelType === ChannelTypeGroup) {
       return `${baseURL}groups/${channel.channelID}/avatar?v=${avatarTag}`;
@@ -791,6 +1411,7 @@ export default class WKApp extends ProviderListener {
   }
 
   avatarUser(uid: string) {
+    if (!uid) return "";
     const c = new Channel(uid, ChannelTypePerson);
     return this.avatarChannel(c);
   }

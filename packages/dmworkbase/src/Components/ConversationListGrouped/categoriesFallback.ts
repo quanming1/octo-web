@@ -1,4 +1,5 @@
 import type { CategoryItem } from "../../Service/CategoryService"
+import { t } from "../../i18n"
 
 // category_id 收窄为非 null
 export type ValidCategoryItem = CategoryItem & { category_id: string }
@@ -34,7 +35,7 @@ export function computeEffectiveCategories(categories: ValidCategoryItem[]): Val
     if (categories.length > 0) return categories
     return [{
         category_id: VIRTUAL_DEFAULT_CATEGORY_ID,
-        name: '默认',
+        name: t("base.chatSidebar.categoryFallback"),
         sort: 0,
         groups: [],
         is_default: true,

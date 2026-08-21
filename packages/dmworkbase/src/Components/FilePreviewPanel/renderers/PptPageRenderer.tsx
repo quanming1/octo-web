@@ -15,6 +15,7 @@ import { LoaderCircle, Code2, Eye, AlertCircle } from "lucide-react";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import HtmlIframeRenderer from "./HtmlIframeRenderer";
+import { useI18n } from "../../../i18n";
 import "./PptRenderer.css";
 
 /** PPT 页面内容类型 */
@@ -50,6 +51,7 @@ export interface PptPageRendererProps extends PptPageContent {
  * 支持代码视图和预览视图切换
  */
 const PptPageRenderer: React.FC<PptPageRendererProps> = (props) => {
+  const { t } = useI18n();
   const {
     index,
     total,
@@ -99,19 +101,19 @@ const PptPageRenderer: React.FC<PptPageRendererProps> = (props) => {
             (contentProps as { url: string }).url
           );
           if (!response.ok) {
-            throw new Error("加载失败");
+            throw new Error(t("base.filePreview.loadFailed"));
           }
           const text = await response.text();
           setContent(text);
         } catch (err) {
-          setError(err instanceof Error ? err.message : "加载失败");
+          setError(err instanceof Error ? err.message : t("base.filePreview.loadFailed"));
         } finally {
           setLoading(false);
         }
       };
       fetchContent();
     }
-  }, [hasUrl, (contentProps as { url?: string }).url]);
+  }, [hasUrl, (contentProps as { url?: string }).url, t]);
 
   // 监听 iframe 高度消息
   useEffect(() => {
@@ -202,7 +204,9 @@ const PptPageRenderer: React.FC<PptPageRendererProps> = (props) => {
   const renderLoading = () => (
     <div className="wk-file-preview-ppt-page__loading">
       <LoaderCircle className="wk-file-preview-ppt-page__spinner" />
-      <span className="wk-file-preview-ppt-page__loading-text">加载中...</span>
+      <span className="wk-file-preview-ppt-page__loading-text">
+        {t("base.filePreview.loading")}
+      </span>
     </div>
   );
 

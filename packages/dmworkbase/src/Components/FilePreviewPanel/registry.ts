@@ -14,14 +14,15 @@ import ExcelRenderer from "./renderers/ExcelRenderer";
 import JsonRenderer from "./renderers/JsonRenderer";
 import JsonlRenderer from "./renderers/JsonlRenderer";
 import ImageRenderer from "./renderers/ImageRenderer";
+import VideoRenderer from "./renderers/VideoRenderer";
 
 /**
  * 文件渲染器注册表
  * 策略模式核心：根据文件扩展名选择对应的渲染器
  *
  * 注意：以下文件类型明确不支持预览，走 FallbackRenderer：
- * - .docx / .xlsx / .xls / .pptx / .ppt（Office 文档）
- * - 图片、视频、音频（对话流内已渲染，不进入面板）
+ * - .docx / .pptx / .ppt（Word / PowerPoint）
+ * - 音频（对话流内已渲染，不进入面板）
  */
 class FileRendererRegistry {
   private registry: Map<string, RendererRegistryItem> = new Map();
@@ -38,6 +39,14 @@ class FileRendererRegistry {
       type: "image",
       extensions: ["png", "jpg", "jpeg", "gif", "bmp", "webp", "svg"],
       renderer: ImageRenderer,
+      needsFetch: false,
+    });
+
+    // 视频
+    this.register({
+      type: "video",
+      extensions: ["mp4", "m4v", "mov", "webm", "ogv", "ogg"],
+      renderer: VideoRenderer,
       needsFetch: false,
     });
 
@@ -123,19 +132,13 @@ class FileRendererRegistry {
       needsFetch: true,
     });
 
-    // CSV 表格（仅支持 CSV，不支持 xlsx/xls 等 Office 格式）
-    // 需求 5.1 明确：.docx / .xlsx / .pptx 不支持
+    // Excel/CSV 表格（xlsx, xls, xlsb, xlsm, csv）
     this.register({
       type: "excel",
-      extensions: ["csv"],
+      extensions: ["xlsx", "xls", "xlsb", "xlsm", "csv"],
       renderer: ExcelRenderer,
       needsFetch: true,
     });
-
-    // 注意：以下类型明确不支持，走 FallbackRenderer：
-    // - .xlsx, .xls, .xlsb, .xlsm (Excel)
-    // - .pptx, .ppt (PowerPoint)
-    // - .docx, .doc (Word)
   }
 
   /** 注册渲染器 */

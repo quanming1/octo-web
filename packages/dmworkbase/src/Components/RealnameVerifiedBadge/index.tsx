@@ -1,4 +1,5 @@
 import React from "react";
+import { useI18n } from "../../i18n";
 import "./index.css";
 
 interface RealnameVerifiedBadgeProps {
@@ -30,6 +31,7 @@ const RealnameVerifiedBadge: React.FC<RealnameVerifiedBadgeProps> = ({
     variant = "full",
     className,
 }) => {
+    const { t } = useI18n();
     const combined = className
         ? `wk-realname-badge wk-realname-badge--${variant} ${className}`
         : `wk-realname-badge wk-realname-badge--${variant}`;
@@ -37,8 +39,8 @@ const RealnameVerifiedBadge: React.FC<RealnameVerifiedBadgeProps> = ({
     return (
         <span
             className={combined}
-            title="已完成实名认证"
-            aria-label="已实名"
+            title={t("base.realnameVerified.title")}
+            aria-label={t("base.realnameVerified.label")}
             role="img"
         >
             <svg
@@ -60,7 +62,7 @@ const RealnameVerifiedBadge: React.FC<RealnameVerifiedBadgeProps> = ({
                 />
             </svg>
             {variant !== "icon" && (
-                <span className="wk-realname-badge__text">已实名</span>
+                <span className="wk-realname-badge__text">{t("base.realnameVerified.label")}</span>
             )}
         </span>
     );

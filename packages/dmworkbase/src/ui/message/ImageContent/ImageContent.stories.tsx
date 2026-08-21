@@ -30,6 +30,41 @@ export const SingleDefault: SingleStory = {
   },
 }
 
+export const SingleSending: SingleStory = {
+  args: {
+    src: 'https://picsum.photos/800/600?random=sending',
+    width: 800,
+    height: 600,
+    transferState: {
+      status: 'sending',
+    },
+  },
+}
+
+export const SingleUploading: SingleStory = {
+  args: {
+    src: 'https://picsum.photos/1200/900?random=uploading',
+    width: 1200,
+    height: 900,
+    transferState: {
+      status: 'uploading',
+      progress: 48,
+    },
+  },
+}
+
+export const SingleUploadFailed: SingleStory = {
+  args: {
+    src: 'https://picsum.photos/800/600?random=failed',
+    width: 800,
+    height: 600,
+    transferState: {
+      status: 'failed',
+      onRetry: () => alert('重试上传'),
+    },
+  },
+}
+
 export const SingleLarge: SingleStory = {
   args: {
     src: 'https://picsum.photos/1200/900',
@@ -87,6 +122,16 @@ export const MultiFiveImages: MultiStory = {
   render: () => (
     <MultiImage
       images={mockImages}
+      onImageClick={(i) => alert(`点击第 ${i + 1} 张`)}
+    />
+  ),
+}
+
+export const MultiSending: MultiStory = {
+  render: () => (
+    <MultiImage
+      images={mockImages.slice(0, 3)}
+      transferState={{ status: 'sending' }}
       onImageClick={(i) => alert(`点击第 ${i + 1} 张`)}
     />
   ),

@@ -12,6 +12,8 @@ import { isFileTooLarge, getRenderMode, formatFileSize } from "../config";
 import { useFileContent } from "../hooks/useFileContent";
 import { RendererState } from "./RendererState";
 import FileTooLarge from "./FileTooLarge";
+import { downloadFile } from "../../../Utils/download";
+import { useI18n } from "../../../i18n";
 import "./HtmlRenderer.css";
 import "./code-highlight.css";
 
@@ -70,6 +72,7 @@ const HtmlRenderer: React.FC<HtmlRendererProps> = ({
   viewMode: externalViewMode,
   onViewModeChange,
 }) => {
+  const { t } = useI18n();
   // 内部视图模式状态（当外部不传入时使用）
   const [internalViewMode, setInternalViewMode] = useState<
     "preview" | "source"
@@ -134,20 +137,14 @@ const HtmlRenderer: React.FC<HtmlRendererProps> = ({
   // iframe 加载错误
   const handleIframeError = useCallback(() => {
     setIframeLoading(false);
-    const errorMsg = "HTML 渲染失败，已切换到源码视图";
+    const errorMsg = t("base.filePreview.html.renderFailedSwitchSource");
     setRenderError(errorMsg);
     handleViewModeChange("source");
     onError?.(errorMsg);
-  }, [handleViewModeChange, onError]);
+  }, [handleViewModeChange, onError, t]);
 
   const handleDownload = useCallback(() => {
-    const a = document.createElement("a");
-    a.href = file.url;
-    a.download = file.name || "file.html";
-    a.target = "_blank";
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    void downloadFile(file.url, file.name || "file.html");
   }, [file.name, file.url]);
 
   // 监听来自 iframe 的 postMessage
@@ -177,7 +174,12 @@ const HtmlRenderer: React.FC<HtmlRendererProps> = ({
       }
 
       if (event.data?.type === "html-render-error") {
-        const errorMsg = `渲染错误: ${event.data.message || "未知错误"}`;
+        const errorMsg = t("base.filePreview.html.renderError", {
+          values: {
+            message:
+              event.data.message || t("base.filePreview.html.unknownError"),
+          },
+        });
         setRenderError(errorMsg);
         handleViewModeChange("source");
         onError?.(errorMsg);
@@ -186,7 +188,7 @@ const HtmlRenderer: React.FC<HtmlRendererProps> = ({
 
     window.addEventListener("message", handleMessage);
     return () => window.removeEventListener("message", handleMessage);
-  }, [viewMode, content, handleViewModeChange, onError]);
+  }, [viewMode, content, handleViewModeChange, onError, t]);
 
   // 向 srcdoc 注入 CSP 监听脚本。命中 CSP 后不再渲染 iframe，直接显示禁用预览页。
   const srcdocContent = useMemo(() => {
@@ -265,7 +267,7 @@ const HtmlRenderer: React.FC<HtmlRendererProps> = ({
               className="wk-file-preview-html-renderer__retry-preview"
               onClick={() => handleViewModeChange("preview")}
             >
-              重试预览
+              {t("base.filePreview.html.retryPreview")}
             </button>
           </div>
         )}
@@ -288,8 +290,9 @@ const HtmlRenderer: React.FC<HtmlRendererProps> = ({
           ) : (
             <>
               <div className="wk-file-preview-html-renderer__plain-hint">
-                文件较大（{formatFileSize(contentSize)}
-                ），已禁用语法高亮以提升性能
+                {t("base.filePreview.largeFilePlainHintPerf", {
+                  values: { size: formatFileSize(contentSize) },
+                })}
               </div>
               <pre className="wk-file-preview-html-renderer__plain-source">
                 <code>{content}</code>
@@ -312,14 +315,13 @@ const HtmlRenderer: React.FC<HtmlRendererProps> = ({
           </div>
           <div className="wk-file-preview-html-renderer__disabled-content">
             <h3 className="wk-file-preview-html-renderer__disabled-title">
-              无法安全预览此 HTML
+              {t("base.filePreview.html.safePreviewBlockedTitle")}
             </h3>
             <p className="wk-file-preview-html-renderer__disabled-message">
-              此文件在预览时触发了浏览器安全策略限制。为避免页面异常或潜在风险，已停止渲染
-              HTML 内容。
+              {t("base.filePreview.html.safePreviewBlockedMessage")}
             </p>
             <p className="wk-file-preview-html-renderer__disabled-submessage">
-              你可以切换到源码视图查看文件内容，或下载到本地环境打开。
+              {t("base.filePreview.html.safePreviewBlockedSubmessage")}
             </p>
           </div>
           <div className="wk-file-preview-html-renderer__disabled-actions">
@@ -327,14 +329,14 @@ const HtmlRenderer: React.FC<HtmlRendererProps> = ({
               className="wk-file-preview-html-renderer__disabled-action"
               onClick={() => handleViewModeChange("source")}
             >
-              查看源码
+              {t("base.filePreview.html.viewSource")}
             </button>
             <button
               className="wk-file-preview-html-renderer__disabled-action wk-file-preview-html-renderer__disabled-action--primary"
               onClick={handleDownload}
             >
               <Download size={16} />
-              <span>下载文件</span>
+              <span>{t("base.filePreview.downloadFile")}</span>
             </button>
           </div>
         </div>
@@ -348,7 +350,7 @@ const HtmlRenderer: React.FC<HtmlRendererProps> = ({
         <div className="wk-file-preview-html-renderer__loading-overlay">
           <div className="wk-file-preview-html-renderer__spinner" />
           <span className="wk-file-preview-html-renderer__message">
-            渲染中...
+            {t("base.filePreview.html.rendering")}
           </span>
         </div>
       )}

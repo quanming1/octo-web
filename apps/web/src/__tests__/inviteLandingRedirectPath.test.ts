@@ -1,11 +1,18 @@
 import { describe, it, expect } from 'vitest'
 
+import { buildPostLoginRedirectUrl } from '../Layout/postLoginRedirect'
+
 /**
  * Unit tests for the InviteLanding redirect basePath logic (fix for #1006).
  *
  * Reproduces the bug where `window.location.pathname === "/api/"` leads to the
- * post-join redirect landing on `https://host/api/?sid=xxx` → 404. The fix
- * strips any `/api` or `/api/vN` prefix before treating pathname as basePath.
+ * post-join redirect landing on `https://host/api/` → 404. The fix strips any
+ * `/api` or `/api/vN` prefix before treating pathname as basePath.
+ *
+ * Post PR#851 (sid-clean, Jerry-Xin 🟡): the redirect URL no longer carries
+ * `?sid=` — the InviteLanding component now calls `setSessionSid(sid)` to
+ * stash the sid in SessionScope sessionStorage and navigates to a clean URL.
+ * These tests mirror that production shape.
  */
 
 // Mirrors the private helper in apps/web/src/Components/InviteLanding/index.tsx.
@@ -16,51 +23,69 @@ function getAppBasePath(pathname: string): string {
   return stripped.replace(/\/+$/, '')
 }
 
-function buildRedirect(pathname: string, sid: string): string {
+function buildRedirect(pathname: string): string {
   const basePath = getAppBasePath(pathname)
-  return `https://host${basePath}/${sid ? `?sid=${sid}` : ''}`
+  // Exercise the shipped redirect helper. This used to re-implement
+  // `https://host${basePath}/` locally, which drifted from production once
+  // InviteLanding moved to buildPostLoginRedirectUrl.
+  return buildPostLoginRedirectUrl(
+    `https://host${pathname}`,
+    'https://host',
+    basePath,
+    ''
+  )
 }
 
 describe('InviteLanding redirect basePath (#1006)', () => {
   it('normal root pathname → redirects to "/"', () => {
-    expect(buildRedirect('/', 'abc')).toBe('https://host/?sid=abc')
+    expect(buildRedirect('/')).toBe('https://host/')
   })
 
   it('"/api/" pathname no longer lands on backend 404 route', () => {
-    // Bug repro: before the fix this returned "/api/?sid=abc" → 404.
-    expect(buildRedirect('/api/', 'abc')).toBe('https://host/?sid=abc')
+    // Bug repro: before the fix this returned "/api/" → 404.
+    expect(buildRedirect('/api/')).toBe('https://host/')
   })
 
   it('"/api" (no trailing slash) is also stripped', () => {
-    expect(buildRedirect('/api', 'abc')).toBe('https://host/?sid=abc')
+    expect(buildRedirect('/api')).toBe('https://host/')
   })
 
   it('"/api/v1/" is stripped (versioned API path)', () => {
-    expect(buildRedirect('/api/v1/', 'abc')).toBe('https://host/?sid=abc')
+    expect(buildRedirect('/api/v1/')).toBe('https://host/')
   })
 
   it('"/api/v2/space/invite/xxx" strips the /api/vN prefix only', () => {
     // Only the /api[/vN] segment is removed — the remainder is kept so we
     // never accidentally chop off a legitimate sibling deployment path.
-    // For the #1006 repro, this branch is defensive; the user normally lands
-    // on /api/?invite=xxx, which fully collapses to '/' (covered above).
-    expect(buildRedirect('/api/v2/space/invite/xxx', 'abc')).toBe(
-      'https://host/space/invite/xxx/?sid=abc'
+    expect(buildRedirect('/api/v2/space/invite/xxx')).toBe(
+      'https://host/space/invite/xxx/'
     )
   })
 
   it('subpath deployment ("/web/") is preserved', () => {
     // Non-/api subpath must still be preserved for legacy deployments.
-    expect(buildRedirect('/web/', 'abc')).toBe('https://host/web/?sid=abc')
+    expect(buildRedirect('/web/')).toBe('https://host/web/')
   })
 
   it('"/apiary/" is NOT stripped (only matches exact /api segment)', () => {
     // Regex uses boundary `(?=\/|$)` so /apiary is left alone.
-    expect(buildRedirect('/apiary/', 'abc')).toBe('https://host/apiary/?sid=abc')
+    expect(buildRedirect('/apiary/')).toBe('https://host/apiary/')
+  })
+})
+
+describe('InviteLanding redirect under file:// (Electron desktop)', () => {
+  const basePath = '/Applications/OCTO.app/Contents/Resources/app.asar/build'
+  const href = `file://${basePath}/index.html`
+
+  it('handleJoin (query="") stays on the packaged index.html', () => {
+    expect(buildPostLoginRedirectUrl(href, 'null', basePath, '')).toBe(
+      `file://${basePath}/index.html`
+    )
   })
 
-  it('empty sid produces no query string', () => {
-    expect(buildRedirect('/', '')).toBe('https://host/')
-    expect(buildRedirect('/api/', '')).toBe('https://host/')
+  it('handleGoLogin appends the invite query on the packaged index.html', () => {
+    expect(
+      buildPostLoginRedirectUrl(href, 'null', basePath, '?invite=abc&action=login')
+    ).toBe(`file://${basePath}/index.html?invite=abc&action=login`)
   })
 })

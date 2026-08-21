@@ -1,4 +1,6 @@
 import React, { useRef, useEffect } from "react"
+import { GripVertical } from "lucide-react"
+import { useI18n } from "../../i18n"
 import "./index.css"
 
 export interface CategoryHeaderProps {
@@ -17,7 +19,9 @@ export interface CategoryHeaderProps {
     onRenameConfirm?: (newName: string) => void
     onRenameCancel?: () => void
     // 拖拽 handle props（由 useSortable 传入）
-    dragHandleProps?: React.HTMLAttributes<HTMLSpanElement>
+    dragHandleRef?: React.RefCallback<HTMLElement>
+    dragHandleAttributes?: React.HTMLAttributes<HTMLSpanElement>
+    dragHandleListeners?: Record<string, React.EventHandler<any>>
 }
 
 const CategoryHeader: React.FC<CategoryHeaderProps> = ({
@@ -33,8 +37,11 @@ const CategoryHeader: React.FC<CategoryHeaderProps> = ({
     isEditing,
     onRenameConfirm,
     onRenameCancel,
-    dragHandleProps,
+    dragHandleRef,
+    dragHandleAttributes,
+    dragHandleListeners,
 }) => {
+    const { t } = useI18n()
     const inputRef = useRef<HTMLInputElement>(null)
     const isConfirmed = useRef(false)
 
@@ -124,21 +131,16 @@ const CategoryHeader: React.FC<CategoryHeaderProps> = ({
             onClick={onToggle}
             onContextMenu={onContextMenu}
         >
-            {/* 拖拽 handle（由父组件传入 useSortable listeners） */}
-            {dragHandleProps && (
+            {/* 拖拽 handle（由父组件传入 useSortable setActivatorNodeRef + attributes/listeners） */}
+            {dragHandleRef && (
                 <span
+                    ref={dragHandleRef}
                     className="wk-category-header__drag-handle"
-                    {...dragHandleProps}
+                    {...dragHandleAttributes}
+                    {...dragHandleListeners}
                     onClick={e => e.stopPropagation()}
                 >
-                    <svg width="10" height="14" viewBox="0 0 10 14" fill="none">
-                        <circle cx="3" cy="3" r="1.2" fill="currentColor" />
-                        <circle cx="7" cy="3" r="1.2" fill="currentColor" />
-                        <circle cx="3" cy="7" r="1.2" fill="currentColor" />
-                        <circle cx="7" cy="7" r="1.2" fill="currentColor" />
-                        <circle cx="3" cy="11" r="1.2" fill="currentColor" />
-                        <circle cx="7" cy="11" r="1.2" fill="currentColor" />
-                    </svg>
+                    <GripVertical size={14} aria-hidden="true" />
                 </span>
             )}
             <span className={`wk-category-header__arrow${isCollapsed ? " wk-category-header__arrow--collapsed" : ""}`}>
@@ -147,7 +149,9 @@ const CategoryHeader: React.FC<CategoryHeaderProps> = ({
             <span className="wk-category-header__name">
                 {name}
                 {isEmpty ? (
-                    <span className="wk-category-header__count wk-category-header__count--empty"> (空)</span>
+                    <span className="wk-category-header__count wk-category-header__count--empty">
+                        {" "}{t("base.categoryHeader.empty")}
+                    </span>
                 ) : isCollapsed && groupCount !== undefined ? (
                     <span className="wk-category-header__count"> ({groupCount})</span>
                 ) : null}

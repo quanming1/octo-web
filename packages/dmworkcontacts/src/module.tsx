@@ -2,8 +2,10 @@ import {
   EndpointCategory,
   IconListItem,
   IModule,
+  i18n,
   WKApp,
   ThemeMode,
+  t,
 } from "@octo/base";
 import React from "react";
 import ReactDOM from "react-dom";
@@ -13,12 +15,18 @@ import GroupSave from "./GroupSave";
 import { NewFriend } from "./NewFriend";
 import { ContactsListManager } from "./Service/ContactsListManager";
 import { OrganizationalGroupNew, OrganizationalGroupNewAction } from "./Organizational/GroupNew/index";
+import enUS from "./i18n/en-US.json";
+import zhCN from "./i18n/zh-CN.json";
 
 export default class ContactsModule implements IModule {
   id(): string {
     return "ContactsModule";
   }
   init(): void {
+    i18n.registerNamespace("contacts", {
+      "zh-CN": zhCN,
+      "en-US": enUS,
+    });
 
     WKApp.endpointManager.setMethod(
       "contacts.friendapply.change",
@@ -33,8 +41,7 @@ export default class ContactsModule implements IModule {
     WKApp.endpoints.registerContactsHeader("friends.new", (param: any) => {
       return (
         <IconListItem
-          badge={ WKApp.shared.getFriendApplysUnreadCount() }
-          title="新朋友"
+          title={t("contacts.header.newFriends")}
           icon={require("./assets/friend_new.png")}
           backgroudColor={"var(--wk-color-secondary)"}
           onClick={() => {
@@ -47,7 +54,7 @@ export default class ContactsModule implements IModule {
     WKApp.endpoints.registerContactsHeader("groups.save", (param: any) => {
       return (
         <IconListItem
-          title="保存的群"
+          title={t("contacts.header.savedGroups")}
           icon={require("./assets/icon_group_save.png")}
           backgroudColor={"var(--wk-color-secondary)"}
           onClick={() => {
@@ -62,7 +69,7 @@ export default class ContactsModule implements IModule {
       (param: any) => {
         return (
           <IconListItem
-            title="黑名单"
+            title={t("contacts.header.blacklist")}
             icon={require("./assets/blacklist.png")}
             backgroudColor={"var(--wk-color-secondary)"}
             onClick={() => {
@@ -76,7 +83,7 @@ export default class ContactsModule implements IModule {
     WKApp.shared.chatMenusRegister("chatmenus.addfriend", (param) => {
       const isDark = WKApp.config.themeMode === ThemeMode.dark;
       return {
-        title: "添加朋友",
+        title: t("contacts.menu.addFriend"),
         icon: isDark ? new URL("./assets/popmenus_friendadd_dark.png", import.meta.url).href : new URL("./assets/popmenus_friendadd.png", import.meta.url).href,
         onClick: () => {
           WKApp.routeLeft.push(
@@ -106,6 +113,7 @@ export default class ContactsModule implements IModule {
         const channel = (param.channel ?? { channelID: "", channelType: 0 }) as any;
         const defaultCategoryId = param.defaultCategoryId as string | undefined;
         const onSuccess = param.onSuccess as (() => void) | undefined;
+        const keepSidebarTab = param.keepSidebarTab as boolean | undefined;
         const div = document.createElement("div");
         document.body.appendChild(div);
 
@@ -122,6 +130,7 @@ export default class ContactsModule implements IModule {
             autoShow={true}
             defaultCategoryId={defaultCategoryId}
             onSuccess={onSuccess}
+            keepSidebarTab={keepSidebarTab}
           />,
           div
         );

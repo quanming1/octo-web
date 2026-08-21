@@ -1,8 +1,8 @@
 import { MessageContent } from "wukongimjssdk";
-import moment from 'moment'
 import React from "react";
 import { MessageContentTypeConst } from "../../Service/Const";
 import { MessageCell } from "../MessageCell";
+import { I18nContext } from "../../i18n";
 
 import  './index.css'
 
@@ -20,9 +20,14 @@ export class TimeContent extends MessageContent {
 }
 
 export class TimeCell extends MessageCell {
+    static contextType = I18nContext
+    declare context: React.ContextType<typeof I18nContext>
 
     formatMessageTime(timestamp: number) {
-        return moment(timestamp * 1000).format('MM月DD日');
+        return this.context.format.date(timestamp * 1000, {
+            day: "numeric",
+            month: "short",
+        });
     }
 
     render() {

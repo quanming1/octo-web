@@ -1,6 +1,10 @@
 import React, { Component } from "react";
 import { Button, Toast } from "@douyinfe/semi-ui";
+import { I18nContext, t } from "@octo/base";
+import VoiceInputButton from "@octo/base/src/Components/VoiceInputButton";
+import type { ReplaceMode, SelectionRange } from "@octo/base/src/Components/VoiceInputButton";
 import * as api from "../api/summaryApi";
+import { summaryTestIds } from "../utils/testIds";
 
 interface SummaryEditorProps {
     taskId: number;
@@ -8,6 +12,8 @@ interface SummaryEditorProps {
     initialContent: string;
     onSave: () => void;
     onCancel: () => void;
+    mode?: "team" | "personal" | "personal_draft";
+    exposeSave?: (fn: (() => void) | null) => void;
 }
 
 interface SummaryEditorState {
@@ -16,6 +22,9 @@ interface SummaryEditorState {
 }
 
 export default class SummaryEditor extends Component<SummaryEditorProps, SummaryEditorState> {
+    static contextType = I18nContext;
+    declare context: React.ContextType<typeof I18nContext>;
+
     private textareaRef = React.createRef<HTMLTextAreaElement>();
 
     state: SummaryEditorState = {
@@ -26,10 +35,18 @@ export default class SummaryEditor extends Component<SummaryEditorProps, Summary
     componentDidMount() {
         window.addEventListener("beforeunload", this.handleBeforeUnload);
         this.adjustHeight();
+        if (this.props.exposeSave) {
+            this.props.exposeSave(this.handleSave);
+        }
     }
 
     componentWillUnmount() {
         window.removeEventListener("beforeunload", this.handleBeforeUnload);
+        // 清除父组件持有的 save 闭包，避免卸载后仍能通过陈旧引用写入
+        // （切换任务后点保存可能覆盖上一个任务内容）。
+        if (this.props.exposeSave) {
+            this.props.exposeSave(null);
+        }
     }
 
     private handleBeforeUnload = (e: BeforeUnloadEvent) => {
@@ -58,21 +75,35 @@ export default class SummaryEditor extends Component<SummaryEditorProps, Summary
     };
 
     private handleSave = async () => {
-        const { taskId, baseResultId, onSave } = this.props;
+        const { taskId, baseResultId, onSave, mode } = this.props;
         const { content } = this.state;
 
         this.setState({ saving: true });
         try {
-            await api.editSummary(taskId, content, baseResultId);
-            Toast.success("保存成功");
+            if (mode === "personal_draft") {
+                // OCT-21：提交前编辑自己的草稿（只能改自己），不触发团队重算、不写 edited_at。
+                await api.personalDraftSummary(taskId, content);
+            } else if (mode === "personal") {
+                // need3/6：编辑自己的个人报告（只能改自己），后端会自动触发团队重算。
+                // F2：personal-edit 只传 content，不带 base_result_id。
+                await api.personalEditSummary(taskId, content);
+            } else {
+                await api.editSummary(taskId, content, baseResultId);
+            }
+            Toast.success(t("summary.editor.saveSuccess"));
             onSave();
         } catch (err: unknown) {
             const error = err as Error & { status?: number };
             if (error.status === 409) {
-                Toast.warning("内容已更新，请刷新");
+                // v2 GLM-F4：409 文案按 mode 分发。personal_draft 走「该总结已提交，已为你刷新」，
+                // 其余 mode 沿用旧文案「内容已更新，请刷新」。
+                const conflictKey = mode === "personal_draft"
+                    ? "summary.editor.draftAlreadySubmitted"
+                    : "summary.editor.contentUpdated";
+                Toast.warning(t(conflictKey));
                 onSave();
             } else {
-                Toast.error(error.message || "保存失败，请重试");
+                Toast.error(error.message || t("summary.editor.saveFailed"));
                 this.setState({ saving: false });
             }
         }
@@ -81,29 +112,44 @@ export default class SummaryEditor extends Component<SummaryEditorProps, Summary
     render() {
         const { onCancel } = this.props;
         const { content, saving } = this.state;
+        const { t: translate } = this.context;
 
         return (
             <div className="summary-editor">
-                <textarea
-                    ref={this.textareaRef}
-                    className="summary-editor-textarea"
-                    value={content}
-                    onChange={this.handleChange}
-                    disabled={saving}
-                    placeholder="编辑总结内容..."
-                />
-                <div className="summary-editor-actions">
-                    <Button onClick={onCancel} disabled={saving}>
-                        取消
-                    </Button>
-                    <Button
-                        theme="solid"
-                        onClick={this.handleSave}
-                        disabled={!this.hasChanges || saving}
-                        loading={saving}
-                    >
-                        保存
-                    </Button>
+                <div style={{ position: "relative" }}>
+                    <textarea
+                        ref={this.textareaRef}
+                        data-testid={summaryTestIds.editorTextarea}
+                        className="summary-editor-textarea"
+                        value={content}
+                        onChange={this.handleChange}
+                        disabled={saving}
+                        placeholder={translate("summary.editor.placeholder")}
+                    />
+                    {!saving && (
+                        <VoiceInputButton
+                            inputRef={this.textareaRef}
+                            onTranscribed={(text: string, mode: ReplaceMode, savedRange?: SelectionRange) => {
+                                if (mode === "all") {
+                                    this.setState({ content: text }, this.adjustHeight);
+                                } else if (mode === "selection" && savedRange) {
+                                    // Note: savedRange indices are from recording start; assumes input is read-only during recording
+                                    this.setState(prev => ({
+                                        content: prev.content.slice(0, savedRange.from) + text + prev.content.slice(savedRange.to),
+                                    }), this.adjustHeight);
+                                } else {
+                                    this.setState(prev => {
+                                        const pos = savedRange?.from ?? prev.content.length;
+                                        return { content: prev.content.slice(0, pos) + text + prev.content.slice(pos) };
+                                    }, this.adjustHeight);
+                                }
+                            }}
+                            getCurrentText={() => this.state.content}
+                            showModeMenu
+                            size="md"
+                            className="wk-vib--textarea-corner"
+                        />
+                    )}
                 </div>
             </div>
         );

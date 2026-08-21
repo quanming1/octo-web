@@ -1,77 +1,81 @@
-import { MediaMessageContent, WKSDK, Task, TaskStatus } from "wukongimjssdk"
+import { WKSDK, Task, TaskStatus, MessageStatus } from "wukongimjssdk"
 import React from "react"
 import WKApp from "../../App"
-import { MessageContentTypeConst } from "../../Service/Const"
 import MessageBase from "../Base"
 import { MessageCell } from "../MessageCell"
-import Lightbox from "yet-another-react-lightbox"
-import Download from "yet-another-react-lightbox/plugins/download"
-import "yet-another-react-lightbox/styles.css"
 import { Toast } from "@douyinfe/semi-ui"
-import { downloadFile } from "../../Utils/download"
 import MessageRow from "../../ui/message/MessageRow"
 import SingleImage from "../../ui/message/ImageContent/SingleImage"
 import MultiImage from "../../ui/message/ImageContent/MultiImage"
+import type { ImageTransferState } from "../../ui/message/ImageContent/SingleImage"
 import { getImageMessageUI } from "../../bridge/message/useImageMessageUI"
+import { isMessageSelectable } from "../../Service/messageSelection"
+import { t } from "../../i18n"
+import { ImagePreviewLightbox } from "./ImagePreview"
+import { ImageContent } from "./ImageContent"
+
+export { ImagePreviewLightbox, ImagePreviewToolbar } from "./ImagePreview"
+export { ImageContent } from "./ImageContent"
 
 const SMALL_FILE_THRESHOLD = 1024 * 1024 // 1MB 以下不显示进度覆盖层
 
-
-export class ImageContent extends MediaMessageContent {
-    width!: number
-    height!: number
-    url!: string
-    imgData?: string
-    caption?: string
-    mentionUids?: string[]
-    name?: string
-    constructor(file?: File, imgData?: string, width?: number, height?: number, caption?: string, mentionUids?: string[]) {
-        super()
-        this.file = file
-        this.imgData = imgData
-        this.width = width || 0
-        this.height = height || 0
-        this.caption = caption
-        this.mentionUids = mentionUids
-        if (file) {
-            this.name = file.name
-        }
-    }
-    decodeJSON(content: any) {
-        this.width = content["width"] || 0
-        this.height = content["height"] || 0
-        this.url = content["url"] || ''
-        this.caption = content["caption"] || ''
-        this.mentionUids = content["mention_uids"] || []
-        this.name = content["name"] || undefined
-        this.remoteUrl = this.url
-    }
-    encodeJSON() {
-        const json: Record<string, unknown> = { "width": this.width || 0, "height": this.height || 0, "url": this.remoteUrl || "" }
-        if (this.caption) {
-            json["caption"] = this.caption
-        }
-        if (this.mentionUids && this.mentionUids.length > 0) {
-            json["mention_uids"] = this.mentionUids
-        }
-        if (this.name) {
-            json["name"] = this.name
-        }
-        return json
-    }
-    get contentType() {
-        return MessageContentTypeConst.image
-    }
-    get conversationDigest() {
-        return "[图片]"
-    }
-}
-
-
 interface ImageCellState {
     showPreview: boolean
+    previewIndex: number
     uploadProgress: number
     uploadStatus: TaskStatus | null
+}
+
+export interface ImageTransferInput {
+    hasLocalFile: boolean
+    hasRemoteUrl: boolean
+    fileSize: number
+    messageStatus: MessageStatus
+    uploadStatus: TaskStatus | null
+    uploadProgress: number
+    onUploadRetry?: () => void
+    onMessageRetry?: () => void
+}
+
+function isTaskFailed(uploadStatus: TaskStatus | null) {
+    return uploadStatus === TaskStatus.fail || uploadStatus === TaskStatus.cancel
+}
+
+function isTaskActive(uploadStatus: TaskStatus | null) {
+    return uploadStatus !== null && uploadStatus !== TaskStatus.success && !isTaskFailed(uploadStatus)
+}
+
+export function getImageTransferState({
+    hasLocalFile,
+    hasRemoteUrl,
+    fileSize,
+    messageStatus,
+    uploadStatus,
+    uploadProgress,
+    onUploadRetry,
+    onMessageRetry,
+}: ImageTransferInput): ImageTransferState | undefined {
+    if (isTaskActive(uploadStatus)) {
+        const progress = Math.max(0, Math.min(100, Math.round(uploadProgress)))
+        if (fileSize >= SMALL_FILE_THRESHOLD && progress > 0) {
+            return { status: "uploading", progress }
+        }
+        return { status: "sending" }
+    }
+
+    if (isTaskFailed(uploadStatus)) {
+        return { status: "failed", onRetry: onUploadRetry }
+    }
+
+    if (messageStatus === MessageStatus.Fail) {
+        return { status: "failed", onRetry: onMessageRetry }
+    }
+
+    if (messageStatus === MessageStatus.Wait || (hasLocalFile && !hasRemoteUrl)) {
+        return { status: "sending" }
+    }
+
+    return undefined
 }
 
 /** task 自身支持的重试接口（MediaMessageUploadTask 实现） */
@@ -92,6 +96,7 @@ export class ImageCell extends MessageCell<any, ImageCellState> {
         super(props)
         this.state = {
             showPreview: false,
+            previewIndex: 0,
             uploadProgress: 0,
             uploadStatus: null,
         }
@@ -100,9 +105,6 @@ export class ImageCell extends MessageCell<any, ImageCellState> {
     componentDidMount() {
         super.componentDidMount()
         const { message } = this.props
-        // 小文件（<1MB）不显示进度，跳过订阅
-        const fileSize = (message.content as any).file?.size ?? 0
-        if (fileSize < SMALL_FILE_THRESHOLD) return
         WKSDK.shared().taskManager.addListener(this._taskListener)
         const found = ((WKSDK.shared().taskManager as any).taskMap as Map<string, Task> | undefined)
             ?.get(message.clientMsgNo) as RestartableTask | undefined
@@ -155,61 +157,83 @@ export class ImageCell extends MessageCell<any, ImageCellState> {
         return <img alt="" src={this.getImageSrc(content)} style={{ borderRadius: '8px', width: scaleSize.width, height: scaleSize.height, maxWidth: '100%' }} />
     }
 
+    private handleRetry = () => {
+        if (!this._task) {
+            Toast.warning(t("base.message.uploadTaskExpired"))
+            return
+        }
+        this._task.restart()
+    }
+
     render() {
         const { message, context } = this.props
-        const { showPreview, uploadProgress, uploadStatus } = this.state
+        const { showPreview, previewIndex, uploadProgress, uploadStatus } = this.state
         const content = message.content as ImageContent
 
         // 新 UI 实现
         const useNewUI = true
         if (useNewUI) {
             const uiProps = getImageMessageUI(message)
+            const hasRemoteUrl = uiProps.isMulti
+                ? uiProps.images.some(image => !!image.src)
+                : !!(content.url || (content as any).remoteUrl)
+            const fileSize = (content as any).file?.size ?? 0
+            const transferState = getImageTransferState({
+                hasLocalFile: !!(content as any).file,
+                hasRemoteUrl,
+                fileSize,
+                messageStatus: message.status,
+                uploadStatus,
+                uploadProgress,
+                onUploadRetry: this.handleRetry,
+                onMessageRetry: () => context.resendMessage(message.message),
+            })
+            const selectionMode = context.editOn()
+            const selectable = isMessageSelectable(message)
+            const canPreview = !transferState && hasRemoteUrl
+            const canOpenPreview = canPreview && !selectionMode
             return (
                 <>
                     <MessageRow
                         {...uiProps.row}
                         onContextMenu={(event) => context.showContextMenus(message, event)}
                         isActive={context.isContextMenuOpen(message.message)}
-                        showCheckbox={context.editOn()}
-                        isSelected={!!message.checked}
-                        onSelect={(selected) => context.checkeMessage(message.message, selected)}
+                        selectionMode={selectionMode}
+                        showCheckbox={selectionMode && selectable}
+                        isSelected={selectable && !!message.checked}
+                        onSelect={selectable ? (selected) => context.checkeMessage(message.message, selected) : undefined}
                         onAvatarClick={(e) => context.onTapAvatar(message.fromUID, e)}
                         onSenderNameClick={() => context.showUser(message.fromUID)}
                     >
                         {uiProps.isMulti
                             ? <MultiImage
                                 images={uiProps.images}
-                                onImageClick={(index) => {
-                                    // TODO: 多图预览
-                                }}
+                                transferState={transferState}
+                                onImageClick={canOpenPreview ? (index) => {
+                                    if (uiProps.images[index]?.src) {
+                                        this.setState({ showPreview: true, previewIndex: index })
+                                    }
+                                } : undefined}
                               />
                             : uiProps.singleImage
                                 ? <SingleImage
                                     {...uiProps.singleImage}
-                                    onClick={() => this.setState({ showPreview: true })}
+                                    transferState={transferState}
+                                    onClick={canOpenPreview ? () => this.setState({ showPreview: true }) : undefined}
                                   />
                                 : null
                         }
                     </MessageRow>
-                    <Lightbox
+                    <ImagePreviewLightbox
                         open={showPreview}
                         close={() => this.setState({ showPreview: false })}
+                        index={previewIndex}
                         slides={uiProps.isMulti
                             ? uiProps.images.map(img => ({ src: img.src, alt: '' }))
                             : [{ src: uiProps.singleImage?.src || '', alt: '' }]
                         }
-                        plugins={[Download]}
-                        download={{ download: ({ slide }) => {
-                            if (slide?.src) {
-                                downloadFile(slide.src, content.name || 'image.png')
-                            }
-                        }}}
-                        carousel={{ finite: true }}
-                        controller={{ closeOnBackdropClick: true }}
-                        render={{
-                            buttonPrev: uiProps.isMulti ? undefined : () => null,
-                            buttonNext: uiProps.isMulti ? undefined : () => null,
-                        }}
+                        filename={content.name}
+                        isMulti={uiProps.isMulti}
                     />
                 </>
             )
@@ -263,13 +287,13 @@ export class ImageCell extends MessageCell<any, ImageCellState> {
                         }} onClick={(e) => {
                             e.stopPropagation()
                             if (!this._task) {
-                                Toast.warning('上传任务已失效，请重新发送文件')
+                                Toast.warning(t("base.message.uploadTaskExpired"))
                                 return
                             }
                             this._task.restart()
                         }}>
                             <span style={{ color: "#fff", fontSize: 22 }}>⚠️</span>
-                            <span style={{ color: "#fff", fontSize: 11 }}>上传失败，点击重试</span>
+                            <span style={{ color: "#fff", fontSize: 11 }}>{t("base.message.uploadFailedRetry")}</span>
                         </div>
                     )}
                 </div>
@@ -279,22 +303,11 @@ export class ImageCell extends MessageCell<any, ImageCellState> {
                     </div>
                 )}
             </div>
-            <Lightbox
+            <ImagePreviewLightbox
                 open={showPreview}
                 close={() => this.setState({ showPreview: false })}
                 slides={[{ src: imageURL, alt: '' }]}
-                plugins={[Download]}
-                download={{ download: ({ slide }) => {
-                    if (slide?.src) {
-                        downloadFile(slide.src, content.name || 'image.png')
-                    }
-                }}}
-                carousel={{ finite: true }}
-                controller={{ closeOnBackdropClick: true }}
-                render={{
-                    buttonPrev: () => null,
-                    buttonNext: () => null,
-                }}
+                filename={content.name}
             />
         </MessageBase>
     }

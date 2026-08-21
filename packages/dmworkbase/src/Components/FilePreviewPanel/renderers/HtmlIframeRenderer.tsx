@@ -12,6 +12,7 @@ import React, {
   useEffect,
 } from "react";
 import { LoaderCircle } from "lucide-react";
+import { useI18n } from "../../../i18n";
 import "./HtmlIframeRenderer.css";
 
 /**
@@ -49,6 +50,7 @@ const HtmlIframeRenderer = forwardRef<
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [loading, setLoading] = useState(true);
   const [blobUrl, setBlobUrl] = useState<string>();
+  const { t } = useI18n();
 
   // 暴露 iframeRef 给父组件
   useImperativeHandle(ref, () => ({
@@ -75,7 +77,7 @@ const HtmlIframeRenderer = forwardRef<
   if (!url && !srcDoc) {
     return (
       <div className="wk-file-preview-html-iframe wk-file-preview-html-iframe--empty">
-        暂无内容
+        {t("base.filePreview.empty")}
       </div>
     );
   }

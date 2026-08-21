@@ -1,4 +1,5 @@
 import React, { Component } from "react";
+import { I18nContext } from "../../i18n";
 import "./index.css";
 
 export interface BotCommand {
@@ -15,6 +16,9 @@ interface SlashCommandMenuProps {
 }
 
 export default class SlashCommandMenu extends Component<SlashCommandMenuProps> {
+    static contextType = I18nContext;
+    declare context: React.ContextType<typeof I18nContext>;
+
     private activeItemRef = React.createRef<HTMLDivElement>();
 
     componentDidUpdate(prevProps: SlashCommandMenuProps) {
@@ -42,14 +46,14 @@ export default class SlashCommandMenu extends Component<SlashCommandMenuProps> {
         if (filtered.length === 0) {
             return (
                 <div className="wk-slash-command-menu">
-                    <div className="wk-slash-command-empty">无匹配的命令</div>
+                    <div className="wk-slash-command-empty">{this.context.t("base.slashCommand.noMatches")}</div>
                 </div>
             );
         }
 
         return (
             <div className="wk-slash-command-menu">
-                <div className="wk-slash-command-menu-header">机器人命令</div>
+                <div className="wk-slash-command-menu-header">{this.context.t("base.slashCommand.botCommands")}</div>
                 {filtered.map((cmd, index) => (
                     <div
                         key={cmd.command}

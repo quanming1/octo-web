@@ -1,6 +1,7 @@
 import React, { Component } from "react"
 import classNames from "classnames"
 import { formatRelativeTime } from "../../Utils/time"
+import { I18nContext } from "../../i18n"
 import "./index.css"
 
 export interface ThreadIndicatorData {
@@ -22,6 +23,9 @@ export interface ThreadIndicatorProps {
 }
 
 export default class ThreadIndicator extends Component<ThreadIndicatorProps> {
+  static contextType = I18nContext
+  declare context: React.ContextType<typeof I18nContext>
+
   render() {
     const { data, isSend, onClick } = this.props
     const { threadName, replyCount, hasUnread, lastReplyTime, lastRepliers } = data
@@ -37,7 +41,7 @@ export default class ThreadIndicator extends Component<ThreadIndicatorProps> {
         {hasUnread && <div className="wk-thread-indicator-unread" />}
         <span className="wk-thread-indicator-name">{threadName}</span>
         <span className="wk-thread-indicator-dot">·</span>
-        <span className="wk-thread-indicator-count">{replyCount}条回复</span>
+        <span className="wk-thread-indicator-count">{this.context.t("base.thread.replyCount", { values: { count: replyCount } })}</span>
         {lastRepliers && lastRepliers.length > 0 && (
           <div className="wk-thread-indicator-avatars">
             {lastRepliers.slice(0, 3).map((replier, index) => (

@@ -3,6 +3,7 @@ import ViewToggle, { ViewMode } from "../ViewToggle"
 import CategorySection from "../CategorySection"
 import CategoryEmptyState from "../CategoryEmptyState"
 import { useCategoryCollapse } from "../../Hooks/useCategoryCollapse"
+import { useI18n } from "../../i18n"
 import "./index.css"
 
 export interface CategoryData {
@@ -21,7 +22,6 @@ export interface ConversationListWithCategoryProps {
     isLoading?: boolean
     error?: string | null
     onRetry?: () => void
-    allConversations?: React.ReactNode
     onCreateCategory?: () => void
     /** 无任何群聊时（无分组且未分组为空）→ 空状态显示「发起群聊」 */
     hasNoGroups?: boolean
@@ -42,7 +42,6 @@ const ConversationListWithCategory: React.FC<ConversationListWithCategoryProps> 
     isLoading,
     error,
     onRetry,
-    allConversations,
     onCreateCategory,
     hasNoGroups,
     onStartGroup,
@@ -53,6 +52,7 @@ const ConversationListWithCategory: React.FC<ConversationListWithCategoryProps> 
     onRenameCancel,
     categorySectionDraggable,
 }) => {
+    const { t } = useI18n()
     const categoryIds = categories.map(c => c.id)
     const { isCollapsed, toggle: toggleCollapse } = useCategoryCollapse(categoryIds)
 
@@ -70,32 +70,26 @@ const ConversationListWithCategory: React.FC<ConversationListWithCategoryProps> 
         if (error) {
             return (
                 <div className="wk-conv-with-category__error">
-                    <span className="wk-conv-with-category__error-text">加载失败，请检查网络</span>
+                    <span className="wk-conv-with-category__error-text">{t("base.conversationListWithCategory.loadFailed")}</span>
                     {onRetry && (
                         <button className="wk-conv-with-category__retry" onClick={onRetry}>
-                            点击重试
+                            {t("base.conversationListWithCategory.retry")}
                         </button>
                     )}
                 </div>
             )
         }
 
-        // 无自定义分组时：有群聊则直接显示未分组区，完全无群聊才显示空状态
+        // 关注 tab 没有自定义分组（hasNoGroups=false 表示用户有群但未建分组）→ 引导
+        // 用户新建分组；老的 ungrouped 兜底已废弃，绝不能渲染全量会话，否则等于把
+        // 最近 tab 的内容泄漏到关注 tab。
         if (categories.length === 0) {
-            if (hasNoGroups) {
-                return (
-                    <CategoryEmptyState
-                        onCreateCategory={onCreateCategory ?? (() => {})}
-                        noGroups
-                        onStartGroup={onStartGroup}
-                    />
-                )
-            }
-            // 有群聊但无自定义分组 → 直接显示未分组区，不走分组 UI
             return (
-                <div className="wk-conv-with-category__body">
-                    {allConversations}
-                </div>
+                <CategoryEmptyState
+                    onCreateCategory={onCreateCategory ?? (() => {})}
+                    noGroups={hasNoGroups}
+                    onStartGroup={onStartGroup}
+                />
             )
         }
 

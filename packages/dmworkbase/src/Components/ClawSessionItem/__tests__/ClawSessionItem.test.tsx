@@ -1,7 +1,55 @@
 import React from "react";
-import { render, screen, fireEvent } from "@testing-library/react";
+import ReactDOM from "react-dom";
+import { act } from "react-dom/test-utils";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { fireEvent, screen } from "@testing-library/dom";
 import "@testing-library/jest-dom";
 import ClawSessionItem from "../index";
+import { I18nProvider, i18n } from "../../../i18n";
+
+let container: HTMLDivElement;
+
+const render = (ui: React.ReactElement) => {
+  act(() => {
+    ReactDOM.render(<I18nProvider>{ui}</I18nProvider>, container);
+  });
+
+  return { container };
+};
+
+const click = (element: Element) => {
+  act(() => {
+    fireEvent.click(element);
+  });
+};
+
+const expandSession = () => {
+  click(screen.getByTestId("claw-session-head"));
+};
+
+const formatExpectedDateTime = (isoString: string) => {
+  const date = new Date(isoString);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  const seconds = String(date.getSeconds()).padStart(2, "0");
+  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+};
+
+beforeEach(() => {
+  i18n.setLocale("zh-CN", { notify: false, persist: false });
+  container = document.createElement("div");
+  document.body.appendChild(container);
+});
+
+afterEach(() => {
+  act(() => {
+    ReactDOM.unmountComponentAtNode(container);
+  });
+  container.remove();
+});
 
 describe("ClawSessionItem", () => {
   const mockSession = {
@@ -29,6 +77,8 @@ describe("ClawSessionItem", () => {
       expect(partyElement).toHaveTextContent("Octo 产品管家");
       expect(partyElement).toHaveTextContent("7edea73a3c334a5382c0e0b6f27adbe0");
 
+      expandSession();
+
       // 验证模型
       expect(screen.getByTestId("claw-session-model")).toHaveTextContent(
         "mlamp/claude-opus-4-7"
@@ -53,13 +103,14 @@ describe("ClawSessionItem", () => {
       render(<ClawSessionItem session={mockSession} />);
 
       // 点击头部展开
-      const head = screen.getByTestId("claw-session-head");
-      fireEvent.click(head);
+      expandSession();
 
       // 验证最近活跃时间
       const lastActiveElement = screen.getByTestId("claw-session-last-active");
       expect(lastActiveElement).toBeInTheDocument();
-      expect(lastActiveElement).toHaveTextContent("2026-05-10 06:30:00");
+      expect(lastActiveElement).toHaveTextContent(
+        formatExpectedDateTime(mockSession.lastActiveAt)
+      );
     });
 
     it("应该显示正确的渠道标签", () => {
@@ -72,6 +123,7 @@ describe("ClawSessionItem", () => {
 
     it("应该显示正确的 session key", () => {
       render(<ClawSessionItem session={mockSession} />);
+      expandSession();
 
       expect(screen.getByTestId("claw-session-key")).toHaveTextContent(
         "octo:c_pipi_lux_01"
@@ -169,12 +221,12 @@ describe("ClawSessionItem", () => {
       const card = screen.getByTestId("claw-session-card");
 
       // 第一次点击：展开
-      fireEvent.click(head);
+      click(head);
       expect(card).not.toHaveClass("collapsed");
       expect(screen.getByTestId("claw-session-body")).toBeInTheDocument();
 
       // 第二次点击：折叠
-      fireEvent.click(head);
+      click(head);
       expect(card).toHaveClass("collapsed");
       expect(screen.queryByTestId("claw-session-body")).not.toBeInTheDocument();
     });
@@ -189,7 +241,7 @@ describe("ClawSessionItem", () => {
       expect(card).toHaveClass("collapsed");
 
       // 点击展开时 card 没有 collapsed 类
-      fireEvent.click(head);
+      click(head);
       expect(card).not.toHaveClass("collapsed");
     });
   });
@@ -199,6 +251,7 @@ describe("ClawSessionItem", () => {
       // 50% 占用
       const normalSession = { ...mockSession, ctxUsed: 500000, ctxMax: 1000000 };
       render(<ClawSessionItem session={normalSession} />);
+      expandSession();
 
       const fill = screen.getByTestId("claw-context-bar-fill");
       expect(fill).not.toHaveClass("warn");
@@ -209,6 +262,7 @@ describe("ClawSessionItem", () => {
       // 85% 占用
       const highCtxSession = { ...mockSession, ctxUsed: 850000, ctxMax: 1000000 };
       render(<ClawSessionItem session={highCtxSession} />);
+      expandSession();
 
       const fill = screen.getByTestId("claw-context-bar-fill");
       expect(fill).toHaveClass("warn");
@@ -218,6 +272,7 @@ describe("ClawSessionItem", () => {
     it("上下文占用正好 70% 时，进度条不应该显示警告色", () => {
       const session70 = { ...mockSession, ctxUsed: 700000, ctxMax: 1000000 };
       render(<ClawSessionItem session={session70} />);
+      expandSession();
 
       const fill = screen.getByTestId("claw-context-bar-fill");
       expect(fill).not.toHaveClass("warn");
@@ -226,6 +281,7 @@ describe("ClawSessionItem", () => {
     it("上下文占用 71% 时，进度条应该显示警告色", () => {
       const session71 = { ...mockSession, ctxUsed: 710000, ctxMax: 1000000 };
       render(<ClawSessionItem session={session71} />);
+      expandSession();
 
       const fill = screen.getByTestId("claw-context-bar-fill");
       expect(fill).toHaveClass("warn");
@@ -234,6 +290,7 @@ describe("ClawSessionItem", () => {
     it("进度条文本应该正确显示百分比", () => {
       const session = { ...mockSession, ctxUsed: 148200, ctxMax: 1000000 };
       render(<ClawSessionItem session={session} />);
+      expandSession();
 
       // 148200 / 1000000 = 14.82% -> 15% (rounded)
       expect(screen.getByTestId("claw-context-bar-text")).toHaveTextContent(
@@ -297,6 +354,7 @@ describe("ClawSessionItem", () => {
     it("上下文占用为 0 时应该正确显示", () => {
       const zeroSession = { ...mockSession, ctxUsed: 0 };
       render(<ClawSessionItem session={zeroSession} />);
+      expandSession();
 
       expect(screen.getByTestId("claw-context-bar-fill")).toHaveStyle({ width: "0%" });
       expect(screen.getByTestId("claw-context-bar-text")).toHaveTextContent(
@@ -307,6 +365,7 @@ describe("ClawSessionItem", () => {
     it("上下文占用为 100% 时应该正确显示", () => {
       const fullSession = { ...mockSession, ctxUsed: 1000000, ctxMax: 1000000 };
       render(<ClawSessionItem session={fullSession} />);
+      expandSession();
 
       expect(screen.getByTestId("claw-context-bar-fill")).toHaveStyle({ width: "100%" });
       expect(screen.getByTestId("claw-context-bar-fill")).toHaveClass("warn");

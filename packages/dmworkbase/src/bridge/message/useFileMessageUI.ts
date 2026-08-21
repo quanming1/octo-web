@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 import { MessageWrap } from '../../Service/Model'
 import { getMessageRow } from './useMessageRow'
 import { getFileIconInfo, formatFileSize } from '../../Messages/File'
+import { t } from '../../i18n'
 
 /**
  * getFileMessageUI - 纯函数版本
@@ -17,7 +18,7 @@ export function getFileMessageUI(message: MessageWrap) {
 
   return {
     row: rowProps,
-    name: content.name || '未知文件',
+    name: content.name || t('base.messageFile.unknownFile'),
     size: formatFileSize(content.size || 0),
     extension: extension.toUpperCase(),
     iconColor: iconInfo.color,

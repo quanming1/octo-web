@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
+import { t } from "@octo/base";
 import * as api from "../api/summaryApi";
 import type { SummaryDetail } from "../types/summary";
 
@@ -11,7 +12,7 @@ interface UseSummaryDetailReturn {
     cancel: () => Promise<void>;
 }
 
-export function useSummaryDetail(taskId: number | null): UseSummaryDetailReturn {
+export function useSummaryDetail(taskId: number | string | null): UseSummaryDetailReturn {
     const [detail, setDetail] = useState<SummaryDetail | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -25,7 +26,7 @@ export function useSummaryDetail(taskId: number | null): UseSummaryDetailReturn 
             const data = await api.getSummaryDetail(taskId);
             setDetail(data);
         } catch (err: any) {
-            setError(err.message || "加载失败");
+            setError(err.message || t("summary.common.loadingFailed"));
         } finally {
             setLoading(false);
         }
@@ -40,13 +41,13 @@ export function useSummaryDetail(taskId: number | null): UseSummaryDetailReturn 
     }, []);
 
     const regenerate = useCallback(async () => {
-        if (taskId == null) return;
+        if (typeof taskId !== "number") return;
         await api.regenerateSummary(taskId);
         refresh();
     }, [taskId, refresh]);
 
     const cancel = useCallback(async () => {
-        if (taskId == null) return;
+        if (typeof taskId !== "number") return;
         await api.cancelSummary(taskId);
         refresh();
     }, [taskId, refresh]);

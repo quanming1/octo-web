@@ -16,11 +16,17 @@ import {
   MessageContentTypeConst,
   MessageReasonCode,
 } from "../../Service/Const";
-import { IConversationProvider } from "../../Service/DataSource/DataProvider";
 import WKApp from "../../App";
 import { resolveExternalForViewer } from "../../Utils/externalViewer";
-import { subscriberDisplayName } from "../../Utils/displayName";
+import {
+  personalRemarkDisplayName,
+  subscriberDisplayName,
+} from "../../Utils/displayName";
 import { shouldShowRealnameBadge } from "../../Utils/realnameBadge";
+import {
+  resolveWebhookRowDisplay,
+  webhookFromOfMessage,
+} from "../../Service/IncomingWebhook";
 import { css } from "@emotion/react";
 // import ClockLoader from "react-spinners/ClockLoader";
 import Checkbox from "../../Components/Checkbox";
@@ -28,12 +34,23 @@ import classNames from "classnames";
 import { Popconfirm } from "@douyinfe/semi-ui";
 import WKAvatar from "../../Components/WKAvatar";
 import AiBadge from "../../Components/AiBadge";
+import WebhookBadge from "../../Components/WebhookBadge";
 import RealnameVerifiedBadge from "../../Components/RealnameVerifiedBadge";
 import { getTitleColor } from "./head";
-import moment from "moment";
 import ThreadIndicator, {
   ThreadIndicatorData,
 } from "../../Components/ThreadIndicator";
+import { isMessageContinuation } from "../../Service/messageContinuity";
+import { isMessageSelectable } from "../../Service/messageSelection";
+import { I18nContext } from "../../i18n";
+import { formatMessageTimestamp } from "../../Utils/time";
+import {
+  addImChannelInfoListener,
+  addImSubscriberChangeListener,
+  fetchImChannelInfo,
+  getImChannelInfo,
+  getImChannelSubscribers,
+} from "../../im-runtime/channelRuntime";
 
 interface MessageBaseProps extends HTMLProps<any> {
   message: MessageWrap;
@@ -47,14 +64,14 @@ interface MessageBaseProps extends HTMLProps<any> {
 }
 
 export default class MessageBase extends Component<MessageBaseProps, any> {
+  static contextType = I18nContext;
+  declare context: React.ContextType<typeof I18nContext>;
+
   channelInfoListener!: ChannelInfoListener;
   subscriberChangeListener!: (channel: Channel) => void;
-  conversationProvider: IConversationProvider;
+  private unsubscribeChannelInfoListener?: () => void;
+  private unsubscribeSubscriberChangeListener?: () => void;
 
-  constructor(props: any) {
-    super(props);
-    this.conversationProvider = WKApp.conversationProvider;
-  }
   componentDidMount() {
     const self = this;
 
@@ -73,11 +90,9 @@ export default class MessageBase extends Component<MessageBaseProps, any> {
       msgChannel.channelType === ChannelTypePerson &&
       !(msgFromUID && msgChannel.channelID === msgFromUID)
     ) {
-      const convCached = WKSDK.shared().channelManager.getChannelInfo(
-        msgChannel
-      );
+      const convCached = getImChannelInfo(WKSDK.shared(), msgChannel);
       if (!convCached) {
-        WKSDK.shared().channelManager.fetchChannelInfo(msgChannel);
+        void fetchImChannelInfo(WKSDK.shared(), msgChannel);
       }
     }
 
@@ -102,7 +117,7 @@ export default class MessageBase extends Component<MessageBaseProps, any> {
         self.setState({});
       }
     };
-    WKSDK.shared().channelManager.addListener(this.channelInfoListener);
+    this.unsubscribeChannelInfoListener = addImChannelInfoListener(WKSDK.shared(), this.channelInfoListener);
 
     // 群成员到达 / 更新时触发重渲染：群消息发送者名字优先从群成员列表取，
     // 成员列表是异步同步的，消息可能先于成员列表到达，需要通知一次。
@@ -112,16 +127,17 @@ export default class MessageBase extends Component<MessageBaseProps, any> {
         self.setState({});
       }
     };
-    WKSDK.shared().channelManager.addSubscriberChangeListener(
+    this.unsubscribeSubscriberChangeListener = addImSubscriberChangeListener(
+      WKSDK.shared(),
       this.subscriberChangeListener
     );
   }
 
   componentWillUnmount() {
-    WKSDK.shared().channelManager.removeListener(this.channelInfoListener);
-    WKSDK.shared().channelManager.removeSubscriberChangeListener(
-      this.subscriberChangeListener
-    );
+    this.unsubscribeChannelInfoListener?.();
+    this.unsubscribeChannelInfoListener = undefined;
+    this.unsubscribeSubscriberChangeListener?.();
+    this.unsubscribeSubscriberChangeListener = undefined;
   }
 
   forceStandalone() {
@@ -142,12 +158,7 @@ export default class MessageBase extends Component<MessageBaseProps, any> {
       return false;
     }
     const { message } = this.props;
-    if (message.preMessage) {
-      if (message.fromUID === message.preMessage.fromUID) {
-        return true;
-      }
-    }
-    return false;
+    return isMessageContinuation(message.preMessage, message);
   }
 
   getMessageStyle(hasContinue: boolean, message: MessageWrap) {
@@ -167,18 +178,12 @@ export default class MessageBase extends Component<MessageBaseProps, any> {
       messageStyle.marginBottom = "0px";
       messageStyle.marginRight = "0px";
     }
-    if (message.preMessage && message.preMessage.fromUID !== message.fromUID) {
-      if (
-        message.nextMessage &&
-        message.nextMessage.fromUID === message.fromUID
-      ) {
+    if (!hasContinue) {
+      if (isMessageContinuation(message, message.nextMessage)) {
         messageStyle.marginBottom = "0px";
       }
     }
-    if (
-      message.nextMessage &&
-      message.nextMessage.fromUID !== message.fromUID
-    ) {
+    if (!isMessageContinuation(message, message.nextMessage)) {
       messageStyle.marginBottom = "15px";
     }
     return messageStyle;
@@ -190,15 +195,13 @@ export default class MessageBase extends Component<MessageBaseProps, any> {
     }
     if (
       hasContinue &&
-      message.nextMessage &&
-      message.nextMessage.fromUID === message.fromUID
+      isMessageContinuation(message, message.nextMessage)
     ) {
       return "8px 20px 20px 8px";
     }
     if (
       hasContinue &&
-      message.nextMessage &&
-      message.nextMessage.fromUID !== message.fromUID
+      !isMessageContinuation(message, message.nextMessage)
     ) {
       return "8px 20px 20px 8px";
     }
@@ -214,15 +217,6 @@ export default class MessageBase extends Component<MessageBaseProps, any> {
     }
     newBubbleStyle.borderRadius = this.getBubbleRadius(hasContinue, message);
     return newBubbleStyle;
-  }
-
-  onMessageRevoke() {
-    const { message } = this.props;
-    this.conversationProvider.revokeMessage(message.message);
-  }
-  onMultiple() {
-    const { context } = this.props;
-    context.setEditOn(true);
   }
 
   onMessageDelete() {
@@ -264,7 +258,8 @@ export default class MessageBase extends Component<MessageBaseProps, any> {
   isAiMessage() {
     const { message } = this.props;
     if (message.send) return false;
-    const channelInfo = WKSDK.shared().channelManager.getChannelInfo(
+    const channelInfo = getImChannelInfo(
+      WKSDK.shared(),
       new Channel(message.fromUID, ChannelTypePerson)
     );
     return channelInfo?.orgData?.robot === 1;
@@ -292,7 +287,7 @@ export default class MessageBase extends Component<MessageBaseProps, any> {
     const { message } = this.props;
     switch (message.reasonCode) {
       case MessageReasonCode.reasonSubscriberNotExist:
-        return "您已被踢出群聊。";
+        return this.context.t("base.messageBase.error.removedFromGroup");
       case MessageReasonCode.reasonNotAllowSend:
       case MessageReasonCode.reasonNotInWhitelist:
       case MessageReasonCode.reasonInBlacklist: {
@@ -300,23 +295,24 @@ export default class MessageBase extends Component<MessageBaseProps, any> {
         if (context) {
           const ch = context.channel();
           if (ch && ch.channelType === ChannelTypePerson) {
-            const chInfo = WKSDK.shared().channelManager.getChannelInfo(ch);
+            const chInfo = getImChannelInfo(WKSDK.shared(), ch);
             if (chInfo?.orgData?.robot === 1) {
-              return "请先添加好友后再与该机器人对话";
+              return this.context.t("base.messageBase.error.addBotFriendFirst");
             }
           }
         }
-        return "你已被禁言或全员禁言";
+        return this.context.t("base.messageBase.error.muted");
       }
       case MessageReasonCode.reasonSystemError:
-        return "系统错误";
+        return this.context.t("base.messageBase.error.system");
     }
   }
 
   render() {
     const { message, context, hiddeBubble, bubbleStyle } = this.props;
     const hasContinue = this.isContinue();
-    const channelInfo = WKSDK.shared().channelManager.getChannelInfo(
+    const channelInfo = getImChannelInfo(
+      WKSDK.shared(),
       new Channel(message.fromUID, ChannelTypePerson)
     );
     const avatarChannel =
@@ -331,10 +327,8 @@ export default class MessageBase extends Component<MessageBaseProps, any> {
     let groupMember: any = undefined;
     if (message.channel.channelType === ChannelTypeGroup && message.fromUID) {
       try {
-        const subs = WKSDK.shared().channelManager.getSubscribes(
-          message.channel
-        ) as any[] | null | undefined;
-        const member = subs?.find((s) => s && s.uid === message.fromUID);
+        const subs = getImChannelSubscribers(WKSDK.shared(), message.channel) as any[];
+        const member = subs.find((s) => s && s.uid === message.fromUID);
         groupMemberName = subscriberDisplayName(member);
         groupMember = member;
       } catch {
@@ -344,9 +338,8 @@ export default class MessageBase extends Component<MessageBaseProps, any> {
     // channelInfo 未命中时不要把 fromUID（32 位 hex）当兜底名字显示给用户，
     // 留空等待 fetchChannelInfo 回包后由 channelInfoListener 触发重渲染。
     //
-    // Legacy dir 例外：本文件在
-    // `AGENTS.config.json:legacy_dirs` 但仍在生产渲染 Voice / Gif / Location /
-    // File / Video 等类型的气泡，需要和 bridge 路径保持同一视觉：
+    // 本文件仍在生产渲染 Voice / Gif / Location / File / Video 等类型的气泡，
+    // 需要和 bridge 路径保持同一视觉规则：
     //   自己发送的消息，groupMember 通常不含 self、channelInfo.orgData 也
     //   不带 real_name（self Person channelInfo 不下发这个字段），导致 self
     //   气泡永远显示 username 而非 "余嘉伟"。接入登录 payload 后，
@@ -354,18 +347,33 @@ export default class MessageBase extends Component<MessageBaseProps, any> {
     //   即可拿到。规则改动请同步 bridge/message/useMessageRow.ts。
     const isOwnMessageName =
       message.fromUID && message.fromUID === WKApp.loginInfo.uid;
-    const displayName = isOwnMessageName
+    // 个人备注来自 sender 的 Person channelInfo。群消息虽然主路径读 subscriber，
+    // 但个人备注必须优先于群成员名，才能在 friend/remark 保存并刷新
+    // Person channelInfo 后立即反映到聊天框。
+    const personalRemarkName = personalRemarkDisplayName(channelInfo);
+    // 群入站 Webhook 消息（FromUID = iwh_*，永远不是群成员）：
+    // 名字/头像读 payload from 元信息，不查 ChannelInfo、不发 fetchChannelInfo
+    const webhookFrom = webhookFromOfMessage(message);
+    const webhookDisplay = webhookFrom
+      ? resolveWebhookRowDisplay(webhookFrom)
+      : undefined;
+    const displayName = webhookDisplay
+      ? webhookDisplay.senderName
+      : isOwnMessageName
       ? WKApp.loginInfo.selfDisplayName() ||
+        personalRemarkName ||
         groupMemberName ||
         channelInfo?.orgData?.displayName ||
         channelInfo?.title ||
         ""
-      : groupMemberName ||
+      : personalRemarkName ||
+        groupMemberName ||
         channelInfo?.orgData?.displayName ||
         channelInfo?.title ||
         "";
-    if (!channelInfo && message.fromUID && message.fromUID !== "") {
-      WKSDK.shared().channelManager.fetchChannelInfo(
+    if (!channelInfo && !webhookFrom && message.fromUID && message.fromUID !== "") {
+      void fetchImChannelInfo(
+        WKSDK.shared(),
         new Channel(message.fromUID, ChannelTypePerson)
       );
     }
@@ -373,7 +381,9 @@ export default class MessageBase extends Component<MessageBaseProps, any> {
     const isAi = this.isAiMessage();
     const showHead = this.needHead();
     const showAvatar = this.needAvatar();
-    const timeStr = moment(message.timestamp * 1000).format("HH:mm");
+    const timeStr = formatMessageTimestamp(message.timestamp);
+    const selectionMode = context.editOn();
+    const selectable = isMessageSelectable(message);
 
     // 外部群成员来源标记：按当前查看 Space 相对渲染。
     // 优先读 msg-level 新字段 from_home_space_id / from_home_space_name；
@@ -412,17 +422,15 @@ export default class MessageBase extends Component<MessageBaseProps, any> {
 
     // Epic dmwork-web#1169: 聊天气泡作者名旁的实名徽章。
     //
-    // Legacy dir 例外（见 PR description "Legacy Dir Exception
-    // Declaration" 段)：本目录 `Messages/` 已被 AGENTS.config.json 标为
-    // legacy_dirs，但 MessageBase 仍在生产渲染 Voice / Gif / Location / File /
-    // Video 等类型（尚未迁到新 MessageRow），产品需求要求所有消息类型气泡都显示
+    // 本目录 Messages/ 中的某些消息类型（Voice / Gif / Location / File / Video）
+    // 仍走 MessageBase 而未迁到新 MessageRow。产品需求要求所有消息类型气泡都显示
     // 徽章，因此这里必须和 bridge 路径走 **同一套** 判定规则。
     //
     // 共享 helper `shouldShowRealnameBadge` 的优先级：isAi → isBotConversation →
     // isBotSender → groupMember orgData → channelInfo orgData → self-fallback。
     // 判定维度对齐 `src/bridge/message/useMessageRow.ts`，任何规则改动请同步两处。
     const conversationChannelInfo = message.channel
-      ? WKSDK.shared().channelManager.getChannelInfo(message.channel)
+      ? getImChannelInfo(WKSDK.shared(), message.channel)
       : undefined;
     const isOwnMessage = message.fromUID === WKApp.loginInfo.uid;
     // Legacy dir 例外：和 bridge 路径 useMessageRow.ts 对齐。
@@ -451,22 +459,24 @@ export default class MessageBase extends Component<MessageBaseProps, any> {
       <div
         className={classNames(
           "wk-message-base",
-          context.editOn() ? "wk-message-base-check-open" : undefined
+          selectionMode && selectable ? "wk-message-base-check-open" : undefined
         )}
         onClick={
-          context.editOn()
-            ? (event) => {
-                context.checkeMessage(message.message, !message.checked);
+          selectionMode
+            ? () => {
+                if (selectable) {
+                  context.checkeMessage(message.message, !message.checked);
+                }
               }
             : undefined
         }
       >
-        {context.editOn() ? (
+        {selectionMode && selectable ? (
           <div
             className="wk-message-base-checkBox"
             style={{ marginBottom: messageStyle.marginBottom }}
           >
-            <Checkbox checked={message.checked} />
+            <Checkbox checked={selectable && message.checked} />
           </div>
         ) : null}
         <div
@@ -477,13 +487,13 @@ export default class MessageBase extends Component<MessageBaseProps, any> {
         >
           <div
             className={"wk-message-base-box"}
-            style={{ pointerEvents: context.editOn() ? "none" : undefined }}
+            style={{ pointerEvents: selectionMode ? "none" : undefined }}
           >
             {message.send && message.status === MessageStatus.Fail ? (
               <Popconfirm
-                title="是否重新发送"
-                okText="是"
-                cancelText="否"
+                title={this.context.t("base.messageBase.resendConfirm.title")}
+                okText={this.context.t("base.messageBase.resendConfirm.ok")}
+                cancelText={this.context.t("base.messageBase.resendConfirm.cancel")}
                 onConfirm={() => {
                   context.resendMessage(message.message);
                 }}
@@ -501,19 +511,28 @@ export default class MessageBase extends Component<MessageBaseProps, any> {
                 showAvatar ? undefined : "senderAvatar-placeholder"
               )}
               onClick={
-                showAvatar
+                // webhook 发送者没有个人资料页，点击不响应
+                showAvatar && !(webhookDisplay && !webhookDisplay.avatarClickable)
                   ? (el) => {
                       context.onTapAvatar(message.fromUID, el);
                     }
                   : undefined
               }
             >
-              {showAvatar && (
-                <WKAvatar
-                  channel={avatarChannel}
-                  style={{ width: "32px", height: "32px" }}
-                />
-              )}
+              {showAvatar &&
+                (webhookDisplay && webhookDisplay.avatarUrl ? (
+                  // webhook 管理员自定义头像
+                  <WKAvatar
+                    src={webhookDisplay.avatarUrl}
+                    style={{ width: "32px", height: "32px" }}
+                  />
+                ) : (
+                  // 普通消息，以及无自定义头像的 webhook：都走用户头像链路
+                  <WKAvatar
+                    channel={avatarChannel}
+                    style={{ width: "32px", height: "32px" }}
+                  />
+                ))}
             </div>
 
             {/* 消息体列 */}
@@ -547,6 +566,7 @@ export default class MessageBase extends Component<MessageBaseProps, any> {
                   {channelInfo?.orgData?.robot === 1 && (
                     <AiBadge size="small" />
                   )}
+                  {webhookDisplay?.showBadge && <WebhookBadge />}
                   <span className="wk-msg-head-time">{timeStr}</span>
                 </div>
               )}

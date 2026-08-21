@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 import { getMessageRow, MessageRowSelectionState } from './useMessageRow'
 import { MessageWrap } from '../../Service/Model'
 import type { MergeforwardCardUIProps } from '../../ui/message/MergeforwardCard'
+import { i18n, t } from '../../i18n'
 
 /**
  * getMergeforwardMessageUI - 纯函数版本
@@ -25,12 +26,18 @@ export function getMergeforwardMessageUI(
 
   // 生成标题：「xxx、yyy 的聊天记录」或「群的聊天记录」
   const ChannelTypeGroup = 2
-  let title = '聊天记录'
+  let title = t('base.mergeForward.chatHistory')
   if (content.channelType === ChannelTypeGroup) {
-    title = '群的聊天记录'
+    title = t('base.mergeForward.groupChatHistory')
   } else if (Array.isArray(content.users) && content.users.length > 0) {
     const names: string[] = content.users.map((u: { uid: string; name: string }) => u.name)
-    title = `${names.join('、')}的聊天记录`
+    const locale = i18n.getLocale()
+    const formattedNames = locale === 'zh-CN'
+      ? names.join('、')
+      : new Intl.ListFormat(locale, { style: 'short', type: 'conjunction' }).format(names)
+    title = t('base.mergeForward.userChatHistory', {
+      values: { names: formattedNames },
+    })
   }
 
   // 最多取前 4 条，转成展示用的文本行

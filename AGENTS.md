@@ -12,9 +12,19 @@
 
 在分配的 worktree 里工作，不要动主仓库目录。
 
+新增业务能力、新页面、新模块，或对既有模块做结构化迁移时，先读 `docs/new-module-development-guide.md`，并在动代码前产出"行为清单、文件地图、PR 范围、验证计划"四件套。
+
+涉及国际化、多语言或用户可见文案时，先读 `docs/i18n-agent-guide.md`，再运行相关校验。
+
+涉及业务代码修改时，先确认模块归属和现有入口。不要因为历史目录里已有相似代码，就默认把新能力继续塞进 `Components/`、`Messages/` 或 `packages/dmwork*`。
+
+新增业务能力应优先落在职责清晰的模块目录，并补充必要的 README、测试或 Story；确需修改共享组件、消息渲染或基础服务时，在最终说明里写明影响范围。
+
+同一业务能力只保留一个用户可见入口。为了重构或复用新增底层实现时，不要同时暴露两套菜单、路由或按钮入口。
+
 ---
 
-## 新建 UI 组件：必须先写 Story 再接业务
+## 新建 UI 组件：建议先写 Story 再接业务
 
 ```
 1. 建组件文件（index.tsx + index.css）
@@ -23,7 +33,7 @@
 4. 再接入业务代码
 ```
 
-顺序不能颠倒。CI 会检查 story 覆盖，没有 story 的新组件 PR 不能合并。
+顺序不能颠倒。建议新组件总是包含 Story，在 Storybook 里手动验证。
 
 Story 写法见 DEVELOPMENT.md 章节四、六。
 
@@ -43,17 +53,8 @@ Story 写法见 DEVELOPMENT.md 章节四、六。
 
 ## UI/数据分离架构
 
-本项目遵循 UI/数据分离开发规范（skill: `ui-data-separation`）。
+本项目采用分层结构：
 
-**三层结构：**
-- `ui/` — 纯 UI 组件，无 WKSDK/WKApp，由 agent 维护
-- `bridge/` — 数据桥接层（types.ts + use*.ts），由工程师维护
-- `Components/` / `Messages/` — 旧组件，迁移中，**禁止修改**
-
-**三条核心规则：**
-1. `ui/` 下禁止 import `wukongimjssdk`、`WKApp`、`Service/`
-2. 组件 props 类型只用 `bridge/types.ts` 里的类型
-3. 遇到越界需求：输出工单，不自行处理
-
-**详细流程：** 读 skill `ui-data-separation` 的对应 reference
-**项目路径配置：** `AGENTS.config.json`（根目录）
+- `ui/` — UI 组件（新组件统一放这里，用 `pnpm gen:component` 生成）
+- `bridge/` — 数据桥接层（types.ts + use*.ts）
+- `Components/` / `Messages/` — 现有组件库

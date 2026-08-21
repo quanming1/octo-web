@@ -1,6 +1,8 @@
 import React from "react";
 import { Download, FileWarning } from "lucide-react";
 import { formatFileSize } from "../config";
+import { downloadFile } from "../../../Utils/download";
+import { useI18n } from "../../../i18n";
 import "./FileTooLarge.css";
 
 export interface FileTooLargeProps {
@@ -23,14 +25,10 @@ const FileTooLarge: React.FC<FileTooLargeProps> = ({
   fileSize,
   fileUrl,
 }) => {
+  const { t } = useI18n();
+
   const handleDownload = () => {
-    const a = document.createElement("a");
-    a.href = fileUrl;
-    a.download = fileName || "file";
-    a.target = "_blank";
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    void downloadFile(fileUrl, fileName || "file");
   };
 
   return (
@@ -39,14 +37,22 @@ const FileTooLarge: React.FC<FileTooLargeProps> = ({
         <FileWarning size={48} strokeWidth={1.5} />
       </div>
       <div className="wk-file-too-large__content">
-        <h3 className="wk-file-too-large__title">文件过大</h3>
+        <h3 className="wk-file-too-large__title">
+          {t("base.filePreview.largeFileTitle")}
+        </h3>
         <p className="wk-file-too-large__message">
-          文件过大（{formatFileSize(fileSize)}），建议下载到本地查看
+          {t("base.filePreview.largeFileMessage", {
+            values: { size: formatFileSize(fileSize) },
+          })}
         </p>
       </div>
-      <button className="wk-file-too-large__download-btn" onClick={handleDownload}>
+      <button
+        type="button"
+        className="wk-file-too-large__download-btn"
+        onClick={handleDownload}
+      >
         <Download size={16} />
-        <span>下载文件</span>
+        <span>{t("base.filePreview.downloadFile")}</span>
       </button>
     </div>
   );

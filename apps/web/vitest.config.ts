@@ -1,4 +1,4 @@
-import { defineConfig } from 'vitest/config'
+import { configDefaults, defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import tsconfigPaths from 'vite-tsconfig-paths'
 import path from 'path'
@@ -7,13 +7,16 @@ export default defineConfig({
   plugins: [react(), tsconfigPaths({ root: '../../' })],
   resolve: {
     alias: {
-      react: path.resolve(__dirname, 'node_modules/react'),
+      'react': path.resolve(__dirname, 'node_modules/react'),
       'react-dom': path.resolve(__dirname, 'node_modules/react-dom'),
+      '@douyinfe/semi-ui': path.resolve(__dirname, 'node_modules/@douyinfe/semi-ui'),
+      '@douyinfe/semi-icons': path.resolve(__dirname, 'node_modules/@douyinfe/semi-icons'),
     },
   },
   test: {
     globals: true,
     environment: 'jsdom',
+    exclude: [...configDefaults.exclude, 'e2e-kit/**'],
     setupFiles: ['./src/__tests__/setup.ts'],
     // Force Vite to transform @tiptap/react instead of letting Node's strict
     // ESM resolver handle it. Its dist ships `import ... from 'react/jsx-runtime'`
@@ -27,7 +30,7 @@ export default defineConfig({
     // to PR#1113.
     server: {
       deps: {
-        inline: [/@tiptap\/react/],
+        inline: [/@tiptap\/react/, /@douyinfe\/semi-icons/, /@douyinfe\/semi-ui/],
       },
     },
   },

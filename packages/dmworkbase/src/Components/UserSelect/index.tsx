@@ -6,6 +6,7 @@ import IndexTable, { IndexTableItem } from "../IndexTable";
 import WKViewQueueHeader from "../WKViewQueueHeader";
 import "./index.css"
 import { ContactsStatus } from "../../Service/DataSource/DataSource";
+import { I18nContext } from "../../i18n";
 
 export interface UserSelectProps {
     users?: IndexTableItem[]
@@ -35,12 +36,15 @@ export interface ContactsSelectProps extends UserSelectProps {
 }
 
 export class ContactsSelect extends Component<ContactsSelectProps> {
+    static contextType = I18nContext
+    declare context: React.ContextType<typeof I18nContext>
+
     finishButtonContext!:FinishButtonContext
     render() {
         const { onSelect, disableSelectList, showHeader,onFinished,onBack,onFinishButtonContext,showFinishButton } = this.props
         return <div className="wk-contactsselect">
             {
-                showHeader ? <WKViewQueueHeader showFinishButton={showFinishButton} title="联系人选择" onFinishButtonContext={(context)=>{
+                showHeader ? <WKViewQueueHeader showFinishButton={showFinishButton} title={this.context.t("base.userSelect.title")} onFinishButtonContext={(context)=>{
                     this.finishButtonContext = context
                     this.finishButtonContext.disable(true)
                     if(onFinishButtonContext) {

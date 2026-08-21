@@ -8,6 +8,7 @@ import WKAvatar from "../../Components/WKAvatar"
 import { getTimeStringAutoShort2 } from "../../Utils/time"
 import { parseThreadChannelId } from "../../Service/Thread"
 import MessageRow from "../../ui/message/MessageRow"
+import { I18nContext, t } from "../../i18n"
 import "./index.css"
 
 interface LastMessage {
@@ -60,11 +61,14 @@ export class ThreadCreatedContent extends MessageContent {
   }
 
   get conversationDigest() {
-    return `[子区] ${this.thread_name}`
+    return t("base.threadCreated.digest", { values: { name: this.thread_name } })
   }
 }
 
 export class ThreadCreatedCell extends MessageCell {
+  static contextType = I18nContext
+  declare context: React.ContextType<typeof I18nContext>
+
   handleClick = async () => {
     const { message, context } = this.props
     const content = message.content as ThreadCreatedContent
@@ -78,12 +82,12 @@ export class ThreadCreatedCell extends MessageCell {
         )
         // status: 1=活跃, 2=归档, 3=删除
         if (resp.status === 3) {
-          Toast.warning("该子区已删除")
+          Toast.warning(this.context.t("base.threadCreated.deleted"))
           return
         }
-        // 归档状态允许进入查看，但会在聊天界面禁用发送
+        // 归档状态允许进入查看；是否自动恢复活跃由后端发送链路处理。
       } catch (err: any) {
-        Toast.warning("该子区已删除或不存在")
+        Toast.warning(this.context.t("base.threadCreated.deletedOrMissing"))
         return
       }
     }
@@ -98,7 +102,7 @@ export class ThreadCreatedCell extends MessageCell {
   }
 
   render() {
-    const { message } = this.props
+    const { message, context } = this.props
     const content = message.content as ThreadCreatedContent
     const messageCount = content.message_count || 0
     const timeStr = content.last_message
@@ -120,7 +124,7 @@ export class ThreadCreatedCell extends MessageCell {
       isSelected: false,
       showAvatar: true,
       avatarUrl: WKApp.shared.avatarUser(content.from_uid || message.fromUID),
-      senderName: content.from_name || '用户',
+      senderName: content.from_name || this.context.t("base.threadCreated.user"),
       timestamp: getTimeStringAutoShort2(message.timestamp * 1000, true),
       isOnline: false,
     }
@@ -128,22 +132,23 @@ export class ThreadCreatedCell extends MessageCell {
     return (
       <MessageRow 
         {...rowProps}
-        onContextMenu={(event) => this.props.context.showContextMenus(message, event)}
-        isActive={this.props.context.isContextMenuOpen(message.message)}
-        onAvatarClick={(e) => this.props.context.onTapAvatar(content.from_uid || message.fromUID, e)}
-        onSenderNameClick={() => this.props.context.showUser(content.from_uid || message.fromUID)}
+        selectionMode={context.editOn()}
+        onContextMenu={(event) => context.showContextMenus(message, event)}
+        isActive={context.isContextMenuOpen(message.message)}
+        onAvatarClick={(e) => context.onTapAvatar(content.from_uid || message.fromUID, e)}
+        onSenderNameClick={() => context.showUser(content.from_uid || message.fromUID)}
       >
         <div className="wk-thread-created-card" onClick={this.handleClick}>
         {/* 消息正文预览 */}
         <div className="wk-thread-created-preview">
-          {content.content || '新建了子区'}
+          {content.content || this.context.t("base.threadCreated.created")}
         </div>
 
         {/* 底部元数据行 */}
         <div className="wk-thread-created-meta">
           {/* Thread 链接 */}
           <span className="wk-thread-created-link">
-            🧵{content.thread_name}·{messageCount}条回复
+            🧵{content.thread_name}·{this.context.t("base.threadCreated.replyCount", { values: { count: messageCount } })}
           </span>
 
           {/* 参与者头像组 */}
@@ -157,7 +162,7 @@ export class ThreadCreatedCell extends MessageCell {
                     width: 16,
                     height: 16,
                     fontSize: 8,
-                    borderRadius: '50%',
+                    borderRadius: 'var(--wk-avatar-radius, 50%)',
                     marginLeft: idx > 0 ? -8 : 0,
                     border: '1.5px solid rgba(255,255,255,1)',
                     flexShrink: 0,

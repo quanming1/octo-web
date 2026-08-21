@@ -1,5 +1,6 @@
 import APIClient from './APIClient';
 import FileHelper from '../Utils/filehelper';
+import { t } from '../i18n';
 import type {
   AgentCardData,
   RuntimeInfo,
@@ -158,7 +159,7 @@ class AgentCardService {
 
     if (identityFiles.length > 0) {
       groups.push({
-        label: '身份与人格',
+        label: t('base.claw.coreFiles.group.identity'),
         files: identityFiles.map((f) => ({
           name: f.file_name,
           path: f.file_name,
@@ -169,7 +170,7 @@ class AgentCardService {
 
     if (toolsFiles.length > 0) {
       groups.push({
-        label: '工具与行为',
+        label: t('base.claw.coreFiles.group.tools'),
         files: toolsFiles.map((f) => ({
           name: f.file_name,
           path: f.file_name,
@@ -180,7 +181,7 @@ class AgentCardService {
 
     if (otherFiles.length > 0) {
       groups.push({
-        label: '其他',
+        label: t('base.claw.coreFiles.group.other'),
         files: otherFiles.map((f) => ({
           name: f.file_name,
           path: f.file_name,
@@ -192,7 +193,7 @@ class AgentCardService {
     // 记忆文件单独分组
     if (agentCard.memory_files.length > 0) {
       groups.push({
-        label: '记忆',
+        label: t('base.claw.coreFiles.group.memory'),
         files: agentCard.memory_files.map((f) => ({
           name: f.file_name,
           path: f.file_name,

@@ -1,6 +1,12 @@
 import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 
+const { mockOnTranscribeResult, mockLocalTranscribe, feedbackState } = vi.hoisted(() => ({
+  mockOnTranscribeResult: vi.fn(),
+  mockLocalTranscribe: vi.fn(),
+  feedbackState: { enabled: false },
+}));
+
 // Mock WKApp
 vi.mock("@octo/base/src/App", () => ({
   default: {
@@ -29,9 +35,68 @@ vi.mock("@octo/base/src/Service/VoiceService", () => {
   };
 });
 
+// Mock VoiceFeedback
+vi.mock("@octo/base/src/Service/VoiceFeedback", () => ({
+  default: {
+    init: vi.fn(),
+    destroy: vi.fn(),
+    shared: () => ({ onTranscribeResult: mockOnTranscribeResult }),
+  },
+}));
+
+// Mock LocalModelService
+vi.mock("@octo/base/src/Service/LocalModelService", () => ({
+  default: {
+    shared: {
+      config: { preferLocal: false, enabled: false },
+      loadConfig: vi.fn(),
+      updateConfig: vi.fn(),
+      probe: vi.fn().mockResolvedValue(false),
+      transcribe: mockLocalTranscribe,
+    },
+  },
+}));
+
+// Mock useSpaceFeedbackSetting helpers
+vi.mock(
+  "../../../../packages/dmworkbase/src/features/voice-input/useSpaceFeedbackSetting",
+  () => ({
+    fetchAndApplySpaceSetting: vi.fn().mockResolvedValue(undefined),
+    resetSharedSpaceSetting: vi.fn(),
+    setSharedVoiceConfig: vi.fn(),
+    getSharedSpaceFeedbackState: () => ({
+      spaceSetting: {
+        voice_input_enabled: 1,
+        voice_feedback_on: feedbackState.enabled ? 1 : 0,
+        voice_feedback_notice_acked: 1,
+      },
+      loadedSpaceId: "test-space-id",
+    }),
+    getSharedVoiceConfig: () => null,
+    subscribe: vi.fn(() => vi.fn()),
+  }),
+);
+
 import WKApp from "@octo/base/src/App";
 import VoiceService from "@octo/base/src/Service/VoiceService";
-import useVoiceInput from "@octo/base/src/Components/MessageInput/useVoiceInput";
+import LocalModelService from "@octo/base/src/Service/LocalModelService";
+import useVoiceInput, {
+  type UseVoiceInputOptions,
+} from "@octo/base/src/features/chat-composer/adapters/voice/useVoiceInput";
+
+const voiceHost = {
+  getSpaceId: () => WKApp.shared.currentSpaceId,
+  subscribeSpaceChange: (listener: () => void) => {
+    WKApp.mittBus.on("space-changed", listener);
+    return () => WKApp.mittBus.off("space-changed", listener);
+  },
+};
+
+function useTestVoiceInput(
+  options: Omit<UseVoiceInputOptions, "voiceHost"> = {},
+) {
+  return useVoiceInput({ voiceHost, ...options });
+}
 
 // Mock MediaRecorder
 class MockMediaRecorder {
@@ -83,6 +148,7 @@ function setupMocks() {
 
 describe("useVoiceInput", () => {
   beforeEach(() => {
+    feedbackState.enabled = false;
     vi.useFakeTimers();
     setupMocks();
     WKApp.shared.currentSpaceId = "test-space-id";
@@ -105,7 +171,7 @@ describe("useVoiceInput", () => {
   });
 
   it("should fetch voice config on mount", async () => {
-    const { result } = renderHook(() => useVoiceInput());
+    const { result } = renderHook(() => useTestVoiceInput());
 
     await act(async () => {
       await vi.runAllTimersAsync();
@@ -120,7 +186,7 @@ describe("useVoiceInput", () => {
       new Error("fail")
     );
 
-    const { result } = renderHook(() => useVoiceInput());
+    const { result } = renderHook(() => useTestVoiceInput());
 
     await act(async () => {
       await vi.runAllTimersAsync();
@@ -136,7 +202,7 @@ describe("useVoiceInput", () => {
       max_file_size: 3145728,
     });
 
-    const { result } = renderHook(() => useVoiceInput());
+    const { result } = renderHook(() => useTestVoiceInput());
 
     await act(async () => {
       await vi.runAllTimersAsync();
@@ -146,14 +212,14 @@ describe("useVoiceInput", () => {
   });
 
   it("should start in non-recording state", () => {
-    const { result } = renderHook(() => useVoiceInput());
+    const { result } = renderHook(() => useTestVoiceInput());
 
     expect(result.current.isRecording).toBe(false);
     expect(result.current.isTranscribing).toBe(false);
   });
 
   it("should set isRecording to true when startRecording is called", async () => {
-    const { result } = renderHook(() => useVoiceInput());
+    const { result } = renderHook(() => useTestVoiceInput());
 
     await act(async () => {
       await result.current.startRecording();
@@ -170,7 +236,7 @@ describe("useVoiceInput", () => {
     vi.mocked(navigator.mediaDevices.getUserMedia).mockRejectedValue(mockError);
     const onError = vi.fn();
 
-    const { result } = renderHook(() => useVoiceInput({ onError }));
+    const { result } = renderHook(() => useTestVoiceInput({ onError }));
 
     await act(async () => {
       await result.current.startRecording();
@@ -181,7 +247,16 @@ describe("useVoiceInput", () => {
   });
 
   it("should auto-stop recording after maxDuration timeout", async () => {
-    const { result } = renderHook(() => useVoiceInput({ maxDuration: 5 }));
+    vi.mocked(VoiceService.shared.getConfig).mockResolvedValue({
+      enabled: true,
+      max_file_size: 3145728,
+    } as any);
+
+    const { result } = renderHook(() => useTestVoiceInput({ maxDuration: 5 }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
 
     await act(async () => {
       await result.current.startRecording();
@@ -190,7 +265,7 @@ describe("useVoiceInput", () => {
     expect(result.current.isRecording).toBe(true);
 
     await act(async () => {
-      vi.advanceTimersByTime(5000);
+      await vi.advanceTimersByTimeAsync(5001);
     });
 
     // maxDuration timeout should have triggered stopRecordingAndTranscribe
@@ -198,7 +273,7 @@ describe("useVoiceInput", () => {
   });
 
   it("should cancel recording and reset state", async () => {
-    const { result } = renderHook(() => useVoiceInput());
+    const { result } = renderHook(() => useTestVoiceInput());
 
     await act(async () => {
       await result.current.startRecording();
@@ -214,7 +289,7 @@ describe("useVoiceInput", () => {
   });
 
   it("should not start recording if already recording", async () => {
-    const { result } = renderHook(() => useVoiceInput());
+    const { result } = renderHook(() => useTestVoiceInput());
 
     await act(async () => {
       await result.current.startRecording();
@@ -247,7 +322,7 @@ describe("useVoiceInput", () => {
   });
 
   it("should cleanup on unmount", async () => {
-    const { result, unmount } = renderHook(() => useVoiceInput());
+    const { result, unmount } = renderHook(() => useTestVoiceInput());
 
     await act(async () => {
       await result.current.startRecording();
@@ -295,7 +370,7 @@ describe("useVoiceInput - getChatContext", () => {
     });
 
     const { result } = renderHook(() =>
-      useVoiceInput({
+      useTestVoiceInput({
         getChatContext,
         onTranscribed: vi.fn(),
       })
@@ -316,9 +391,98 @@ describe("useVoiceInput - getChatContext", () => {
     });
   });
 
+  it("should pass channelType=1 (DM) to VoiceService.transcribe", async () => {
+    const getChatContext = vi.fn().mockReturnValue({
+      channelType: 1,
+      chatContext: "私聊「Alice」\n[Alice]: hi",
+    });
+    vi.mocked(VoiceService.shared.transcribe).mockResolvedValue({
+      text: "transcribed",
+      m: "whisper-1",
+    });
+
+    const { result } = renderHook(() =>
+      useTestVoiceInput({
+        getChatContext,
+        onTranscribed: vi.fn(),
+      })
+    );
+
+    await act(async () => {
+      await result.current.startRecording();
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1500);
+    });
+
+    await act(async () => {
+      result.current.stopRecordingAndTranscribe("input text");
+      await vi.runAllTimersAsync();
+    });
+
+    expect(VoiceService.shared.transcribe).toHaveBeenCalledWith(
+      expect.any(Blob),
+      "input text",
+      "私聊「Alice」\n[Alice]: hi",
+      undefined,
+      undefined,
+      "smart",
+      true,
+      1,
+      false,
+      undefined
+    );
+  });
+
+  it("should pass channelType=2 (group) to VoiceService.transcribe", async () => {
+    const getChatContext = vi.fn().mockReturnValue({
+      channelType: 2,
+      chatContext: "群聊「产品组」\n[Bob]: hey",
+      memberContext: "聊天成员：Bob",
+    });
+    vi.mocked(VoiceService.shared.transcribe).mockResolvedValue({
+      text: "transcribed",
+      m: "whisper-1",
+    });
+
+    const { result } = renderHook(() =>
+      useTestVoiceInput({
+        getChatContext,
+        onTranscribed: vi.fn(),
+      })
+    );
+
+    await act(async () => {
+      await result.current.startRecording();
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1500);
+    });
+
+    await act(async () => {
+      result.current.stopRecordingAndTranscribe();
+      await vi.runAllTimersAsync();
+    });
+
+    expect(VoiceService.shared.transcribe).toHaveBeenCalledWith(
+      expect.any(Blob),
+      undefined,
+      "群聊「产品组」\n[Bob]: hey",
+      undefined,
+      "聊天成员：Bob",
+      "smart",
+      true,
+      2,
+      false,
+      undefined
+    );
+  });
+
   it("should handle undefined getChatContext gracefully", async () => {
     const { result } = renderHook(() =>
-      useVoiceInput({
+      useTestVoiceInput({
         onTranscribed: vi.fn(),
       })
     );
@@ -437,7 +601,7 @@ describe("useVoiceInput - window blur handling", () => {
   it("should register blur listener while recording", async () => {
     const addSpy = vi.spyOn(window, "addEventListener");
 
-    const { result } = renderHook(() => useVoiceInput());
+    const { result } = renderHook(() => useTestVoiceInput());
 
     await act(async () => {
       await result.current.startRecording();
@@ -484,7 +648,7 @@ describe("useVoiceInput - personal voice context", () => {
     const onTranscribed = vi.fn();
 
     const { result } = renderHook(() =>
-      useVoiceInput({ onTranscribed, getChatContext })
+      useTestVoiceInput({ onTranscribed, getChatContext })
     );
 
     await act(async () => {
@@ -507,7 +671,10 @@ describe("useVoiceInput - personal voice context", () => {
       "个人纠错词", // personalContext
       "聊天成员：Alice,Bob", // memberContext
       "smart", // mode
-      true // skipLocal
+      true, // skipLocal
+      undefined, // channelType
+      false, // allowFeedback
+      undefined // selfName
     );
     expect(getChatContext).toHaveBeenCalled();
   });
@@ -528,7 +695,7 @@ describe("useVoiceInput - personal voice context", () => {
       chatContext: undefined,
     }));
 
-    const { result } = renderHook(() => useVoiceInput({ getChatContext }));
+    const { result } = renderHook(() => useTestVoiceInput({ getChatContext }));
 
     await act(async () => {
       await result.current.startRecording();
@@ -548,7 +715,10 @@ describe("useVoiceInput - personal voice context", () => {
       undefined, // personalContext (has_context=false)
       "聊天成员：Alice,Bob", // memberContext
       "smart", // mode
-      true // skipLocal
+      true, // skipLocal
+      undefined, // channelType
+      false, // allowFeedback
+      undefined // selfName
     );
     expect(getChatContext).toHaveBeenCalled();
   });
@@ -569,7 +739,7 @@ describe("useVoiceInput - personal voice context", () => {
       chatContext: undefined,
     }));
 
-    const { result } = renderHook(() => useVoiceInput({ getChatContext }));
+    const { result } = renderHook(() => useTestVoiceInput({ getChatContext }));
 
     await act(async () => {
       await result.current.startRecording();
@@ -589,7 +759,10 @@ describe("useVoiceInput - personal voice context", () => {
       undefined, // personalContext (context 为空字符串，视为无)
       "聊天成员：Alice", // memberContext
       "smart", // mode
-      true // skipLocal
+      true, // skipLocal
+      undefined, // channelType
+      false, // allowFeedback
+      undefined // selfName
     );
   });
 
@@ -606,7 +779,7 @@ describe("useVoiceInput - personal voice context", () => {
       chatContext: undefined,
     }));
 
-    const { result } = renderHook(() => useVoiceInput({ getChatContext }));
+    const { result } = renderHook(() => useTestVoiceInput({ getChatContext }));
 
     await act(async () => {
       await result.current.startRecording();
@@ -626,14 +799,17 @@ describe("useVoiceInput - personal voice context", () => {
       undefined, // personalContext (API 失败，voiceContextRef 为 null)
       "聊天成员：Alice", // memberContext
       "smart", // mode
-      true // skipLocal
+      true, // skipLocal
+      undefined, // channelType
+      false, // allowFeedback
+      undefined // selfName
     );
   });
 
   it("should not query voice context when not in Space mode", async () => {
     WKApp.shared.currentSpaceId = "";
 
-    const { result } = renderHook(() => useVoiceInput());
+    const { result } = renderHook(() => useTestVoiceInput());
 
     await act(async () => {
       await result.current.startRecording();
@@ -654,10 +830,14 @@ describe("useVoiceInput - personal voice context", () => {
       m: "g3fp",
     });
 
-    const { result } = renderHook(() => useVoiceInput());
+    const { result } = renderHook(() => useTestVoiceInput());
 
     await act(async () => {
       await result.current.startRecording();
+    });
+
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
     });
 
     await act(async () => {
@@ -681,12 +861,15 @@ describe("useVoiceInput - personal voice context", () => {
       "延迟到达的纠错词", // personalContext
       undefined, // memberContext (无 getChatContext)
       "smart", // mode
-      true // skipLocal
+      true, // skipLocal
+      undefined, // channelType
+      false, // allowFeedback
+      undefined // selfName
     );
   });
 
   it("should register space-changed handler on mittBus", () => {
-    renderHook(() => useVoiceInput());
+    renderHook(() => useTestVoiceInput());
 
     expect(WKApp.mittBus.on).toHaveBeenCalledWith(
       "space-changed",
@@ -708,7 +891,7 @@ describe("useVoiceInput - personal voice context", () => {
     });
     const onError = vi.fn();
 
-    const { result } = renderHook(() => useVoiceInput({ onError }));
+    const { result } = renderHook(() => useTestVoiceInput({ onError }));
 
     await act(async () => {
       await vi.runAllTimersAsync();
@@ -739,7 +922,7 @@ describe("useVoiceInput - personal voice context", () => {
       })
     );
 
-    const { result } = renderHook(() => useVoiceInput());
+    const { result } = renderHook(() => useTestVoiceInput());
 
     await act(async () => {
       await result.current.startRecording();
@@ -762,5 +945,324 @@ describe("useVoiceInput - personal voice context", () => {
     // After cancel, the voiceContextRef should remain null
     // because spaceId check fails. We verify indirectly:
     // next recording should query fresh context
+  });
+});
+
+describe("useVoiceInput - max duration config", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    setupMocks();
+    WKApp.shared.currentSpaceId = "test-space-id";
+    vi.mocked(VoiceService.shared.getVoiceContext).mockResolvedValue({
+      status: 200,
+      has_context: false,
+      context: "",
+      updated_at: "",
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.clearAllMocks();
+  });
+
+  it("should default to 60s when backend does not return max_duration", async () => {
+    vi.mocked(VoiceService.shared.getConfig).mockResolvedValue({
+      enabled: true,
+      max_file_size: 3145728,
+    });
+
+    const { result } = renderHook(() => useTestVoiceInput());
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      await result.current.startRecording();
+    });
+
+    expect(result.current.isRecording).toBe(true);
+
+    // Advance 59s — should still be recording
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(59000);
+    });
+    expect(result.current.isRecording).toBe(true);
+
+    // Advance past 60s — should auto-stop
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1001);
+    });
+    expect(result.current.isRecording).toBe(false);
+  });
+
+  it("should use backend max_duration when returned by getConfig", async () => {
+    vi.mocked(VoiceService.shared.getConfig).mockResolvedValue({
+      enabled: true,
+      max_duration: 30,
+      max_file_size: 3145728,
+    });
+
+    const { result } = renderHook(() => useTestVoiceInput());
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      await result.current.startRecording();
+    });
+
+    expect(result.current.isRecording).toBe(true);
+
+    // Advance 29s — should still be recording
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(29000);
+    });
+    expect(result.current.isRecording).toBe(true);
+
+    // Advance past 30s — should auto-stop
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1001);
+    });
+    expect(result.current.isRecording).toBe(false);
+  });
+
+  it("should enforce safety floor of 5s when backend returns a smaller value", async () => {
+    vi.mocked(VoiceService.shared.getConfig).mockResolvedValue({
+      enabled: true,
+      max_duration: 2,
+      max_file_size: 3145728,
+    });
+
+    const { result } = renderHook(() => useTestVoiceInput());
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      await result.current.startRecording();
+    });
+
+    expect(result.current.isRecording).toBe(true);
+
+    // Advance 2s — should NOT stop (floor is 5s)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(result.current.isRecording).toBe(true);
+
+    // Advance to 4.9s — still recording
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2900);
+    });
+    expect(result.current.isRecording).toBe(true);
+
+    // Advance past 5s — should auto-stop
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(101);
+    });
+    expect(result.current.isRecording).toBe(false);
+  });
+
+  it("should allow explicit caller-passed maxDuration to override when no backend config", async () => {
+    vi.mocked(VoiceService.shared.getConfig).mockResolvedValue({
+      enabled: true,
+      max_file_size: 3145728,
+    });
+
+    const { result } = renderHook(() => useTestVoiceInput({ maxDuration: 10 }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      await result.current.startRecording();
+    });
+
+    expect(result.current.isRecording).toBe(true);
+
+    // Advance 9s — should still be recording
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(9000);
+    });
+    expect(result.current.isRecording).toBe(true);
+
+    // Advance past 10s — should auto-stop
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1001);
+    });
+    expect(result.current.isRecording).toBe(false);
+  });
+});
+
+describe("useVoiceInput - notifyFeedback asrParams", () => {
+  beforeEach(() => {
+    feedbackState.enabled = true;
+    vi.useFakeTimers();
+    setupMocks();
+    WKApp.shared.currentSpaceId = "test-space-id";
+    vi.mocked(VoiceService.shared.getConfig).mockResolvedValue({
+      enabled: true,
+      max_duration: 60,
+      max_file_size: 3145728,
+      feedback_url: "https://fb.test",
+    } as any);
+    vi.mocked(VoiceService.shared.getVoiceContext).mockResolvedValue({
+      status: 200,
+      has_context: false,
+      context: "",
+      updated_at: "",
+    });
+    mockOnTranscribeResult.mockClear();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.clearAllMocks();
+  });
+
+  it("should NOT pass asrParams for remote-only transcription", async () => {
+    vi.mocked(VoiceService.shared.transcribe).mockResolvedValue({
+      text: "remote text",
+      request_id: "req-1",
+      m: "whisper-1",
+    });
+
+    const { result } = renderHook(() =>
+      useTestVoiceInput({ onTranscribed: vi.fn() }),
+    );
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      await result.current.startRecording();
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1500);
+    });
+
+    await act(async () => {
+      result.current.stopRecordingAndTranscribe();
+      await vi.runAllTimersAsync();
+    });
+
+    expect(mockOnTranscribeResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelText: "remote text",
+        source: "remote",
+        requestId: "req-1",
+      }),
+    );
+    const callArg = mockOnTranscribeResult.mock.calls[0][0];
+    expect(callArg.asrParams).toBeUndefined();
+  });
+
+  it("should NOT pass asrParams when falling back to remote after local failure", async () => {
+    (LocalModelService.shared as any).config = {
+      preferLocal: true,
+      enabled: true,
+    };
+    mockLocalTranscribe.mockResolvedValue(null);
+    vi.mocked(VoiceService.shared.transcribe).mockResolvedValue({
+      text: "fallback text",
+      request_id: "req-2",
+      m: "whisper-1",
+    });
+
+    const { result } = renderHook(() =>
+      useTestVoiceInput({ onTranscribed: vi.fn() }),
+    );
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      await result.current.startRecording();
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1500);
+    });
+
+    await act(async () => {
+      result.current.stopRecordingAndTranscribe();
+      await vi.runAllTimersAsync();
+    });
+
+    expect(mockOnTranscribeResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelText: "fallback text",
+        source: "remote",
+        requestId: "req-2",
+      }),
+    );
+    const callArg = mockOnTranscribeResult.mock.calls[0][0];
+    expect(callArg.asrParams).toBeUndefined();
+
+    (LocalModelService.shared as any).config = {
+      preferLocal: false,
+      enabled: false,
+    };
+  });
+
+  it("should pass asrParams for local transcription", async () => {
+    (LocalModelService.shared as any).config = {
+      preferLocal: true,
+      enabled: true,
+    };
+    mockLocalTranscribe.mockResolvedValue({ text: "local text", m: "v3" });
+
+    const getChatContext = vi.fn().mockReturnValue({
+      chatContext: "chat-ctx",
+      memberContext: "member-ctx",
+      channelType: 2,
+    });
+
+    const { result } = renderHook(() =>
+      useTestVoiceInput({ onTranscribed: vi.fn(), getChatContext }),
+    );
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      await result.current.startRecording();
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1500);
+    });
+
+    await act(async () => {
+      result.current.stopRecordingAndTranscribe("ctx text");
+      await vi.runAllTimersAsync();
+    });
+
+    expect(mockOnTranscribeResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelText: "local text",
+        source: "local",
+        asrParams: expect.objectContaining({
+          chatContext: "chat-ctx",
+          memberContext: "member-ctx",
+          channelType: 2,
+          model: "v3",
+        }),
+      }),
+    );
+
+    (LocalModelService.shared as any).config = {
+      preferLocal: false,
+      enabled: false,
+    };
   });
 });

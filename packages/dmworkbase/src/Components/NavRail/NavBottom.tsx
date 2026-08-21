@@ -1,9 +1,12 @@
 import React, { Component } from "react";
 import { Space } from "wukongimjssdk";
 import NavSpaceSwitcher from "./NavSpaceSwitcher";
+import { t } from "../../i18n";
+import QuickMuteSidebar from "./QuickMuteSidebar";
 
 export interface NavBottomProps {
     settingSelected?: boolean;
+    settingsButtonRef?: React.RefObject<HTMLButtonElement>;
     onSettingsClick?: () => void;
     /** 外部通知有新版本，触发气泡首次弹出 */
     hasNewVersion?: boolean;
@@ -14,6 +17,8 @@ export interface NavBottomProps {
     currentSpaceId?: string;
     onSpaceSelect: (spaceId: string) => void;
     onJoinSpace?: () => void;
+    onCreateSpace?: () => void;
+    onSpaceManagement?: () => void;
 }
 
 interface NavBottomState {
@@ -41,7 +46,7 @@ export default class NavBottom extends Component<NavBottomProps, NavBottomState>
     }
 
     render() {
-        const { onSettingsClick, hasNewVersion, onDismissNewVersion, spaces, currentSpaceId, onSpaceSelect, onJoinSpace } = this.props;
+        const { onSettingsClick, settingsButtonRef, settingSelected, hasNewVersion, onDismissNewVersion, spaces, currentSpaceId, onSpaceSelect, onJoinSpace, onCreateSpace, onSpaceManagement } = this.props;
         const { bubbleVisible } = this.state;
 
         return (
@@ -49,23 +54,29 @@ export default class NavBottom extends Component<NavBottomProps, NavBottomState>
                 {/* 设置上方分割线 */}
                 <div className="wk-navrail__sep" />
 
+                <QuickMuteSidebar />
+
                 {/* 设置按钮 + 气泡 */}
                 <div className="wk-navrail__settings-wrap">
                     <button
+                        ref={settingsButtonRef}
                         type="button"
                         className="wk-navrail__item"
-                        title="设置"
-                        aria-label="设置"
+                        title={t("base.navRail.settings")}
+                        aria-label={t("base.navRail.settings")}
+                        aria-haspopup="menu"
+                        aria-expanded={!!settingSelected}
                         onClick={onSettingsClick}
                     >
                         <IconSettings />
+                        <span className="wk-navrail__item-label">{t("base.navRail.settings")}</span>
                     </button>
 
                     {/* 版本更新气泡 */}
                     {hasNewVersion && bubbleVisible && (
                         <div className="wk-navrail__version-bubble">
                             <span className="wk-navrail__version-bubble-text">
-                                发现新版本，点击刷新
+                                {t("base.navRail.versionBubble.text")}
                             </span>
                             <button
                                 className="wk-navrail__version-bubble-refresh"
@@ -76,15 +87,15 @@ export default class NavBottom extends Component<NavBottomProps, NavBottomState>
                                         sessionStorage.setItem(key, String(count + 1));
                                         window.location.reload();
                                     } else {
-                                        alert('页面已多次刷新仍检测到新版本，请按 Ctrl+Shift+R（Mac: Cmd+Shift+R）强制刷新并清除缓存。');
+                                        alert(t("base.navRail.versionBubble.reloadLimit"));
                                     }
                                 }}
                             >
-                                刷新
+                                {t("base.navRail.versionBubble.refresh")}
                             </button>
                             <button
                                 className="wk-navrail__version-bubble-close"
-                                aria-label="关闭"
+                                aria-label={t("base.navRail.versionBubble.close")}
                                 onClick={() => {
                                     this.setState({ bubbleVisible: false });
                                     onDismissNewVersion?.();
@@ -103,6 +114,8 @@ export default class NavBottom extends Component<NavBottomProps, NavBottomState>
                     currentSpaceId={currentSpaceId}
                     onSpaceSelect={onSpaceSelect}
                     onJoinSpace={onJoinSpace}
+                    onCreateSpace={onCreateSpace}
+                    onSpaceManagement={onSpaceManagement}
                 />
             </div>
         );

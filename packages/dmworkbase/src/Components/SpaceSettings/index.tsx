@@ -1,7 +1,11 @@
+import { webOrigin } from "../../Utils/docLink";
 import React, { Component } from "react";
-import { Input, TextArea, Toast, Modal, Button } from "@douyinfe/semi-ui";
+import { Input, Toast, Button } from "@douyinfe/semi-ui";
 import { IconCopy, IconLink } from "@douyinfe/semi-icons";
 import { Space, SpaceService } from "../../Service/SpaceService";
+import { I18nContext, t } from "../../i18n";
+import { wkConfirm } from "../WKModal";
+import VoiceInputButton, { ReplaceMode, SelectionRange } from "../VoiceInputButton";
 import "./index.css";
 
 export interface SpaceSettingsProps {
@@ -20,6 +24,36 @@ interface SpaceSettingsState {
 }
 
 export default class SpaceSettings extends Component<SpaceSettingsProps, SpaceSettingsState> {
+    static contextType = I18nContext;
+    declare context: React.ContextType<typeof I18nContext>;
+
+    private descriptionRef = React.createRef<HTMLTextAreaElement>();
+
+    private handleVoiceTranscribed = (
+        text: string,
+        mode: ReplaceMode,
+        savedRange?: SelectionRange
+    ) => {
+        if (mode === "all") {
+            this.setState({ description: text.slice(0, 200) });
+        } else if (mode === "selection" && savedRange) {
+            this.setState((prev) => {
+                const before = prev.description.slice(0, savedRange.from);
+                const after = prev.description.slice(savedRange.to);
+                const budget = Math.max(0, 200 - before.length - after.length);
+                return { description: before + text.slice(0, budget) + after };
+            });
+        } else {
+            this.setState((prev) => {
+                const pos = savedRange?.from ?? prev.description.length;
+                const before = prev.description.slice(0, pos);
+                const after = prev.description.slice(pos);
+                const budget = Math.max(0, 200 - before.length - after.length);
+                return { description: before + text.slice(0, budget) + after };
+            });
+        }
+    };
+
     constructor(props: SpaceSettingsProps) {
         super(props);
         this.state = {
@@ -34,7 +68,7 @@ export default class SpaceSettings extends Component<SpaceSettingsProps, SpaceSe
     handleSave = async () => {
         const { name, description } = this.state;
         if (!name.trim()) {
-            Toast.warning("名称不能为空");
+            Toast.warning(t("base.spaceSettings.validation.nameRequired"));
             return;
         }
         this.setState({ saving: true });
@@ -43,45 +77,49 @@ export default class SpaceSettings extends Component<SpaceSettingsProps, SpaceSe
                 name: name.trim(),
                 description: description.trim(),
             });
-            Toast.success("已保存");
+            Toast.success(t("base.spaceSettings.saveSuccess"));
             this.props.onSpaceUpdated();
         } catch {
-            Toast.error("保存失败");
+            Toast.error(t("base.spaceSettings.saveFailed"));
         } finally {
             this.setState({ saving: false });
         }
     };
 
     handleLeave = () => {
-        Modal.confirm({
-            title: "离开 Space",
-            content: "确定要离开此 Space 吗？",
+        wkConfirm({
+            title: t("base.spaceSettings.leaveTitle"),
+            content: t("base.spaceSettings.leaveContent"),
+            okText: t("base.common.ok"),
+            cancelText: t("base.common.cancel"),
             onOk: async () => {
                 try {
                     await SpaceService.shared.leaveSpace(this.props.space.space_id);
-                    Toast.success("已离开 Space");
+                    Toast.success(t("base.spaceSettings.leaveSuccess"));
                     this.props.onSpaceUpdated();
                     this.props.onClose();
                 } catch {
-                    Toast.error("操作失败");
+                    Toast.error(t("base.spaceSettings.operationFailed"));
                 }
             },
         });
     };
 
     handleDisband = () => {
-        Modal.confirm({
-            title: "解散 Space",
-            content: "解散后无法恢复，确定要解散吗？",
+        wkConfirm({
+            title: t("base.spaceSettings.disbandTitle"),
+            content: t("base.spaceSettings.disbandContent"),
             okType: "danger",
+            okText: t("base.spaceSettings.disbandAction"),
+            cancelText: t("base.common.cancel"),
             onOk: async () => {
                 try {
                     await SpaceService.shared.disbandSpace(this.props.space.space_id);
-                    Toast.success("Space 已解散");
+                    Toast.success(t("base.spaceSettings.disbandSuccess"));
                     this.props.onSpaceUpdated();
                     this.props.onClose();
                 } catch {
-                    Toast.error("操作失败");
+                    Toast.error(t("base.spaceSettings.operationFailed"));
                 }
             },
         });
@@ -93,7 +131,7 @@ export default class SpaceSettings extends Component<SpaceSettingsProps, SpaceSe
             const resp = await SpaceService.shared.createInvite(this.props.space.space_id);
             this.setState({ inviteCode: resp.invite_code, inviteLoading: false });
         } catch {
-            Toast.error("生成邀请链接失败");
+            Toast.error(t("base.spaceSettings.inviteGenerateFailed"));
             this.setState({ inviteLoading: false });
         }
     };
@@ -101,15 +139,15 @@ export default class SpaceSettings extends Component<SpaceSettingsProps, SpaceSe
     copyInviteCode = () => {
         const { inviteCode } = this.state;
         navigator.clipboard.writeText(inviteCode).then(() => {
-            Toast.success("邀请码已复制");
+            Toast.success(t("base.spaceSettings.inviteCodeCopied"));
         });
     };
 
     copyInviteLink = () => {
         const { inviteCode } = this.state;
-        const link = `${window.location.origin}/join/${inviteCode}`;
+        const link = `${webOrigin()}/join/${inviteCode}`;
         navigator.clipboard.writeText(link).then(() => {
-            Toast.success("邀请链接已复制");
+            Toast.success(t("base.spaceSettings.inviteLinkCopied"));
         });
     };
 
@@ -132,11 +170,11 @@ export default class SpaceSettings extends Component<SpaceSettingsProps, SpaceSe
                     <div className="wk-spacesettings-back" onClick={onClose}>
                         ←
                     </div>
-                    <span className="wk-spacesettings-title">Space 设置</span>
+                    <span className="wk-spacesettings-title">{t("base.spaceSettings.title")}</span>
                 </div>
                 <div className="wk-spacesettings-body">
                     <div className="wk-spacesettings-field">
-                        <label className="wk-spacesettings-label">名称</label>
+                        <label className="wk-spacesettings-label">{t("base.spaceSettings.name")}</label>
                         <Input
                             value={name}
                             onChange={(v) => this.setState({ name: v })}
@@ -145,14 +183,28 @@ export default class SpaceSettings extends Component<SpaceSettingsProps, SpaceSe
                         />
                     </div>
                     <div className="wk-spacesettings-field">
-                        <label className="wk-spacesettings-label">描述</label>
-                        <TextArea
-                            value={description}
-                            onChange={(v) => this.setState({ description: v })}
-                            maxCount={200}
-                            autosize={{ minRows: 3, maxRows: 5 }}
-                            disabled={!isOwner}
-                        />
+                        <label className="wk-spacesettings-label">{t("base.spaceSettings.description")}</label>
+                        <div style={{ position: "relative" }}>
+                            <textarea
+                                ref={this.descriptionRef}
+                                className="wk-spacesettings-textarea"
+                                value={description}
+                                onChange={(e) => this.setState({ description: e.target.value.slice(0, 200) })}
+                                maxLength={200}
+                                rows={3}
+                                disabled={!isOwner}
+                            />
+                            {isOwner && (
+                                <VoiceInputButton
+                                    inputRef={this.descriptionRef}
+                                    onTranscribed={this.handleVoiceTranscribed}
+                                    getCurrentText={() => this.state.description}
+                                    showModeMenu
+                                    size="sm"
+                                    className="wk-vib--textarea-corner"
+                                />
+                            )}
+                        </div>
                     </div>
                     {isOwner && (
                         <button
@@ -160,31 +212,35 @@ export default class SpaceSettings extends Component<SpaceSettingsProps, SpaceSe
                             onClick={this.handleSave}
                             disabled={saving}
                         >
-                            {saving ? "保存中..." : "保存修改"}
+                            {saving
+                                ? t("base.spaceSettings.saving")
+                                : t("base.spaceSettings.saveChanges")}
                         </button>
                     )}
 
                     {this.isAdmin() && (
                         <div className="wk-spacesettings-section">
-                            <label className="wk-spacesettings-label">邀请成员</label>
+                            <label className="wk-spacesettings-label">{t("base.spaceSettings.inviteMembers")}</label>
                             {!this.state.inviteCode ? (
                                 <button
                                     className="wk-spacesettings-btn wk-spacesettings-btn-primary"
                                     onClick={this.handleInvite}
                                     disabled={this.state.inviteLoading}
                                 >
-                                    {this.state.inviteLoading ? "生成中..." : "生成邀请链接"}
+                                    {this.state.inviteLoading
+                                        ? t("base.spaceSettings.generating")
+                                        : t("base.spaceSettings.generateInviteLink")}
                                 </button>
                             ) : (
                                 <div className="wk-spacesettings-invite-result">
                                     <div className="wk-spacesettings-invite-row">
-                                        <span className="wk-spacesettings-invite-label">邀请码：</span>
+                                        <span className="wk-spacesettings-invite-label">{t("base.spaceSettings.inviteCodeLabel")}</span>
                                         <code className="wk-spacesettings-invite-code">{this.state.inviteCode}</code>
-                                        <button className="wk-spacesettings-copy-btn" onClick={this.copyInviteCode}>复制</button>
+                                        <button className="wk-spacesettings-copy-btn" onClick={this.copyInviteCode}>{t("base.spaceSettings.copy")}</button>
                                     </div>
                                     <div className="wk-spacesettings-invite-row">
                                         <button className="wk-spacesettings-copy-btn wk-spacesettings-copy-link" onClick={this.copyInviteLink}>
-                                            复制邀请链接
+                                            {t("base.spaceSettings.copyInviteLink")}
                                         </button>
                                     </div>
                                 </div>
@@ -194,7 +250,7 @@ export default class SpaceSettings extends Component<SpaceSettingsProps, SpaceSe
 
                     <div className="wk-spacesettings-section">
                         <div className="wk-spacesettings-menu-item" onClick={onMembersClick}>
-                            <span>成员管理</span>
+                            <span>{t("base.spaceSettings.memberManagement")}</span>
                             <span className="wk-spacesettings-arrow">→</span>
                         </div>
                     </div>
@@ -204,14 +260,14 @@ export default class SpaceSettings extends Component<SpaceSettingsProps, SpaceSe
                             className="wk-spacesettings-btn wk-spacesettings-btn-warning"
                             onClick={this.handleLeave}
                         >
-                            离开 Space
+                            {t("base.spaceSettings.leaveAction")}
                         </button>
                         {isOwner && (
                             <button
                                 className="wk-spacesettings-btn wk-spacesettings-btn-danger"
                                 onClick={this.handleDisband}
                             >
-                                解散 Space
+                                {t("base.spaceSettings.disbandAction")}
                             </button>
                         )}
                     </div>

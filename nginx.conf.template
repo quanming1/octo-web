@@ -8,6 +8,10 @@ gzip_buffers 16 8k;
 gzip_http_version 1.1;
 gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
 
+map $http_authorization $agent_mail_authorization {
+        default             "";
+        ~*^Bearer\ omb_     $http_authorization;
+}
 
 server {
         listen       80;
@@ -18,6 +22,28 @@ server {
         # these at container start; leaving an env blank yields an empty
         # string that the corresponding location block tests for.
         set $summary_api_url "${SUMMARY_API_URL}";
+        set $market_api_url "${MARKET_API_URL}";
+        set $mail_api_url "${MAIL_API_URL}";
+        set $agent_mail_api_url "${AGENT_MAIL_API_URL}";
+        # octo-fleet (FLEET_API_URL) upstream for the browser-originated
+        # /fleet/api/v1/* calls (Loop workspace/runtime pickers in the expert
+        # market). Runtime variable for the same reason as the others: blank /
+        # unresolvable 503s its own route instead of aborting nginx startup.
+        set $fleet_api_url "${FLEET_API_URL}";
+        # octo-drive service (DRIVE_API_URL) upstream, as a runtime nginx variable
+        # so an unset/unresolvable host 503s its own route instead of aborting the
+        # whole container at startup (same pattern as the doc/backend hosts below).
+        set $drive_api_url "${DRIVE_API_URL}";
+        # octo-dap telemetry collector (TRACK_API_URL) upstream, as a runtime nginx
+        # variable so an unset/unresolvable host 503s its own /v1/e/b route instead of
+        # aborting the whole container at startup (same pattern as the hosts below).
+        set $track_api_url "${TRACK_API_URL}";
+        # octo-doc (DOC_APP_URL) + octo-docs-backend (DOCS_BACKEND_URL) upstreams, as
+        # runtime nginx variables so the doc/backend hosts resolve per-request (with a
+        # resolver) instead of at config load — an unset/unresolvable host then 503s its
+        # own route instead of aborting the whole container at startup.
+        set $doc_app_url "${DOC_APP_URL}";
+        set $docs_backend_url "${DOCS_BACKEND_URL}";
 
         # Security headers
         # Prevent clickjacking attacks
@@ -32,8 +58,33 @@ server {
         # Note: 'unsafe-inline' and 'unsafe-eval' are needed for React/inline styles
         # blob: is required for srcdoc iframe previews (HTML file preview)
         # srcdoc iframe origin is null, so internally created blob URLs become blob:null/...
-        # Adding blob: to script-src and connect-src allows these URLs to load
-        add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' ws: wss: http: https: blob:; media-src 'self' blob:; worker-src 'self' blob:; object-src 'none'; frame-ancestors 'self';" always;
+        # Adding blob: to script-src and connect-src allows these URLs to load.
+        #
+        # img-src: the object-store (minio) presign service signs image URLs over http://
+        # on an environment-specific host:port (the browser-reachable minio host). CSP only
+        # whitelists https: by default, so an http minio source is blocked at the CSP layer
+        # (before even reaching the JS ASSET_HOST_WHITELIST). ${DOCS_ASSET_CSP_ORIGIN} is an
+        # envsubst placeholder for that extra source (e.g. "http://192.168.214.189:9000"),
+        # kept env-configurable so we never hardcode a host or open http: wide. It MUST match
+        # the backend presign host and the frontend VITE_DOCS_ASSET_HOSTS value. Empty by
+        # default (no extra source) for environments that serve assets over https.
+        #
+        # font-src: Excalidraw (whiteboard) loads its hand-drawn font faces (.woff2) from its
+        # default asset host https://esm.sh when window.EXCALIDRAW_ASSET_PATH is not overridden
+        # (e.g. https://esm.sh/@excalidraw/excalidraw@<ver>/dist/prod/fonts/...). Without it the
+        # browser blocks the @font-face fetch and the console fills with CSP font-src errors.
+        #
+        # SECURITY NOTE (P2 #8, XIN-517): allowing esm.sh here is a scoped third-party origin —
+        # limited to font-src only (never script/connect), so it cannot execute code or exfiltrate
+        # data, but it is still a supply-chain surface. The preferred hardening is to SELF-HOST the
+        # Excalidraw font assets and point window.EXCALIDRAW_ASSET_PATH at a same-origin path, then
+        # drop esm.sh from font-src entirely. That requires copying @excalidraw/excalidraw's
+        # dist/prod/fonts into the served bundle at build time (a new vite static-copy step in
+        # apps/web) and cannot be validated while the whiteboard build/test env is frozen — shipping
+        # it blind risks a silent production font break with no fallback once esm.sh is removed. Per
+        # the boss escape hatch, esm.sh is retained for now; self-hosting is tracked as the
+        # follow-up to remove this allowance.
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: ${DOCS_ASSET_CSP_ORIGIN}; font-src 'self' data: https://esm.sh; connect-src 'self' ws: wss: http: https: blob:; media-src 'self' blob: https:; worker-src 'self' blob:; object-src 'none'; frame-ancestors 'self';" always;
         # HSTS - uncomment when full HTTPS chain is confirmed
         # add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
 
@@ -60,6 +111,11 @@ server {
             # forwards the rewritten request as-is.
             rewrite ^/summary/api/v1/(.*)$ /api/v1/$1 break;
             proxy_pass  $summary_api_url;
+            # SSE endpoints under /summary/api/v1 require unbuffered streaming.
+            proxy_http_version 1.1;
+            proxy_buffering off;
+            proxy_cache off;
+            proxy_read_timeout 3600s;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -67,10 +123,206 @@ server {
             client_max_body_size 100m;
         }
 
+        location /mail-api/ {
+            default_type application/json;
+            if ($mail_api_url = "") {
+                return 503 '{"status":503,"msg":"mail API is not configured"}';
+            }
+            resolver ${NGINX_RESOLVER} ipv6=off valid=30s;
+            rewrite ^/mail-api/(.*)$ /v1/mail-gateway/$1 break;
+            proxy_pass $mail_api_url;
+            proxy_http_version 1.1;
+            proxy_set_header token $http_token;
+            proxy_set_header X-Space-ID $http_x_space_id;
+            proxy_set_header Authorization "";
+            proxy_set_header Cookie "";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            client_max_body_size ${MAIL_CLIENT_MAX_BODY_SIZE};
+        }
+
+        # Device authorization bootstrap is intentionally unauthenticated: no
+        # mailbox credential exists until the owner approves this flow. Keep
+        # the exception exact and strip every ambient human/Bot/mail credential
+        # before forwarding it to octo-mail.
+        location ~ ^/agent-mail-api/webapi/v0/agent-auth/(device|token)$ {
+            default_type application/json;
+            if ($agent_mail_api_url = "") {
+                return 503 '{"status":503,"msg":"Agent Mail API is not configured"}';
+            }
+            resolver ${NGINX_RESOLVER} ipv6=off valid=30s;
+            rewrite ^/agent-mail-api/?(.*)$ /$1 break;
+            proxy_pass $agent_mail_api_url;
+            proxy_http_version 1.1;
+            proxy_set_header Authorization "";
+            proxy_set_header token "";
+            proxy_set_header X-Space-ID "";
+            proxy_set_header X-Octo-Mailbox-ID "";
+            proxy_set_header Cookie "";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            client_max_body_size ${MAIL_CLIENT_MAX_BODY_SIZE};
+        }
+
+        location ~ ^/agent-mail-api(?:/|$) {
+            default_type application/json;
+            if ($agent_mail_api_url = "") {
+                return 503 '{"status":503,"msg":"Agent Mail API is not configured"}';
+            }
+            # The public Agent path exists for OpenClaw Plugin/CLI clients, but
+            # it must never become an anonymous passthrough to octo-mail.
+            # Authentication is still verified authoritatively by octo-mail;
+            # this edge guard rejects requests that cannot possibly authenticate.
+            if ($agent_mail_authorization = "") {
+                return 401 '{"status":401,"msg":"mailbox credential required"}';
+            }
+            resolver ${NGINX_RESOLVER} ipv6=off valid=30s;
+            rewrite ^/agent-mail-api/?(.*)$ /$1 break;
+            proxy_pass $agent_mail_api_url;
+            proxy_http_version 1.1;
+            proxy_buffering off;
+            proxy_cache off;
+            proxy_read_timeout 3600s;
+            proxy_set_header Connection "";
+            proxy_set_header Authorization $agent_mail_authorization;
+            proxy_set_header token "";
+            proxy_set_header X-Space-ID "";
+            proxy_set_header X-Octo-Mailbox-ID "";
+            proxy_set_header Cookie "";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            client_max_body_size ${MAIL_CLIENT_MAX_BODY_SIZE};
+        }
+
+        # ── octo-doc HTML: single unified prefix /docs-html/* ─────────────────────
+        # All web→octo-doc traffic is namespaced under ONE prefix. The frontend now builds
+        # octo-doc's REAL backend paths under this prefix (resolveOctoDocBase + /v1/...):
+        #   /docs-html/v1/comments, /docs-html/v1/reactions, /docs-html/v1/docs/{slug}/grants,
+        #   /docs-html/v1/docs/{slug}, /docs-html/v1/docs/{slug}/versions, and the render page
+        #   /docs-html/d/{slug}/v/{ver}.
+        # So this block only STRIPS the /docs-html prefix and forwards the already-correct path
+        # to $doc_app_url with the octo `token` header for identity — no per-path alias rewrites.
+        # resolver + runtime-variable proxy_pass: doc host resolves per-request, so an
+        # unset/unresolvable DOC_APP_URL 503s this route instead of failing nginx startup.
+        location /docs-html/ {
+            resolver 127.0.0.11 ipv6=off valid=30s;
+            if ($doc_app_url = "") { return 503 '{"status":503,"msg":"octo-doc is not configured"}'; }
+            # Single strip: /docs-html/<real-path> → /<real-path> (already /v1/... or d/...).
+            rewrite ^/docs-html/(.*)$ /$1 break;
+            proxy_pass $doc_app_url;
+            proxy_set_header token $http_token;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        }
+
+        # octo-docs-backend — the FULL docs-meta REST surface, NOT just list/registration.
+        # As an nginx prefix (longer than /api/, so it wins) this deliberately routes ALL of
+        # /api/v1/docs* — list, create, /{docId}, /octo-doc/{slug} (html registration),
+        # plus /{docId}/members|comments|share|versions|invites|access-requests — to
+        # ${DOCS_BACKEND_URL}. This is correct by ownership: octo-docs-backend mounts that
+        # whole surface under /api/v1/docs; octo-server has NO /api/v1/docs routes (only
+        # /v1/docs/bindings* and /v1/docs/proxy/*), so narrowing this back to octo-server
+        # would 404 the rich-doc APIs. Rich-doc realtime editing runs over the collab
+        # WebSocket (direct, not proxied here); only this docs-meta REST goes through nginx.
+        location /api/v1/docs {
+            resolver 127.0.0.11 ipv6=off valid=30s;
+            if ($docs_backend_url = "") { return 503 '{"status":503,"msg":"octo-docs-backend is not configured"}'; }
+            # Variable proxy_pass: append the original URI (incl. query) directly.
+            # A `rewrite ^ $request_uri break` would URL-encode the `?` into %3F
+            # (breaking list?owner=me → 404); appending $request_uri to the
+            # variable forwards path+query verbatim, matching the pre-rewrite behavior.
+            proxy_pass $docs_backend_url$request_uri;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            client_max_body_size 1000m;
+        }
+
         location /api/ {
             proxy_pass  ${API_URL}/;
             client_max_body_size 1000m;
             client_body_buffer_size 500m;
+        }
+
+        # octo-marketplace MCP catalog API — the MCP market page targets
+        # /market/api/v1/mcps* via this prefix. Set MARKET_API_URL (e.g.
+        # http://octo-marketplace:8080) at container start; blank yields a 503
+        # so a missing marketplace does not break nginx startup.
+        location /market/api/v1/ {
+            default_type application/json;
+            if ($market_api_url = "") {
+                return 503 '{"status":503,"msg":"marketplace API is not configured"}';
+            }
+            resolver 127.0.0.11 ipv6=off valid=30s;
+            # Same variable-in-proxy_pass caveat as /summary/: rewrite to the
+            # upstream URI first, then proxy_pass without a URI.
+            rewrite ^/market/api/v1/(.*)$ /api/v1/$1 break;
+            proxy_pass  $market_api_url;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            client_max_body_size 100m;
+        }
+
+        # octo-fleet service API — the expert market's Loop pickers call
+        # /fleet/api/v1/{workspaces,runtimes} same-origin (see dmworkmcp
+        # expertService FLEET_BASE). Fleet serves its API natively under /v1/*,
+        # so the /fleet/api prefix is stripped here (mirrors the vite dev rule
+        # and the daemon's OCTO_FLEET_URL + /v1/* shape). Set FLEET_API_URL
+        # (e.g. http://octo-fleet:8080) at container start; blank yields a 503
+        # — fail loud, never the SPA fallback — so a deployment without fleet
+        # still boots and the web client surfaces a real error instead of an
+        # empty workspace list.
+        location /fleet/api/ {
+            default_type application/json;
+            if ($fleet_api_url = "") {
+                return 503 '{"status":503,"msg":"fleet API is not configured"}';
+            }
+            resolver 127.0.0.11 ipv6=off valid=30s;
+            # Same variable-in-proxy_pass caveat as /summary/ and /market/:
+            # rewrite to the upstream URI first, then proxy_pass without a URI.
+            rewrite ^/fleet/api/(.*)$ /$1 break;
+            proxy_pass  $fleet_api_url;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            client_max_body_size 10m;
+        }
+
+        # octo-drive service — an INDEPENDENT backend (not octo-server) that serves
+        # its API natively under /v1/drive/* (spaces, folders, blobs, shares,
+        # public share access/download, etc.). Matched by an anchored regex so it
+        # owns exactly the /v1/drive namespace (bare /v1/drive and /v1/drive/*)
+        # and — unlike a bare `/v1/drive` prefix — never captures an unrelated
+        # sibling like /v1/drivers. A matching regex location wins over the
+        # octo-server /v1/ prefix block below, so all drive traffic lands here.
+        # Set DRIVE_API_URL (e.g. http://octo-drive:8080) at container start; blank
+        # yields a 503 so a deployment without drive still boots. resolver +
+        # runtime-variable proxy_pass: the drive host resolves per-request, so an
+        # unset/unresolvable DRIVE_API_URL 503s this route instead of failing
+        # nginx startup. Path+query are forwarded verbatim ($request_uri) — the
+        # drive service owns the full /v1/drive/* surface, so nothing is stripped.
+        location ~ ^/v1/drive(/|$) {
+            default_type application/json;
+            if ($drive_api_url = "") {
+                return 503 '{"status":503,"msg":"drive service is not configured"}';
+            }
+            resolver 127.0.0.11 ipv6=off valid=30s;
+            proxy_pass $drive_api_url$request_uri;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            client_max_body_size 100m;
         }
 
         # OIDC SSO endpoints (authcode/authstatus/authorize/callback).
@@ -85,8 +337,54 @@ server {
             client_max_body_size 10m;
         }
 
+        # octo-dap telemetry collector — the fail-closed frontend tracker always
+        # POSTs to the same-origin relative path /v1/e/b. The public path is a
+        # deliberately neutral, business-API-shaped name: words like track / collect /
+        # analytics / beacon / telemetry / pixel are on the EasyPrivacy & uBlock Origin
+        # default block lists, so a browser with a privacy extension (common on
+        # corporate intranets) would kill the request outright and the tracker would
+        # silently drop data. This block routes it to the collector so those reports
+        # never fall through to the SPA catch-all below (a POST to index.html would
+        # otherwise return a bogus non-JSON body the tracker cannot recognise as
+        # failure). Set TRACK_API_URL (e.g. http://octo-dap:8080) at container start;
+        # blank yields a JSON 503 so a deployment without the collector still boots AND
+        # the tracker sees an explicit !ok response (its retry/drop path) instead of a
+        # silent false success.
+        # Exact match (= ...) so it outranks the SPA catch-all. The public path and the
+        # backend contract are decoupled: the collector exposes /v1/dap/collect, so we
+        # rewrite to that fixed upstream URI and proxy_pass WITHOUT a URI (same
+        # variable-in-proxy_pass caveat as /summary/ and /market/) — $request_uri is
+        # NOT forwarded, so renaming the public path never touches the backend contract.
+        #
+        # SECURITY PRECONDITION (see Dap.ts BATCH_PATH comment): this block relays the
+        # session `token` header to $track_api_url. The frontend's same-origin lock only
+        # guarantees the browser hop; from here the token travels to whatever TRACK_API_URL
+        # resolves to. Therefore, by deployment contract: (1) TRACK_API_URL MUST point at an
+        # in-cluster / trusted collector, never an untrusted external host; (2) the collector
+        # MUST NOT log or persist the `token` header (it is a live business credential used
+        # only for request-time auth). Do not point this at an arbitrary third-party endpoint.
+        location = /v1/e/b {
+            default_type application/json;
+            if ($track_api_url = "") {
+                return 503 '{"status":503,"msg":"telemetry collector is not configured"}';
+            }
+            resolver 127.0.0.11 ipv6=off valid=30s;
+            rewrite ^ /v1/dap/collect break;
+            proxy_pass $track_api_url;
+            proxy_set_header token $http_token;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            client_max_body_size 10m;
+        }
+
         location / {
             root   /usr/share/nginx/html;
             index  index.html index.htm;
+            # SPA fallback: unknown paths (client-side routes like the docs "my
+            # files" view, deep links, refresh) fall through to index.html so
+            # React Router can handle them, instead of a hard 404.
+            try_files $uri $uri/ /index.html;
         }
 }

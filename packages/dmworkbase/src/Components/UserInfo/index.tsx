@@ -1,19 +1,21 @@
-import { Button, Spin, Toast } from "@douyinfe/semi-ui";
+import { Toast } from "@douyinfe/semi-ui";
 import { Channel, ChannelTypePerson } from "wukongimjssdk";
-import React, { Component, HTMLProps, ReactNode } from "react";
+import React, { Component, type HTMLProps } from "react";
 import { UserRelation } from "../../Service/Const";
-import WKApp, { FriendApply } from "../../App";
-import Provider, { IProviderListener } from "../../Service/Provider";
+import WKApp from "../../App";
+import Provider from "../../Service/Provider";
 import { Section } from "../../Service/Section";
 import RoutePage from "../RoutePage";
-import Sections from "../Sections";
 import "./index.css"
-import { UserInfoRouteData, UserInfoVM } from "./vm";
+import { UserInfoRouteData, UserInfoVM } from "../../bridge/profileDetail/UserInfoVM";
 import FriendApplyUI from "../FriendApply";
-import RouteContext, { FinishButtonContext } from "../../Service/Context";
-import { Image } from '@douyinfe/semi-ui';
-import AiBadge from "../AiBadge";
-import RealnameVerifiedBadge from "../RealnameVerifiedBadge";
+import RouteContext, { type FinishButtonContext } from "../../Service/Context";
+import { I18nContext } from "../../i18n";
+import WKAvatarPreviewImage from "../WKAvatarPreviewImage";
+import WKButton from "../WKButton";
+import type { UserInfoMetaItem } from "./UserInfoMetaList";
+import UserInfoView, { type UserInfoViewFooter } from "../../ui/profileDetail/UserInfoView";
+import ProfileOnlineStatus from "../../ui/profileDetail/ProfileOnlineStatus";
 
 
 export interface UserInfoProps extends HTMLProps<any> {
@@ -25,9 +27,50 @@ export interface UserInfoProps extends HTMLProps<any> {
 }
 
 export default class UserInfo extends Component<UserInfoProps> {
+    static contextType = I18nContext;
+    declare context: React.ContextType<typeof I18nContext>;
 
+    getRemark(vm: UserInfoVM) {
+        return vm.getRemark();
+    }
 
-    getBottomPanel(vm: UserInfoVM, context: RouteContext<any>) {
+    startEditRemark = (vm: UserInfoVM) => {
+        vm.startEditRemark();
+    };
+
+    cancelEditRemark = (vm: UserInfoVM) => {
+        vm.cancelEditRemark();
+    };
+
+    saveRemark = async (vm: UserInfoVM) => {
+        const { t } = this.context;
+        const result = await vm.saveRemark();
+        if (result === "ok") {
+            Toast.success(t("base.userInfo.remarkUpdated"));
+        } else if (result === "failed") {
+            Toast.error(vm.remarkSaveError || t("base.userInfo.remarkUpdateFailed"));
+        }
+    };
+
+    getVisibleSections(vm: UserInfoVM, context: RouteContext<UserInfoRouteData>) {
+        const remarkTitle = this.context.t("base.module.userInfo.remark");
+        return vm.sections(context)
+            .map((section) => {
+                const rows = section.rows?.filter((row) => {
+                    return row.properties?.key !== "userinfo.remark" && row.properties?.title !== remarkTitle;
+                });
+                return new Section({
+                    title: section.title,
+                    rows,
+                    subtitle: section.subtitle,
+                });
+            })
+            .filter((section) => {
+                return (section.rows && section.rows.length > 0) || !!section.title || !!section.subtitle;
+            });
+    }
+
+    getFooter(vm: UserInfoVM, context: RouteContext<any>): UserInfoViewFooter | undefined {
         if (vm.isSelf()) {
             return undefined
         }
@@ -40,12 +83,9 @@ export default class UserInfo extends Component<UserInfoProps> {
         // 判定字段沿用 resolveExternalForViewer（is_external 是相对当前
         // 查看 space 的视角值，不是绝对属性）。
         const isExternalToViewer = vm.isExternalToViewer()
+        const { t } = this.context
         if (isExternalToViewer) {
-            return <div className="wk-userInfo-footer">
-                <div className="wk-userinfo-footer-external-hint">
-                    仅可在群内交流
-                </div>
-            </div>
+            return { hint: t("base.userInfo.externalOnlyGroup") }
         }
 
         let content = <></>
@@ -55,20 +95,22 @@ export default class UserInfo extends Component<UserInfoProps> {
         const isFriend = vm.relation() === UserRelation.friend;
         if (spaceId && (!isBot || isFriend)) {
             // 非 Bot 成员或已加好友的 Bot：直接发消息
-            content = <Button theme='solid' type="primary" onClick={() => {
+            content = <WKButton type="button" variant="primary" onClick={() => {
                 WKApp.shared.baseContext.hideUserInfo()
                 // WuKongIM DM 只认裸 uid
                 WKApp.endpoints.showConversation(new Channel(vm.uid, ChannelTypePerson))
-            }}>发送消息</Button>
+            }}>{t("base.userInfo.sendMessage")}</WKButton>
         } else if (isFriend) {
-            content = <Button theme='solid' type="primary" onClick={() => {
+            content = <WKButton type="button" variant="primary" onClick={() => {
                 WKApp.shared.baseContext.hideUserInfo()
                 WKApp.endpoints.showConversation(new Channel(vm.uid, ChannelTypePerson))
-            }}>发送消息</Button>
+            }}>{t("base.userInfo.sendMessage")}</WKButton>
         } else if (isBot) {
             // Bot 未加好友：走好友申请流程（BotFather 通知创建者审核）
-            content = <Button theme='solid' type="primary" onClick={() => {
-                let msg = `我想使用${vm.displayName()}`
+            content = <WKButton type="button" variant="primary" onClick={() => {
+                let msg = t("base.userInfo.botApplyMessage", {
+                    values: { name: vm.displayName() },
+                })
                 var finishButtonContext: FinishButtonContext
                 context.push(<FriendApplyUI placeholder={msg} onMessage={(m) => {
                     msg = m
@@ -78,7 +120,7 @@ export default class UserInfo extends Component<UserInfoProps> {
                         finishButtonContext.disable(false)
                     }
                 }}></FriendApplyUI>, {
-                    title: "申请添加好友",
+                    title: t("base.userInfo.applyAddFriendBot"),
                     showFinishButton: true,
                     onFinishContext: (ctx) => {
                         finishButtonContext = ctx
@@ -87,33 +129,34 @@ export default class UserInfo extends Component<UserInfoProps> {
                     onFinish: async () => {
                         if (!finishButtonContext) return
                         finishButtonContext.loading(true)
-                        await WKApp.dataSource.commonDataSource.friendApply({
-                            uid: vm.uid,
-                            remark: msg,
-                            vercode: vm.vercode || ""
-                        }).then(() => {
-                            Toast.success("好友申请已发送")
+                        await vm.applyFriend(msg, WKApp.shared.currentSpaceId).then(() => {
+                            Toast.success(t("base.userInfo.friendApplySent"))
                             WKApp.shared.baseContext.hideUserInfo()
                         }).catch((err: any) => {
-                            Toast.error(err.msg || "申请失败")
+                            Toast.error(err.msg || t("base.userInfo.applyFailed"))
                         })
                         finishButtonContext.loading(false)
                     }
                 })
-            }}>添加好友</Button>
+            }}>{t("base.userInfo.addFriend")}</WKButton>
         } else {
             if (!vm.vercode || vm.vercode === "") { // 没有验证码，不显示添加好友按钮
                 return undefined
             }
-            content = <Button onClick={() => {
+            content = <WKButton type="button" variant="secondary" onClick={() => {
                 // 好友申请默认文案里的自我介绍走 selfDisplayName()，
                 // 已实名用户用 "我是..." + real_name，对端更容易识别。
                 const myDisplayName = WKApp.loginInfo.selfDisplayName()
-                let msg = "我是"
+                let msg = t("base.userInfo.selfIntro", {
+                    values: { name: myDisplayName },
+                })
                 if (vm.fromChannelInfo) {
-                    msg += `群聊"${vm.fromChannelInfo.title}"的${myDisplayName}`
-                } else {
-                    msg += `${myDisplayName}`
+                    msg = t("base.userInfo.groupSelfIntro", {
+                        values: {
+                            group: vm.fromChannelInfo.title,
+                            name: myDisplayName,
+                        },
+                    })
                 }
                 var finishButtonContext: FinishButtonContext
                 context.push(<FriendApplyUI placeholder={msg} onMessage={(m) => {
@@ -124,7 +167,7 @@ export default class UserInfo extends Component<UserInfoProps> {
                         finishButtonContext.disable(false)
                     }
                 }}></FriendApplyUI>, {
-                    title: "申请添加朋友",
+                    title: t("base.userInfo.applyAddFriend"),
                     showFinishButton: true,
                     onFinishContext: (ctx) => {
                         finishButtonContext = ctx
@@ -133,11 +176,7 @@ export default class UserInfo extends Component<UserInfoProps> {
                     onFinish: async () => {
                         if (!finishButtonContext) return
                         finishButtonContext.loading(true)
-                        await WKApp.dataSource.commonDataSource.friendApply({
-                            uid: vm.uid,
-                            remark: msg,
-                            vercode: vm.vercode || ""
-                        }).then(() => {
+                        await vm.applyFriend(msg, WKApp.shared.currentSpaceId).then(() => {
                             WKApp.shared.baseContext.hideUserInfo()
                         }).catch((err) => {
                             Toast.error(err.msg)
@@ -145,18 +184,15 @@ export default class UserInfo extends Component<UserInfoProps> {
                         finishButtonContext.loading(false)
                     }
                 })
-            }} >添加好友</Button>
+            }} >{t("base.userInfo.addFriend")}</WKButton>
         }
 
-        return <div className="wk-userInfo-footer">
-            <div className="wk-userinfo-footer-sendbutton">
-                {content}
-            </div>
-        </div>
+        return { action: content }
     }
 
     render() {
         const { uid, onClose, fromChannel, vercode } = this.props
+        const { t } = this.context
 
         return <Provider create={() => {
             return new UserInfoVM(uid, fromChannel, vercode)
@@ -166,61 +202,61 @@ export default class UserInfo extends Component<UserInfoProps> {
                     onClose()
                 }
             }} render={(context) => {
-                return <div className="wk-userinfo">
-                    <div className="wk-userinfo-content">
-                        {
-                            !vm.channelInfo ? <div className="wk-userinfo-loading">
-                                <Spin></Spin>
-                            </div> : (<>
-                                <div className="wk-userinfo-header">
-                                    <div className="wk-userinfo-user">
-                                        <div className="wk-userinfo-user-avatar">
-                                            <Image src={WKApp.shared.avatarUser(uid)}></Image>
-                                        </div>
-                                        <div className="wk-userinfo-user-info">
-                                            <div className="wk-userinfo-user-info-name">
-                                                {vm.displayName()}
-                                                {vm.channelInfo?.orgData?.robot === 1 && <AiBadge />}
-                                                {vm.isRealnameVerified() && <RealnameVerifiedBadge />}
-                                            </div>
-                                            <div className="wk-userinfo-user-info-others">
-                                                <ul>
-                                                    {
-                                                        vm.showNickname() ? <li>
-                                                            昵称： {vm.channelInfo?.title}
-                                                        </li> : undefined
-                                                    }
-                                                    {
-                                                        vm.showChannelNickname() ? <li>
-                                                            群昵称： {vm.fromSubscriberOfUser?.remark}
-                                                        </li> : undefined
-                                                    }
-                                                    {
-                                                        vm.shouldShowShort() ? <li>
-                                                            {WKApp.config.appName}号： {vm.channelInfo?.orgData.short_no || ''}
-                                                        </li> : undefined
-                                                    }
+                const footer = this.getFooter(vm, context)
+                const sections = vm.channelInfo ? this.getVisibleSections(vm, context) : []
+                const metaItems: UserInfoMetaItem[] = []
+                if (vm.showNickname()) {
+                    metaItems.push({
+                        label: t("base.userInfo.nickname"),
+                        value: vm.channelInfo?.title,
+                    })
+                }
+                if (vm.showChannelNickname()) {
+                    metaItems.push({
+                        label: t("base.userInfo.groupNickname"),
+                        value: vm.fromSubscriberOfUser?.remark,
+                    })
+                }
+                if (vm.shouldShowShort()) {
+                    metaItems.push({
+                        label: t("base.userInfo.shortNo", {
+                            values: { appName: WKApp.config.appName },
+                        }),
+                        value: vm.channelInfo?.orgData.short_no || "",
+                    })
+                }
 
-
-                                                </ul>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div className="wk-userinfo-sections">
-                                    <Sections sections={vm.sections(context)}></Sections>
-                                </div>
-                            </>)
-                        }
-
-                        <br></br>
-                        <br></br>
-                    </div>
-                    {
-                        this.getBottomPanel(vm, context)
-                    }
-
-                </div>
+                return <UserInfoView
+                    loading={!vm.channelInfo}
+                    avatar={<WKAvatarPreviewImage channel={new Channel(uid, ChannelTypePerson)} />}
+                    displayName={vm.displayName()}
+                    isBot={vm.channelInfo?.orgData?.robot === 1}
+                    isRealnameVerified={vm.isRealnameVerified()}
+                    metaItems={metaItems}
+                    status={!vm.isSelf() ? <ProfileOnlineStatus channelInfo={vm.channelInfo} /> : undefined}
+                    showRemarkEditor={!vm.isSelf()}
+                    editingRemark={vm.editingRemark}
+                    remark={this.getRemark(vm)}
+                    remarkDraft={vm.remarkDraft}
+                    savingRemark={vm.savingRemark}
+                    sections={sections}
+                    footerAction={footer?.action}
+                    footerHint={footer?.hint}
+                    labels={{
+                        remark: t("base.userInfo.remark"),
+                        remarkPlaceholder: t("base.userInfo.remarkPlaceholder"),
+                        editRemark: t("base.userInfo.editRemark"),
+                        cancel: t("base.common.cancel"),
+                        save: t("base.common.save"),
+                        notSet: t("base.common.notSet"),
+                    }}
+                    onRemarkDraftChange={(value) => vm.setRemarkDraft(value)}
+                    onStartEditRemark={() => this.startEditRemark(vm)}
+                    onCancelEditRemark={() => this.cancelEditRemark(vm)}
+                    onSaveRemark={() => {
+                        void this.saveRemark(vm)
+                    }}
+                />
             }}></RoutePage>
         }}></Provider>
 

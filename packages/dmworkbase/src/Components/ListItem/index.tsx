@@ -1,22 +1,24 @@
 import { Switch } from "@douyinfe/semi-ui";
 import React, { CSSProperties } from "react";
 import { Component } from "react";
+import { I18nContext } from "../../i18n";
 import "./index.css"
 
 export interface ListItemProps {
     style: CSSProperties
     title: string
     subTitle?: React.ReactNode
-    onClick: () => void
+    onClick?: () => void
 }
 
 export class ListItem extends Component<ListItemProps>{
 
     render() {
         const { style, title, subTitle, onClick } = this.props
+        const clickable = typeof onClick === "function"
         const titleAttr = typeof subTitle === "string" ? subTitle : undefined
-        return <div className="wk-list-item wk-list-item-ripple" style={style} title={titleAttr} onClick={() => {
-            if (onClick) {
+        return <div className={`wk-list-item ${clickable ? "wk-list-item-ripple" : "wk-list-item-static"}`} style={style} title={titleAttr} onClick={() => {
+            if (clickable) {
                 onClick()
             }
         }}>
@@ -34,6 +36,8 @@ export class ListItem extends Component<ListItemProps>{
 }
 
 export class ListItemMuliteLine extends Component<ListItemProps>{
+    static contextType = I18nContext
+    declare context: React.ContextType<typeof I18nContext>
 
     hasSubtitle() {
         const { subTitle } = this.props
@@ -57,7 +61,7 @@ export class ListItemMuliteLine extends Component<ListItemProps>{
                 this.hasSubtitle() ? <div className="wk-list-item-subtitle-muliteline">
                     {subTitle}
                 </div> : <div className="wk-list-item-subtitle wk-list-item-subtitle-oneline">
-                    未设置
+                    {this.context.t("base.common.notSet")}
                 </div>
             }
 
@@ -97,16 +101,23 @@ export class ListItemSwitch extends Component<ListItemSwitchProps, ListItemSwitc
     }
 
     render() {
-        const { style, title, checked, onCheck } = this.props
+        const { style, title, subTitle, checked, onCheck } = this.props
         const { loading } = this.state
         return <div className="wk-list-item wk-list-item-ripple" style={style} onClick={() => {
             if (onCheck) {
                 onCheck(!checked,this)
             }
         }}>
-            <div className="wk-list-item-title">
+            {subTitle ? <div className="wk-list-item-switch-copy">
+                <div className="wk-list-item-title">
+                    {title}
+                </div>
+                <div className="wk-list-item-switch-subtitle">
+                    {subTitle}
+                </div>
+            </div> : <div className="wk-list-item-title">
                 {title}
-            </div>
+            </div>}
             <div className="wk-list-item-action">
                 <Switch checked={checked} loading={loading}></Switch>
             </div>

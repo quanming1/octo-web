@@ -1,4 +1,5 @@
 import React, { memo } from "react";
+import { useI18n } from "../../../i18n";
 import "./RendererState.css";
 
 export type RendererStateType = "loading" | "error" | "empty";
@@ -14,10 +15,10 @@ export interface RendererStateProps {
   className?: string;
 }
 
-const defaultMessages: Record<RendererStateType, string> = {
-  loading: "加载中...",
-  error: "加载失败",
-  empty: "暂无内容",
+const defaultMessageKeys: Record<RendererStateType, string> = {
+  loading: "base.filePreview.loading",
+  error: "base.filePreview.loadFailed",
+  empty: "base.filePreview.empty",
 };
 
 /**
@@ -30,7 +31,8 @@ export const RendererState = memo(function RendererState({
   onRetry,
   className,
 }: RendererStateProps) {
-  const displayMessage = message || defaultMessages[type];
+  const { t } = useI18n();
+  const displayMessage = message || t(defaultMessageKeys[type]);
   const baseClass = className || "wk-renderer-state";
 
   return (
@@ -39,7 +41,7 @@ export const RendererState = memo(function RendererState({
       <span className={`${baseClass}__message`}>{displayMessage}</span>
       {type === "error" && onRetry && (
         <button className={`${baseClass}__retry`} onClick={onRetry}>
-          重试
+          {t("base.filePreview.retry")}
         </button>
       )}
     </div>

@@ -20,6 +20,18 @@ body[theme-mode=dark] .wk-list-item {
     background-color: #eee;
 }
 
+.wk-list-item-static {
+    cursor: default;
+}
+
+.wk-list-item-static:hover {
+    background-color: white;
+}
+
+body[theme-mode=dark] .wk-list-item-static:hover {
+    background-color: var(--wk-color-secondary-2);
+}
+
 
 .wk-list-item-ripple {
     position: relative;
@@ -68,6 +80,16 @@ body[theme-mode=dark] .wk-list-item-title{
     position: relative;
     margin: 0;
     margin-left: auto;
+}
+
+.wk-list-item-switch-copy {
+    min-width: 0;
+}
+
+.wk-list-item-switch-subtitle {
+    margin-top: var(--wk-sp-1);
+    color: var(--wk-color-font-tip);
+    font-size: var(--wk-text-size-sm);
 }
 
 .wk-list-item-subtitle {

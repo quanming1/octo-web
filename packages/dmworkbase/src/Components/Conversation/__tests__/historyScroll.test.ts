@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest"
-import { getPulldownRestoredScrollTop, shouldPulldownOnWheel, TOP_HISTORY_TRIGGER_OFFSET } from "../historyScroll"
+import {
+    getPulldownRestoredScrollTop,
+    getRestoredAnchorScrollTop,
+    getScrollAnchorOffsetY,
+    shouldShowScrollToBottom,
+    shouldPulldownOnWheel,
+    BOTTOM_SCROLL_TOLERANCE,
+    TOP_HISTORY_TRIGGER_OFFSET,
+} from "../historyScroll"
 
 describe("getPulldownRestoredScrollTop", () => {
     it("keeps the visible anchor stable by restoring the scroll height delta", () => {
@@ -19,6 +27,29 @@ describe("getPulldownRestoredScrollTop", () => {
     })
 })
 
+describe("message anchor scroll restore", () => {
+    it("stores the viewport offset from the first visible message anchor", () => {
+        expect(getScrollAnchorOffsetY({
+            scrollTop: 260,
+            anchorOffsetTop: 220,
+        })).toBe(40)
+    })
+
+    it("does not store a negative anchor offset", () => {
+        expect(getScrollAnchorOffsetY({
+            scrollTop: 180,
+            anchorOffsetTop: 220,
+        })).toBe(0)
+    })
+
+    it("restores scrollTop from the message anchor and stored offset", () => {
+        expect(getRestoredAnchorScrollTop({
+            anchorOffsetTop: 500,
+            keepOffsetY: 35,
+        })).toBe(535)
+    })
+})
+
 describe("shouldPulldownOnWheel", () => {
     it("triggers pulldown when content is not full screen", () => {
         expect(shouldPulldownOnWheel(-12, 600, false)).toBe(true)
@@ -34,5 +65,26 @@ describe("shouldPulldownOnWheel", () => {
 
     it("does not trigger pulldown on downward wheel movement", () => {
         expect(shouldPulldownOnWheel(12, 0, false)).toBe(false)
+    })
+})
+
+describe("shouldShowScrollToBottom", () => {
+    it("hides the button at the bottom even when the latest message has no DOM row", () => {
+        expect(shouldShowScrollToBottom(0)).toBe(false)
+        expect(shouldShowScrollToBottom(BOTTOM_SCROLL_TOLERANCE)).toBe(false)
+    })
+
+    it("shows the button away from the bottom when the latest message has no DOM row", () => {
+        expect(shouldShowScrollToBottom(BOTTOM_SCROLL_TOLERANCE + 1)).toBe(true)
+    })
+
+    it("preserves the latest-message visibility threshold when its DOM row exists", () => {
+        expect(shouldShowScrollToBottom(100, 100)).toBe(false)
+        expect(
+            shouldShowScrollToBottom(
+                100 + BOTTOM_SCROLL_TOLERANCE + 1,
+                100
+            )
+        ).toBe(true)
     })
 })

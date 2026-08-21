@@ -71,25 +71,18 @@ describe("getFoldSessionSummaryState", () => {
 })
 
 describe("getFoldSessionExpandedMessages", () => {
-    it("excludes the last real message when there is no typing summary", () => {
+    it("includes all real messages so the expanded list matches the fold count", () => {
         const messages = [
             makeMessage("msg-1", "claude", 1),
             makeMessage("msg-2", "jojo", 2),
             makeMessage("msg-3", "claude", 3),
         ]
 
-        expect(getFoldSessionExpandedMessages({ messages })).toEqual(messages.slice(0, 2))
+        expect(getFoldSessionExpandedMessages({ messages })).toEqual(messages)
     })
 
-    it("keeps all real messages in the expanded list when typing occupies the summary slot", () => {
-        const messages = [
-            makeMessage("msg-1", "claude", 1),
-            makeMessage("msg-2", "jojo", 2),
-            makeMessage("msg-3", "claude", 3),
-        ]
-        const typingMessage = makeMessage("typing-claude", "claude", 0)
-
-        expect(getFoldSessionExpandedMessages({ messages, typing: typingMessage })).toEqual(messages)
+    it("returns an empty list when there are no messages", () => {
+        expect(getFoldSessionExpandedMessages({ messages: [] })).toEqual([])
     })
 })
 

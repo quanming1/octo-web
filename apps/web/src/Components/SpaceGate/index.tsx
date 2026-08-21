@@ -1,8 +1,10 @@
 import React, { Component } from "react";
-import { WKApp } from "@octo/base";
+import { I18nContext, WKApp, t } from "@octo/base";
 import { SpaceService } from "@octo/base";
 import { Input, Button, Toast, Spin } from "@douyinfe/semi-ui";
 import { SpaceCreate } from "@octo/base";
+import { LogOut } from "lucide-react";
+import "./index.css";
 
 interface SpaceGateState {
     loading: boolean;
@@ -14,6 +16,9 @@ interface SpaceGateState {
 }
 
 export default class SpaceGate extends Component<{}, SpaceGateState> {
+    static contextType = I18nContext;
+    declare context: React.ContextType<typeof I18nContext>;
+
     state: SpaceGateState = {
         loading: true,
         noSpace: false,
@@ -26,9 +31,18 @@ export default class SpaceGate extends Component<{}, SpaceGateState> {
     private _enterTimer: ReturnType<typeof setTimeout> | null = null;
     private _isEntering = false;
     private _isMounted = false;
+    private _unsubscribeRemoteConfig?: () => void;
 
     componentDidMount() {
         this._isMounted = true;
+        this._unsubscribeRemoteConfig = WKApp.remoteConfig.addConfigChangeListener(() => {
+            if (!this._isMounted) return;
+            if (WKApp.remoteConfig.disableUserCreateSpace && this.state.showCreate) {
+                this.setState({ showCreate: false });
+                return;
+            }
+            this.forceUpdate();
+        });
         const cached = localStorage.getItem("currentSpaceId");
         if (cached) {
             this.enterSpace(cached);
@@ -39,6 +53,7 @@ export default class SpaceGate extends Component<{}, SpaceGateState> {
 
     componentWillUnmount() {
         this._isMounted = false;
+        this._unsubscribeRemoteConfig?.();
         if (this._enterTimer) {
             clearTimeout(this._enterTimer);
             this._enterTimer = null;
@@ -86,26 +101,32 @@ export default class SpaceGate extends Component<{}, SpaceGateState> {
 
     joinSpace = async () => {
         const { inviteCode } = this.state;
-        if (!inviteCode.trim()) { Toast.warning("请输入邀请码"); return; }
+        if (!inviteCode.trim()) { Toast.warning(t("app.joinSpace.validation.inviteRequired")); return; }
         this.setState({ joining: true });
         try {
             await SpaceService.shared.joinSpace(inviteCode.trim());
-            Toast.success("已加入 Space");
+            Toast.success(t("app.spaceGate.joinedSpace"));
             this.checkSpaces();
         } catch (e: any) {
             const msg = e?.msg || e?.message || "";
-            if (msg.includes("已满") || msg.includes("SPACE_FULL")) {
-                Toast.error("空间已满，无法加入");
+            if (msg.includes(t("app.invite.serverTerms.full", { locale: "zh-CN" })) || msg.includes("SPACE_FULL")) {
+                Toast.error(t("app.invite.spaceFullCannotJoin"));
             } else {
-                Toast.error("邀请码无效或已过期");
+                Toast.error(t("app.joinSpace.inviteInvalidOrExpired"));
             }
         } finally {
             this.setState({ joining: false });
         }
     };
 
+    logout = () => {
+        void WKApp.shared.logoutUserInitiated();
+    };
+
     render() {
         const { loading, noSpace, inviteCode, joining, showCreate, showInviteInput } = this.state;
+        const { t } = this.context;
+        const canCreateSpace = !WKApp.remoteConfig.disableUserCreateSpace;
 
         if (loading && !noSpace) {
             return (
@@ -127,24 +148,26 @@ export default class SpaceGate extends Component<{}, SpaceGateState> {
                     minWidth: 360, maxWidth: 420, color: "#333333",
                 }}>
                     <div style={{ fontSize: 32, marginBottom: 8 }}>👋</div>
-                    <h2 style={{ fontSize: 24, fontWeight: 700, margin: "0 0 8px" }}>欢迎使用 {WKApp.config.appName}！</h2>
-                    <p style={{ color: "#888", fontSize: 14, marginBottom: 32 }}>加入团队或创建新的工作空间</p>
+                    <h2 style={{ fontSize: 24, fontWeight: 700, margin: "0 0 8px" }}>{t("app.spaceGate.welcome", { values: { appName: WKApp.config.appName } })}</h2>
+                    <p style={{ color: "#888", fontSize: 14, marginBottom: 32 }}>{t("app.spaceGate.subtitle")}</p>
 
                     {!showInviteInput ? (
                         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                             <Button type="primary" size="large" style={{ width: "100%", height: 44 }}
                                 onClick={() => this.setState({ showInviteInput: true })}>
-                                📩 输入邀请码加入团队
+                                📩 {t("app.spaceGate.joinByInvite")}
                             </Button>
-                            <Button type="secondary" size="large" style={{ width: "100%", height: 44 }}
-                                onClick={() => this.setState({ showCreate: true })}>
-                                ✨ 创建新团队
-                            </Button>
+                            {canCreateSpace && (
+                                <Button type="secondary" size="large" style={{ width: "100%", height: 44 }}
+                                    onClick={() => this.setState({ showCreate: true })}>
+                                    ✨ {t("app.spaceGate.createTeam")}
+                                </Button>
+                            )}
                         </div>
                     ) : (
                         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                             <Input
-                                placeholder="输入邀请码"
+                                placeholder={t("app.joinSpace.inputInvitePlaceholder")}
                                 size="large"
                                 value={inviteCode}
                                 onChange={(v) => this.setState({ inviteCode: v })}
@@ -153,18 +176,24 @@ export default class SpaceGate extends Component<{}, SpaceGateState> {
                             <Button type="primary" size="large" loading={joining}
                                 style={{ width: "100%", height: 44 }}
                                 onClick={this.joinSpace}>
-                                加入
+                                {t("app.spaceGate.join")}
                             </Button>
                             <Button type="tertiary" size="small"
                                 onClick={() => this.setState({ showInviteInput: false })}>
-                                ← 返回
+                                ← {t("app.common.back")}
                             </Button>
                         </div>
                     )}
+                    <div className="wk-spacegate-logout">
+                        <button type="button" className="wk-spacegate-logout-btn" onClick={this.logout}>
+                            <LogOut size={14} aria-hidden="true" />
+                            <span>{t("app.spaceGate.logout")}</span>
+                        </button>
+                    </div>
                 </div>
 
                 <SpaceCreate
-                    visible={showCreate}
+                    visible={canCreateSpace && showCreate}
                     onClose={() => this.setState({ showCreate: false })}
                     onSuccess={(_spaceId) => this.checkSpaces()}
                 />

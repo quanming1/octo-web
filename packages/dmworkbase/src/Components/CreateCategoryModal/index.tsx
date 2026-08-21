@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from "react"
 import { Modal, Input, Button } from "@douyinfe/semi-ui"
+import { useI18n } from "../../i18n"
 import "./index.css"
 
 export interface CreateCategoryModalProps {
@@ -15,37 +16,41 @@ const CreateCategoryModal: React.FC<CreateCategoryModalProps> = ({
     onCancel,
     existingNames = [],
 }) => {
+    const { t } = useI18n()
     const [value, setValue] = useState("")
     const [loading, setLoading] = useState(false)
-    const [error, setError] = useState<string | null>(null)
+    const [errorKey, setErrorKey] = useState<string | null>(null)
     const inputRef = useRef<HTMLInputElement>(null)
 
     useEffect(() => {
         if (visible) {
             setValue("")
-            setError(null)
+            setErrorKey(null)
             setLoading(false)
             setTimeout(() => inputRef.current?.focus(), 100)
         }
     }, [visible])
 
-    const isDuplicate = existingNames.includes(value.trim())
+    // loading 期间(父层 onConfirm 进行中)不参与重复校验:此时分类可能已建成
+    // 并出现在 existingNames 里,但用户输入框里的 value 还没被清空 ——
+    // 否则会让"该分组名已存在"在 modal 关掉前闪一下。
+    const isDuplicate = !loading && existingNames.includes(value.trim())
     const isEmpty = value.trim() === ""
     const isDisabled = isEmpty || isDuplicate || loading
 
     const handleConfirm = async () => {
         if (isDisabled) return
         if (isDuplicate) {
-            setError("该分组名已存在")
+            setErrorKey("base.createCategory.error.duplicate")
             return
         }
         setLoading(true)
-        setError(null)
+        setErrorKey(null)
         try {
             await onConfirm(value.trim())
             setValue("")
         } catch {
-            setError("创建失败，请重试")
+            setErrorKey("base.createCategory.error.createFailed")
         } finally {
             setLoading(false)
         }
@@ -58,13 +63,13 @@ const CreateCategoryModal: React.FC<CreateCategoryModalProps> = ({
 
     return (
         <Modal
-            title="新建分组"
+            title={t("base.createCategory.title")}
             visible={visible}
             onCancel={onCancel}
             zIndex={9999}
             footer={
                 <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-                    <Button type="tertiary" onClick={onCancel}>取消</Button>
+                    <Button type="tertiary" onClick={onCancel}>{t("base.common.cancel")}</Button>
                     <Button
                         type="primary"
                         disabled={isDisabled}
@@ -72,7 +77,7 @@ const CreateCategoryModal: React.FC<CreateCategoryModalProps> = ({
                         onClick={handleConfirm}
                         style={{ opacity: isDisabled && !loading ? 0.5 : 1 }}
                     >
-                        确认
+                        {t("base.common.ok")}
                     </Button>
                 </div>
             }
@@ -83,19 +88,23 @@ const CreateCategoryModal: React.FC<CreateCategoryModalProps> = ({
                     value={value}
                     onChange={(v) => {
                         setValue(v)
-                        if (error) setError(null)
+                        if (errorKey) setErrorKey(null)
                     }}
                     onKeyDown={handleKeyDown}
-                    placeholder="输入分组名称"
-                    validateStatus={isDuplicate || error ? "error" : undefined}
+                    placeholder={t("base.createCategory.placeholder")}
+                    validateStatus={isDuplicate || errorKey ? "error" : undefined}
                 />
-                {(isDuplicate || error) ? (
+                {(isDuplicate || errorKey) ? (
                     <div className="wk-create-category-modal__error">
-                        {isDuplicate ? "该分组名已存在" : error}
+                        {isDuplicate
+                            ? t("base.createCategory.error.duplicate")
+                            : errorKey
+                                ? t(errorKey)
+                                : null}
                     </div>
                 ) : (
                     <div className="wk-create-category-modal__help">
-                        例如：工作、学习、兴趣、项目名
+                        {t("base.createCategory.help")}
                     </div>
                 )}
             </div>

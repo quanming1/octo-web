@@ -1,7 +1,8 @@
-import React, { useState } from "react";
-import { WKApp, toJoinApprovalStatus } from "@octo/base";
+import React, { useEffect, useState } from "react";
+import { SpaceCreate, WKApp, toJoinApprovalStatus, useI18n } from "@octo/base";
 import { SpaceService } from "@octo/base";
 import { Button, Input, Toast } from "@douyinfe/semi-ui";
+import { LogOut } from "lucide-react";
 import "./index.css";
 
 type View = "home" | "join" | "join-confirm";
@@ -22,11 +23,17 @@ interface JoinSpacePageProps {
 const ACCENT = "var(--wk-color-primary, #1C1C23)";
 
 const setCurrentSpace = (spaceId: string) => {
-    if (spaceId) localStorage.setItem("currentSpaceId", spaceId);
+    if (!spaceId) return;
+    WKApp.shared.currentSpaceId = spaceId;
+    localStorage.setItem("currentSpaceId", spaceId);
 };
 
 export default function JoinSpacePage({ onSuccess }: JoinSpacePageProps) {
+    const { t } = useI18n();
     const [view, setView] = useState<View>("home");
+    const [showCreate, setShowCreate] = useState(false);
+    const [, setRemoteConfigVersion] = useState(0);
+    const canCreateSpace = !WKApp.remoteConfig.disableUserCreateSpace;
 
     // --- 加入 Space ---
     const [inviteCode, setInviteCode] = useState("");
@@ -34,11 +41,20 @@ export default function JoinSpacePage({ onSuccess }: JoinSpacePageProps) {
     const [verifyLoading, setVerifyLoading] = useState(false);
     const [joinLoading, setJoinLoading] = useState(false);
 
+    useEffect(() => {
+        return WKApp.remoteConfig.addConfigChangeListener(() => {
+            if (WKApp.remoteConfig.disableUserCreateSpace) {
+                setShowCreate(false);
+            }
+            setRemoteConfigVersion((v) => v + 1);
+        });
+    }, []);
+
     /** 验证邀请码，展示 Space 信息 */
     const handleVerifyCode = async () => {
         const code = inviteCode.trim();
-        if (!code) { Toast.warning("请输入邀请码"); return; }
-        if (!/^[a-zA-Z0-9_-]+$/.test(code)) { Toast.error("邀请码格式不正确"); return; }
+        if (!code) { Toast.warning(t("app.joinSpace.validation.inviteRequired")); return; }
+        if (!/^[a-zA-Z0-9_-]+$/.test(code)) { Toast.error(t("app.joinSpace.validation.inviteInvalidFormat")); return; }
         setVerifyLoading(true);
         try {
             const info = await WKApp.apiClient.get(`space/invite/${code}`);
@@ -46,10 +62,10 @@ export default function JoinSpacePage({ onSuccess }: JoinSpacePageProps) {
             setView("join-confirm");
         } catch (e: any) {
             const msg = e?.msg || e?.message || "";
-            if (msg.includes("已满") || msg.includes("SPACE_FULL")) {
-                Toast.error("该空间已满，无法加入");
+            if (msg.includes(t("app.invite.serverTerms.full", { locale: "zh-CN" })) || msg.includes("SPACE_FULL")) {
+                Toast.error(t("app.joinSpace.spaceFullCannotJoin"));
             } else {
-                Toast.error("邀请码无效或已过期");
+                Toast.error(t("app.joinSpace.inviteInvalidOrExpired"));
             }
         } finally {
             setVerifyLoading(false);
@@ -76,17 +92,17 @@ export default function JoinSpacePage({ onSuccess }: JoinSpacePageProps) {
             }
 
             setCurrentSpace(result?.space_id || inviteInfo.space_id);
-            Toast.success("已加入 " + inviteInfo.space_name);
+            Toast.success(t("app.joinSpace.joinedSpace", { values: { spaceName: inviteInfo.space_name } }));
             onSuccess();
         } catch (e: any) {
             const msg = e?.msg || e?.message || "";
-            if (msg.includes("已满") || msg.includes("SPACE_FULL")) {
-                Toast.error("空间已满，无法加入");
-            } else if (msg.includes("已是成员") || msg.includes("already")) {
+            if (msg.includes(t("app.invite.serverTerms.full", { locale: "zh-CN" })) || msg.includes("SPACE_FULL")) {
+                Toast.error(t("app.invite.spaceFullCannotJoin"));
+            } else if (msg.includes(t("app.joinSpace.serverTerms.alreadyMember", { locale: "zh-CN" })) || msg.includes("already")) {
                 setCurrentSpace(inviteInfo.space_id);
                 onSuccess();
             } else {
-                Toast.error(msg || "加入失败，请重试");
+                Toast.error(msg || t("app.joinSpace.joinFailedRetry"));
             }
         } finally {
             setJoinLoading(false);
@@ -98,6 +114,10 @@ export default function JoinSpacePage({ onSuccess }: JoinSpacePageProps) {
         ? colors[inviteInfo.space_name.charCodeAt(0) % colors.length]
         : ACCENT;
 
+    const handleLogout = () => {
+        void WKApp.shared.logoutUserInitiated();
+    };
+
     return (
         <div className="wk-join-space">
             <div className="wk-join-space-card">
@@ -106,9 +126,9 @@ export default function JoinSpacePage({ onSuccess }: JoinSpacePageProps) {
                     <>
                         <div className="wk-join-space-emoji">👋</div>
                         <h2 className="wk-join-space-title">
-                            欢迎使用 {WKApp.config.appName || "DMWork"}！
+                            {t("app.joinSpace.welcome", { values: { appName: WKApp.config.appName || "DMWork" } })}
                         </h2>
-                        <p className="wk-join-space-subtitle">输入邀请码加入你的团队</p>
+                        <p className="wk-join-space-subtitle">{t("app.joinSpace.homeSubtitle")}</p>
                         <div className="wk-join-space-actions">
                             <Button
                                 type="primary"
@@ -116,8 +136,18 @@ export default function JoinSpacePage({ onSuccess }: JoinSpacePageProps) {
                                 className="wk-join-space-btn"
                                 onClick={() => setView("join")}
                             >
-                                📩 输入邀请码加入
+                                📩 {t("app.joinSpace.inputInviteJoin")}
                             </Button>
+                            {canCreateSpace && (
+                                <Button
+                                    type="secondary"
+                                    size="large"
+                                    className="wk-join-space-btn"
+                                    onClick={() => setShowCreate(true)}
+                                >
+                                    ✨ {t("app.spaceGate.createTeam")}
+                                </Button>
+                            )}
                         </div>
                     </>
                 )}
@@ -126,14 +156,14 @@ export default function JoinSpacePage({ onSuccess }: JoinSpacePageProps) {
                 {view === "join" && (
                     <>
                         <button className="wk-join-space-back" onClick={() => { setView("home"); setInviteCode(""); }}>
-                            ← 返回
+                            ← {t("app.common.back")}
                         </button>
-                        <h2 className="wk-join-space-title">输入邀请码</h2>
-                        <p className="wk-join-space-subtitle">粘贴邀请码以查看并加入团队</p>
+                        <h2 className="wk-join-space-title">{t("app.joinSpace.inputInviteTitle")}</h2>
+                        <p className="wk-join-space-subtitle">{t("app.joinSpace.inputInviteSubtitle")}</p>
                         <Input
                             className="wk-join-space-input"
                             size="large"
-                            placeholder="输入邀请码"
+                            placeholder={t("app.joinSpace.inputInvitePlaceholder")}
                             value={inviteCode}
                             onChange={setInviteCode}
                             onEnterPress={handleVerifyCode}
@@ -146,7 +176,7 @@ export default function JoinSpacePage({ onSuccess }: JoinSpacePageProps) {
                             loading={verifyLoading}
                             onClick={handleVerifyCode}
                         >
-                            验证邀请码
+                            {t("app.joinSpace.verifyInvite")}
                         </Button>
                     </>
                 )}
@@ -161,11 +191,11 @@ export default function JoinSpacePage({ onSuccess }: JoinSpacePageProps) {
                             {inviteInfo.space_name.charAt(0)}
                         </div>
                         <div className="wk-join-space-name">{inviteInfo.space_name}</div>
-                        <div className="wk-join-space-subtitle">邀请你加入</div>
+                        <div className="wk-join-space-subtitle">{t("app.invite.inviteYouJoin")}</div>
                         <div className="wk-join-space-members">
                             {inviteInfo.max_users > 0
-                                ? `${inviteInfo.member_count} / ${inviteInfo.max_users} 人`
-                                : `${inviteInfo.member_count} 位成员`}
+                                ? t("app.joinSpace.memberCountWithLimit", { values: { count: inviteInfo.member_count, max: inviteInfo.max_users } })
+                                : t("app.invite.memberCount", { values: { count: inviteInfo.member_count } })}
                         </div>
                         <Button
                             type="primary"
@@ -180,18 +210,33 @@ export default function JoinSpacePage({ onSuccess }: JoinSpacePageProps) {
                         >
                             {inviteInfo.max_users > 0 &&
                             inviteInfo.member_count >= inviteInfo.max_users
-                                ? "空间已满"
-                                : "确认加入"}
+                                ? t("app.invite.spaceFull")
+                                : t("app.joinSpace.confirmJoin")}
                         </Button>
                         <button
                             className="wk-join-space-back wk-join-space-back--bottom"
                             onClick={() => { setView("join"); setInviteInfo(null); }}
                         >
-                            ← 重新输入邀请码
+                            ← {t("app.joinSpace.reenterInvite")}
                         </button>
                     </>
                 )}
+                <div className="wk-join-space-logout">
+                    <button type="button" className="wk-join-space-logout-btn" onClick={handleLogout}>
+                        <LogOut size={14} aria-hidden="true" />
+                        <span>{t("app.joinSpace.logout")}</span>
+                    </button>
+                </div>
             </div>
+            <SpaceCreate
+                visible={canCreateSpace && showCreate}
+                onClose={() => setShowCreate(false)}
+                onSuccess={(spaceId) => {
+                    setCurrentSpace(spaceId);
+                    setShowCreate(false);
+                    onSuccess();
+                }}
+            />
         </div>
     );
 }

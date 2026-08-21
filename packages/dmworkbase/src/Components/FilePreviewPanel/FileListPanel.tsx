@@ -2,7 +2,9 @@ import React, { useEffect, useRef, useState } from "react";
 import { X, FolderOpen } from "lucide-react";
 import { ConversationFile } from "./FilePreviewHeader";
 import { formatFileSize, isImageType } from "./config";
-import { getFileIcon as getFileIconUrl } from "../MessageInput/AttachmentNode";
+import { getFileIcon as getFileIconUrl } from "../../Utils/fileIcon";
+import { useI18n } from "../../i18n";
+import type { I18nFormatter } from "../../i18n";
 import "./FileListPanel.css";
 
 export interface FileListPanelProps {
@@ -41,7 +43,7 @@ function getFileIcon(extension: string, fileName?: string): React.ReactNode {
 }
 
 /** 格式化时间戳为相对时间或日期 */
-function formatTime(timestamp?: number): string {
+function formatTime(timestamp: number | undefined, format: I18nFormatter): string {
   if (!timestamp) return "";
 
   const date = new Date(timestamp * 1000);
@@ -52,17 +54,17 @@ function formatTime(timestamp?: number): string {
 
   if (diffDays === 0) {
     // 今天：显示时间
-    return date.toLocaleTimeString("zh-CN", {
+    return format.time(date, {
       hour: "2-digit",
       minute: "2-digit",
     });
   } else if (diffDays === 1) {
-    return "昨天";
+    return format.relativeTime(-1, "day");
   } else if (diffDays < 7) {
-    return `${diffDays}天前`;
+    return format.relativeTime(-diffDays, "day");
   } else {
     // 超过7天：显示日期
-    return date.toLocaleDateString("zh-CN", { month: "short", day: "numeric" });
+    return format.date(date, { month: "short", day: "numeric" });
   }
 }
 
@@ -73,6 +75,7 @@ const FileListItem: React.FC<{
   onSelect: () => void;
 }> = ({ file, isActive, onSelect }) => {
   const [thumbError, setThumbError] = useState(false);
+  const { format } = useI18n();
   const isImage = isImageType(file.category, file.extension);
   // 图片类型直接用 url 作为缩略图
   const showThumbnail = isImage && file.url && !thumbError;
@@ -120,7 +123,7 @@ const FileListItem: React.FC<{
           )}
           {file.timestamp && (
             <span className="wk-file-list-panel__item-time">
-              {formatTime(file.timestamp)}
+              {formatTime(file.timestamp, format)}
             </span>
           )}
         </div>
@@ -146,6 +149,7 @@ const FileListPanel: React.FC<FileListPanelProps> = ({
   initialLoading = false,
 }) => {
   const listRef = useRef<HTMLDivElement>(null);
+  const { t } = useI18n();
 
   // 组件挂载或当前文件变化时，自动滚动到当前选中的文件
   useEffect(() => {
@@ -182,13 +186,15 @@ const FileListPanel: React.FC<FileListPanelProps> = ({
     <div className="wk-file-list-panel">
       {/* Header */}
       <div className="wk-file-list-panel__header">
-        <span className="wk-file-list-panel__title">对话内文件</span>
+        <span className="wk-file-list-panel__title">
+          {t("base.filePreview.conversationFiles")}
+        </span>
         <span className="wk-file-list-panel__count">{files.length}</span>
         {onClose && (
           <button
             className="wk-file-list-panel__close-btn"
             onClick={onClose}
-            title="关闭"
+            title={t("base.filePreview.close")}
           >
             <X size={14} />
           </button>
@@ -198,11 +204,15 @@ const FileListPanel: React.FC<FileListPanelProps> = ({
       {/* 文件列表 */}
       <div className="wk-file-list-panel__list" ref={listRef}>
         {initialLoading ? (
-          <div className="wk-file-list-panel__loading">加载中...</div>
+          <div className="wk-file-list-panel__loading">
+            {t("base.filePreview.loading")}
+          </div>
         ) : files.length === 0 ? (
           <div className="wk-file-list-panel__empty">
             <FolderOpen size={32} className="wk-file-list-panel__empty-icon" />
-            <span className="wk-file-list-panel__empty-text">暂无文件</span>
+            <span className="wk-file-list-panel__empty-text">
+              {t("base.filePreview.noFiles")}
+            </span>
           </div>
         ) : (
           <>
@@ -216,11 +226,15 @@ const FileListPanel: React.FC<FileListPanelProps> = ({
             ))}
             {/* 加载更多状态 */}
             {loadingMore && (
-              <div className="wk-file-list-panel__loading">加载中...</div>
+              <div className="wk-file-list-panel__loading">
+                {t("base.filePreview.loading")}
+              </div>
             )}
             {/* 没有更多数据（仅在加载过至少一页后显示） */}
             {!hasMore && files.length > 0 && currentPage >= 1 && (
-              <div className="wk-file-list-panel__no-more">没有更多了</div>
+              <div className="wk-file-list-panel__no-more">
+                {t("base.filePreview.noMore")}
+              </div>
             )}
           </>
         )}

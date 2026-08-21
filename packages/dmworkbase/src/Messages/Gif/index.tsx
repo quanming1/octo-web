@@ -3,6 +3,7 @@ import React from "react"
 import WKApp from "../../App"
 import MessageBase from "../Base"
 import { MessageCell } from "../MessageCell"
+import { t } from "../../i18n"
 
 
 
@@ -27,7 +28,7 @@ export class GifContent extends MessageContent {
     }
 
     get conversationDigest() {
-        return "[动图]"
+        return t("base.message.digest.gif")
     }
 }
 

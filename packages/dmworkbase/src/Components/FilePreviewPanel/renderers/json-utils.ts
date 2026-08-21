@@ -108,7 +108,7 @@ export function extractArrayFromJson(jsonData: unknown): Record<string, unknown>
 
     return [];
   } catch (error) {
-    console.error("提取JSON数组时出错:", error);
+    console.error("Failed to extract JSON array:", error);
     return [];
   }
 }
@@ -168,13 +168,14 @@ export function formatJsonl(content: string): string {
  * 渲染单元格内容
  */
 export function renderCellContent(value: unknown): string {
-  if (value === null || value === undefined) {
+  if (value === null || value === undefined || value === "") {
     return "-";
   }
   if (typeof value === "object") {
     return JSON.stringify(value);
   }
-  return String(value);
+  const str = String(value);
+  return str.trim() === "" ? "-" : str;
 }
 
 /**
@@ -190,7 +191,7 @@ export function extractColumns(data: Record<string, unknown>[]): ColumnConfig[] 
     }
   });
 
-  return Array.from(allKeys).map((key) => ({ key, title: key }));
+  return Array.from(allKeys).map((key) => ({ key, title: key || "-" }));
 }
 
 /**

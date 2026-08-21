@@ -1,10 +1,9 @@
 .wk-category-header {
     display: flex;
     align-items: center;
-    gap: 0;
-    padding: 4px;              /* Figma: 4px, 三角+文字从左 4px 开始 */
-    border-radius: 6px;    /* --r-sm */
-    height: 28px;          /* Figma: 28px */
+    gap: var(--wk-sp-1);
+    padding: var(--wk-sp-2) var(--wk-sp-2) var(--wk-sp-0-5);
+    border-radius: var(--wk-r-xs);
     box-sizing: border-box;
     cursor: pointer;
     user-select: none;
@@ -14,7 +13,8 @@
 }
 
 .wk-category-header:hover {
-    background: var(--wk-bg-hover);
+    background: transparent;
+    color: var(--wk-text-strong);
 }
 
 /* 空分组整行降透明度 */
@@ -37,7 +37,7 @@
 .wk-category-header__rename-wrap {
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: var(--wk-sp-1);
     flex: 1;
     min-width: 0;
 }
@@ -46,12 +46,12 @@
     flex: 1;
     min-width: 0;
     height: 24px;
-    padding: 2px 6px;
+    padding: var(--wk-sp-0-5) var(--wk-sp-1-5);
     border: 1px solid var(--wk-brand-primary);
-    border-radius: var(--wk-r-xs, 4px);
+    border-radius: var(--wk-r-xs);
     background: var(--wk-bg-surface);
     box-shadow: 0 0 0 2px var(--wk-purple-alpha-12);
-    font: 600 12px var(--wk-font-sans);
+    font: 600 var(--wk-text-size-sm) var(--wk-font-sans);
     color: var(--wk-text-primary);
     outline: none;
 }
@@ -62,7 +62,7 @@
     justify-content: center;
     width: 24px;
     height: 24px;
-    border-radius: var(--wk-r-xs, 4px);
+    border-radius: var(--wk-r-xs);
     border: none;
     background: transparent;
     cursor: pointer;
@@ -92,23 +92,22 @@
     color: var(--wk-color-error);
 }
 
-/* 折叠箭头 */
+/* 折叠箭头 — design v3.1: 10x10 chev */
 .wk-category-header__arrow {
-    width: 16px;
-    height: 16px;
+    width: 10px;
+    height: 10px;
     display: flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
     position: relative;
-    left: -4px;
     transition: transform 0.15s ease;
-    color: var(--wk-icon-muted);  /* Figma: 40% 透明度 */
+    color: var(--wk-icon-muted);
 }
 
 .wk-category-header__arrow svg {
-    width: 16px;
-    height: 16px;
+    width: 10px;
+    height: 10px;
 }
 
 /* 折叠态：箭头旋转 -90deg */
@@ -116,11 +115,11 @@
     transform: rotate(-90deg);
 }
 
-/* 分组名 */
+/* 分组名 — design v3.1: 11px, icon-default */
 .wk-category-header__name {
-    font-size: 12px;
-    font-weight: 400;                        /* Figma: 400 regular */
-    color: var(--wk-text-tertiary, #6B7075); /* Figma: 偏灰 */
+    font-size: var(--wk-text-size-xs);
+    font-weight: 500;
+    color: var(--wk-icon-default);
     flex: 1;
     letter-spacing: 0.01em;
     overflow: hidden;
@@ -130,7 +129,7 @@
 
 /* 折叠时括号数量 / 空分组 (空)：内联在分组名里，不是独立 flex item */
 .wk-category-header__count {
-    font-size: 11px;
+    font-size: var(--wk-text-size-xs);
     font-weight: 400;
     color: var(--wk-text-tertiary);
 }
@@ -151,15 +150,15 @@
 .wk-category-header__badge {
     min-width: 16px;
     height: 16px;
-    border-radius: 9999px;
+    border-radius: var(--wk-r-full);
     background: var(--wk-badge-danger-bg);    /* Figma: 淡红 */
     color: var(--wk-badge-danger-text);       /* Figma: 红色文字 */
-    font-size: 10px;
+    font-size: var(--wk-text-size-tiny);
     font-weight: 600;
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 0 4px;
+    padding: 0 var(--wk-sp-1);
     flex-shrink: 0;
 }
 
@@ -169,10 +168,10 @@
     height: 16px;
     min-width: unset;
     padding: 0;
-    border-radius: 50%;
+    border-radius: var(--wk-r-circle);
     background: var(--wk-color-danger);
     color: var(--wk-color-white);
-    font-size: 11px;
+    font-size: var(--wk-text-size-xs);
     font-weight: 900;
     line-height: 16px;
     text-align: center;
@@ -187,11 +186,11 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    color: var(--wk-text-quaternary, #C4C7D0);
+    color: var(--wk-text-tertiary);
     cursor: grab;
     opacity: 0;
     transition: opacity 150ms;
-    margin-right: 2px;
+    margin-right: var(--wk-sp-0-5);
 }
 
 .wk-category-header:hover .wk-category-header__drag-handle {
@@ -205,15 +204,15 @@
 /* drop-over 高亮 */
 .wk-category-section--drop-over > .wk-category-header {
     background: var(--wk-brand-tint-08);
-    border-radius: var(--wk-r-sm, 6px);
+    border-radius: var(--wk-r-sm);
 }
 
 /* DragOverlay ghost 样式 */
 .wk-category-header--ghost {
-    background: var(--wk-bg-base, #F7F8FA);
-    border: 1px solid var(--wk-brand-from, #1C1C23);
-    border-radius: var(--wk-r-sm, 6px);
-    box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+    background: var(--wk-bg-base);
+    border: 1px solid var(--wk-brand-from);
+    border-radius: var(--wk-r-sm);
+    box-shadow: var(--wk-shadow-md);
     opacity: 0.9;
-    padding: 6px var(--wk-sp-2, 8px);
+    padding: var(--wk-sp-1-5) var(--wk-sp-2);
 }

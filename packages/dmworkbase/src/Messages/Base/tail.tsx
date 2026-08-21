@@ -1,8 +1,9 @@
 import { MessageStatus } from "wukongimjssdk";
-import moment from "moment";
 import React from "react";
 import { Component, CSSProperties } from "react";
 import { MessageWrap } from "../../Service/Model";
+import { I18nContext } from "../../i18n";
+import { formatMessageTimestamp } from "../../Utils/time";
 
 interface MessageTrailProps {
     message: MessageWrap
@@ -12,6 +13,8 @@ interface MessageTrailProps {
 
 
 export default class MessageTrail extends Component<MessageTrailProps> {
+    static contextType = I18nContext
+    declare context: React.ContextType<typeof I18nContext>
 
     getMessageStatusIcon() {
         const { message } = this.props
@@ -33,8 +36,8 @@ export default class MessageTrail extends Component<MessageTrailProps> {
     render() {
         const { message,timeStyle,statusStyle } = this.props
         return <span className="messageMeta">
-            {message.remoteExtra?.isEdit?<span className="messageTime">已编辑</span>:null}
-            <span className="messageTime" style={timeStyle}> {moment(message.timestamp * 1000).format('HH:mm')}</span>
+            {message.remoteExtra?.isEdit?<span className="messageTime">{this.context.t("base.message.edited")}</span>:null}
+            <span className="messageTime" style={timeStyle}> {formatMessageTimestamp(message.timestamp)}</span>
            {message.send?<span className="messageStatus" style={statusStyle}>  {this.getMessageStatusIcon()}</span>:null}
         </span>
     }

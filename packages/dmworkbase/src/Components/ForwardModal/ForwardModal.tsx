@@ -1,12 +1,16 @@
-import React, { useCallback } from "react"
-import { Channel, ChannelTypeGroup } from "wukongimjssdk"
-import { X } from "lucide-react"
-import { IconSearchStroked } from "@douyinfe/semi-icons"
-import { Tag } from "@douyinfe/semi-ui"
-import Checkbox from "../Checkbox"
-import AiBadge from "../AiBadge"
-import WKAvatar from "../WKAvatar"
-import VisibilityTrigger from "../VisibilityTrigger"
+import React, { useMemo } from "react"
+import { useI18n } from "../../i18n"
+import type { ChatSelectorTab } from "../ChatSelector/tabFilter"
+import type { ForwardGrantConfig } from "./grant"
+import type { ForwardBotPreview } from "./ui/ItemRow"
+import {
+  Footer,
+  GrantArea,
+  ItemList,
+  SearchBar,
+  SelectedPanel,
+  TabsBar,
+} from "./ui"
 import "./ForwardModal.css"
 
 export interface ForwardItem {
@@ -17,6 +21,7 @@ export interface ForwardItem {
   isAI?: boolean
   hasThreads?: boolean
   isThread?: boolean
+  isPinned?: boolean
   parentChannelID?: string
   /** 外部群（is_external_group === 1）；仅 ChannelTypeGroup 有意义 */
   isExternal?: boolean
@@ -33,82 +38,32 @@ export interface ForwardModalProps {
   onToggleSelect: (item: ForwardItem) => void
   onConfirm: () => void
   onCancel?: () => void
+  /** 当前 Tab（关注 / 最近 / 全部群聊 / 全部私聊）。 */
+  activeTab: ChatSelectorTab
+  /** 切换 Tab 回调。 */
+  onTabChange: (tab: ChatSelectorTab) => void
   /** 懒加载：列表项进入视口时调用。未传则不触发懒加载（用于不需要拉 channelInfo 的场景） */
   onItemVisible?: (item: ForwardItem) => void
+  /**
+   * 授权区配置（feature #511 opt-in 扩展）。仅当调用方显式传入时才渲染授权区；
+   * 既有转发路径（Conversation / Chat / Summary）不传 → 授权区不渲染，零回归。
+   */
+  grant?: ForwardGrantConfig
+  /**
+   * Person-row Bot preview (UX #4). Present only when the caller opts into grants; lets an
+   * unselected person candidate be expanded to inspect their Bots (display-only). Absent → no
+   * expander (既有转发路径零回归).
+   */
+  botPreview?: ForwardBotPreview
 }
 
-// ─── 左列：可选列表项 ───────────────────────────────────────────
-
-interface ItemRowProps {
-  item: ForwardItem
-  selected: boolean
-  onToggle: (item: ForwardItem) => void
-}
-
-function ItemRow({ item, selected, onToggle }: ItemRowProps) {
-  const channel = new Channel(item.channelID, item.channelType)
-  return (
-    <div
-      className={`wk-fm-item${item.parentChannelID ? " wk-fm-item--child" : ""}${selected ? " wk-fm-item--selected" : ""}`}
-      onClick={() => onToggle(item)}
-    >
-      <Checkbox
-        checked={selected}
-        onCheck={() => {}}
-      />
-      <div className="wk-fm-avatar-wrap">
-        <WKAvatar channel={channel} lazy />
-      </div>
-      <span className="wk-fm-item-name">{item.displayName}</span>
-      {item.channelType === ChannelTypeGroup && item.isExternal && (
-        <Tag
-          size="small"
-          color="purple"
-          className="wk-conversationlist-item-external-tag"
-        >
-          外部
-        </Tag>
-      )}
-      {item.isAI && <AiBadge />}
-    </div>
-  )
-}
-
-// ─── 右列：已选列表项 ───────────────────────────────────────────
-
-interface SelectedRowProps {
-  item: ForwardItem
-  onRemove: (item: ForwardItem) => void
-}
-
-function SelectedRow({ item, onRemove }: SelectedRowProps) {
-  const channel = new Channel(item.channelID, item.channelType)
-  return (
-    <div className="wk-fm-selected-item">
-      <div className="wk-fm-avatar-wrap">
-        {/* 右列已选列表项数量少且都在视口内，不启用 lazy 避免占位 SVG → 真实
-            图的视觉闪烁 */}
-        <WKAvatar channel={channel} />
-      </div>
-      <span className="wk-fm-item-name">{item.displayName}</span>
-      <button
-        className="wk-fm-remove-btn"
-        onClick={(e) => {
-          e.stopPropagation()
-          onRemove(item)
-        }}
-        aria-label="移除"
-      >
-        <X size={14} strokeWidth={2} />
-      </button>
-    </div>
-  )
-}
-
-// ─── 主组件 ──────────────────────────────────────────────────────
-
+/**
+ * 转发弹窗 UI shell：Header + 左（搜索/Tabs/列表）+ 右（已选）+ 授权区（opt-in）+ Footer。
+ * 数据装配、过滤、选择、授权都在上层 useForwardModal / ConversationSelect 完成，
+ * 这里只做纯渲染与事件转发，便于后续 UI 升级。
+ */
 export function ForwardModal({
-  title = "转发",
+  title,
   items,
   allItems,
   selectedIDs,
@@ -118,115 +73,67 @@ export function ForwardModal({
   onToggleSelect,
   onConfirm,
   onCancel,
+  activeTab,
+  onTabChange,
   onItemVisible,
+  grant,
+  botPreview,
 }: ForwardModalProps) {
-  const selectedSet = new Set(selectedIDs)
+  const { t } = useI18n()
   const sourceForSelected = allItems ?? items
-  const selectedItems = sourceForSelected.filter((i) => selectedSet.has(i.channelID))
-
-  const handleInputChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      onInputChange(e.target.value)
-    },
-    [onInputChange]
+  const selectedSet = useMemo(() => new Set(selectedIDs), [selectedIDs])
+  const selectedItems = useMemo(
+    () => sourceForSelected.filter((i) => selectedSet.has(i.channelID)),
+    [sourceForSelected, selectedSet],
   )
+  const modalTitle = title ?? t("base.forwardModal.title")
+  const recentFlatList = activeTab === "recent"
 
   return (
     <div className="wk-fm">
-      {/* Header */}
       <div className="wk-fm-header">
-        <span className="wk-fm-title">{title}</span>
+        <span className="wk-fm-title">{modalTitle}</span>
       </div>
 
-      {/* 内容区：左右两列 */}
       <div className="wk-fm-content">
-
-        {/* 左列：搜索 + 可选列表 */}
         <div className="wk-fm-left">
-          {/* 搜索框 */}
-          <div className="wk-fm-search">
-            <IconSearchStroked className="wk-fm-search-icon" />
-            <input
-              className="wk-fm-search-input"
-              placeholder="搜索"
-              type="text"
-              value={inputValue}
-              onChange={handleInputChange}
-            />
-          </div>
-
-          {/* 可选列表 */}
-          <div className="wk-fm-list">
-            {loading ? (
-              <div className="wk-fm-empty">加载中…</div>
-            ) : items.length === 0 ? (
-              <div className="wk-fm-empty">暂无联系人</div>
-            ) : (
-              items.map((item) => {
-                const row = (
-                  <ItemRow
-                    item={item}
-                    selected={selectedSet.has(item.channelID)}
-                    onToggle={onToggleSelect}
-                  />
-                )
-                if (onItemVisible) {
-                  return (
-                    <VisibilityTrigger
-                      key={item.channelID}
-                      onVisible={() => onItemVisible(item)}
-                    >
-                      {row}
-                    </VisibilityTrigger>
-                  )
-                }
-                return <React.Fragment key={item.channelID}>{row}</React.Fragment>
-              })
-            )}
-          </div>
+          <SearchBar value={inputValue} onChange={onInputChange} />
+          <TabsBar activeTab={activeTab} onTabChange={onTabChange} />
+          <ItemList
+            items={items}
+            selectedSet={selectedSet}
+            loading={loading}
+            flat={recentFlatList}
+            showMeta={recentFlatList}
+            onToggleSelect={onToggleSelect}
+            onItemVisible={onItemVisible}
+            botPreview={botPreview}
+          />
         </div>
 
-        {/* 分割线 */}
         <div className="wk-fm-divider" />
 
-        {/* 右列：已选列表 */}
         <div className="wk-fm-right">
-          {selectedItems.length === 0 ? (
-            <div className="wk-fm-empty wk-fm-empty--right">未选择</div>
-          ) : (
-            <>
-              <div className="wk-fm-selected-title">
-                已选 {selectedItems.length} 人
-              </div>
-              <div className="wk-fm-selected-list">
-                {selectedItems.map((item) => (
-                  <SelectedRow
-                    key={item.channelID}
-                    item={item}
-                    onRemove={onToggleSelect}
-                  />
-                ))}
-              </div>
-            </>
-          )}
+          {/* Right panel shares the ONE authoritative Bot snapshot (Scope C): when the grant switch
+              is on, a selected person shows their selected/default Bots nested, synced with the
+              授权区. Off / group / thread targets stay flat. */}
+          <SelectedPanel
+            selectedItems={selectedItems}
+            onRemove={onToggleSelect}
+            bots={grant?.enabled ? grant.bots : undefined}
+          />
         </div>
       </div>
 
-      {/* Footer */}
-      <div className="wk-fm-footer">
-        {onCancel && (
-          <button className="wk-fm-btn wk-fm-btn--cancel" onClick={onCancel}>
-            取消
-          </button>
-        )}
-        <button
-          className="wk-fm-btn wk-fm-btn--confirm"
-          onClick={onConfirm}
-          disabled={selectedIDs.length === 0}
-        >
-          {selectedIDs.length > 0 ? `确认(${selectedIDs.length})` : '确认'}
-        </button>
-      </div>
+      {/* 授权区（opt-in）：仅当调用方传入 grant 时渲染，插在内容区与 Footer 之间。 */}
+      {grant && <GrantArea grant={grant} />}
+
+      <Footer
+        selectedCount={selectedIDs.length}
+        confirmDisabled={!!grant?.enabled && !!grant.bots && !grant.bots.ready}
+        onConfirm={onConfirm}
+        onCancel={onCancel}
+      />
     </div>
   )
 }

@@ -1,4 +1,5 @@
 import React from 'react'
+import { useI18n } from '../../i18n'
 import './index.css'
 
 export interface AIParticipant {
@@ -42,14 +43,17 @@ export default function AIMessageCard({
   isExpanded = false,
   onToggle,
 }: AIMessageCardProps) {
+  const { t } = useI18n()
   const isMultiAI = participants.length > 1
-  const tagLabel = isMultiAI ? 'AI协作' : 'AI助手'
+  const tagLabel = isMultiAI ? t('base.aiMessageCard.collaboration') : t('base.aiMessageCard.assistant')
   const shouldCollapse = participants.length > 5
   
   // 参与者名字显示
   let participantNames: string
   if (shouldCollapse) {
-    participantNames = `${participants[0].name}等${participants.length}人`
+    participantNames = t('base.aiMessageCard.collapsedParticipants', {
+      values: { name: participants[0].name, count: participants.length },
+    })
   } else {
     participantNames = participants.map(p => p.name).join(' × ')
   }
@@ -91,7 +95,9 @@ export default function AIMessageCard({
             className="wk-ai-message-card__toggle"
             onClick={onToggle}
           >
-            {isExpanded ? '收起' : `展开${messageCount}条讨论`}
+            {isExpanded
+              ? t('base.aiMessageCard.collapse')
+              : t('base.aiMessageCard.expandDiscussions', { values: { count: messageCount } })}
           </button>
         </div>
         

@@ -5,6 +5,7 @@ import RouteContext, { FinishButtonContext, RouteContextConfig } from "../../Ser
 import { Button } from "@douyinfe/semi-ui";
 import WKViewQueueHeader from "../WKViewQueueHeader";
 import WKViewQueue, { WKViewQueueContext } from "../WKViewQueue";
+import { I18nContext } from "../../i18n";
 
 export interface RoutePageState {
     pushViewCount: number
@@ -17,10 +18,14 @@ export interface RoutePageState {
 export interface RoutePageProps{
     title?: string
     onClose?: () => void
+    className?: string
     render: (context: RouteContext<any>) => React.ReactNode
 }
 
 export default class RoutePage extends Component<RoutePageProps, RoutePageState> implements RouteContext<any>, FinishButtonContext {
+    static contextType = I18nContext
+    declare context: React.ContextType<typeof I18nContext>
+
     private _routeData: any
     viewQueueContext!: WKViewQueueContext
     constructor(props: any) {
@@ -81,6 +86,41 @@ export default class RoutePage extends Component<RoutePageProps, RoutePageState>
         this.viewQueueContext.pop()
     }
 
+    /**
+     * 原子地替换栈顶视图 —— 不修改 pushViewCount，只换最上层的 routeConfig 和 view。
+     *
+     * 修复点 (YUJ-1348)：之前调用方在「create 成功 → 跳 edit」场景下用 `pop()` + `push()`
+     * 同帧表达替换。但 `pop()` 会做 `setState({ pushViewCount: n-1 })`（异步），而紧跟的
+     * `push()` 又通过 `this.state.pushViewCount + 1` 读取陈旧值，结果栈深度从 1 变成
+     * 2 而不是「依旧 1」。同时 WKViewQueue.pop 等动画结束才真正移除旧视图，push 又把
+     * 新视图追加到旧 queue 末尾 → 实际栈变成 list → create → edit，「back」回到 create
+     * 而不是 list。
+     *
+     * 这里改成单一原子操作：routeConfigs 末尾替换、pushViewCount 不动、viewQueue 同样
+     * 原子替换栈顶。栈空时退化为 push（与「在 root 上替换」语义对齐：root 由 render
+     * prop 决定，replace 在空栈上等价于 push 一个新顶部）。
+     */
+    replace(view: JSX.Element, config?: RouteContextConfig): void {
+        if (config && config.onFinishContext) {
+            config.onFinishContext(this)
+        }
+        this.setState((prev) => {
+            if (prev.pushViewCount === 0) {
+                return {
+                    routeConfigs: [config],
+                    pushViewCount: 1,
+                }
+            }
+            const next = prev.routeConfigs.slice(0, -1)
+            next.push(config)
+            return {
+                routeConfigs: next,
+                pushViewCount: prev.pushViewCount,
+            }
+        })
+        this.viewQueueContext.replace(view)
+    }
+
     routeData(): any {
         return this._routeData
     }
@@ -96,14 +136,14 @@ export default class RoutePage extends Component<RoutePageProps, RoutePageState>
 
     render() {
         const { pushViewCount, routeConfigs, finishButtonDisable, finishButtonLoading } = this.state
-        const { title, onClose } = this.props
+        const { title, onClose, className } = this.props
         let routeConfig: RouteContextConfig | undefined
         if (routeConfigs.length > 0) {
             routeConfig = routeConfigs[routeConfigs.length - 1]
         }
-        return <div className="wk-route">
+        return <div className={classNames("wk-route", className)}>
             <div className="wk-route-header">
-                <div className="wk-route-header-close" onClick={() => {
+                <div className={classNames("wk-route-header-close", pushViewCount > 0 ? "wk-route-header-close-back" : undefined)} onClick={() => {
                     if (pushViewCount > 0) {
                         this.pop()
                         return
@@ -129,7 +169,7 @@ export default class RoutePage extends Component<RoutePageProps, RoutePageState>
                             if (routeConfig?.onFinish) {
                                 routeConfig?.onFinish()
                             }
-                        }}>完成</Button> : undefined
+                        }}>{this.context.t("base.common.done")}</Button> : undefined
                     }
                 </div>
             </div>

@@ -2,6 +2,7 @@ import React from "react"
 import { MessageWrap } from "../../Service/Model"
 import MessageBase from "../Base"
 import { MessageCell } from "../MessageCell"
+import { t } from "../../i18n"
 
 
 
@@ -14,6 +15,6 @@ export class  FlameMessageCell extends MessageCell {
     }
 
     static tip(message: MessageWrap) {
-        return "[此消息为阅后即焚消息，请在手机端查看]"
+        return t("base.message.flame.unavailable")
     }
 }

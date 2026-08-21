@@ -1,4 +1,5 @@
 import React from 'react'
+import { useI18n } from '../../../i18n'
 import './index.css'
 
 export interface ThreadBadgeProps {
@@ -30,6 +31,7 @@ export default function ThreadBadge({
   lastReplyTime,
   onClick
 }: ThreadBadgeProps) {
+  const { t } = useI18n()
   // 最多显示 4 个头像
   const displayParticipants = participants.slice(0, 4)
   const hasMore = participants.length > 4
@@ -43,7 +45,7 @@ export default function ThreadBadge({
     >
       <div className="wk-msg-thread-badge-left">
         <span className="wk-msg-thread-badge-icon">🧵</span>
-        <span className="wk-msg-thread-badge-count">{replyCount}条回复</span>
+        <span className="wk-msg-thread-badge-count">{t("base.thread.replyCount", { values: { count: replyCount } })}</span>
       </div>
       
       <div className="wk-msg-thread-badge-right">

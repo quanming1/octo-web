@@ -1,15 +1,16 @@
-import { ChatPage, EndpointCategory, WKApp, Menus, shouldSkipChannelForSpace, shouldSkipPersonConversationForSpace } from '@octo/base';
+import { addImChannelInfoListener, ChatPage, EndpointCategory, WKApp, Menus, t, isElectronPowered, sendElectronConversationUnreadCount } from '@octo/base';
 import { ContactsList } from '@octo/contacts';
 import React, { useEffect } from 'react';
 // lucide icons replaced with filled SVGs per Figma
 import './index.css';
 import AppLayout from '../Layout';
-import { WKSDK, ChannelTypePerson } from 'wukongimjssdk';
-import { setFaviconBadge, clearFaviconBadge } from '../utils/faviconBadge';
+import { WKSDK } from 'wukongimjssdk';
 import { ChatIcon } from '../Components/Icons/ChatIcon';
 import { ContactsIcon } from '../Components/Icons/ContactsIcon';
-import { SummaryIcon } from '../Components/Icons/SummaryIcon';
 import { Toast } from '@douyinfe/semi-ui';
+import { clearDeprecatedFriendApplyReddotOnce } from './friendApplyReddotCleanup';
+import { createOctoDocumentTitleController } from '../features/documentTitle/octoDocumentTitle';
+import { getElectronUnreadMessageCount } from './electronUnreadCount';
 
 /**
  * 全局 ?verified=1 处理：CAS 实名认证完成后 verify-service 会 302 回
@@ -25,7 +26,7 @@ function useRealnameVerifiedLandingHandler() {
       if (params.getAll('verified').some((v) => v === '1')) {
         // 在 login 模块和 SDK 初始化稳定后弹提示（延迟一帧避免 toast 被 early render 吃掉）
         requestAnimationFrame(() => {
-          Toast.success('实名认证已完成');
+          Toast.success(t("app.toast.realnameVerified"));
         });
         // 移除所有 verified 参数（背上游 double-append 历史 bug 经过后真的可能有两个）
         params.delete('verified');
@@ -42,18 +43,72 @@ function useRealnameVerifiedLandingHandler() {
 }
 
 function App() {
-  registerMenus()
   useRealnameVerifiedLandingHandler()
+  useDeprecatedFriendApplyReddotCleanup()
+  useOctoDocumentTitle()
+  registerMenus()
   return (
     <AppLayout />
   );
 }
 
+function useOctoDocumentTitle() {
+  useEffect(() => {
+    const controller = createOctoDocumentTitleController()
+    controller.start()
+    return () => controller.stop()
+  }, [])
+}
+
+function useDeprecatedFriendApplyReddotCleanup() {
+  const isLogined = WKApp.loginInfo.isLogined()
+  const uid = WKApp.loginInfo.uid
+
+  useEffect(() => {
+    if (!isLogined || !uid) {
+      return
+    }
+    void clearDeprecatedFriendApplyReddotOnce({
+      isLoggedIn: () => WKApp.loginInfo.isLogined(),
+      getUid: () => WKApp.loginInfo.uid,
+      clearReddot: () => WKApp.apiClient.delete(`/user/reddot/friendApply`),
+      emitUnreadCount: (count) => {
+        WKApp.mittBus.emit('friend-applys-unread-count', count)
+      },
+      setUnreadCount: (currentUid, count) => {
+        WKApp.loginInfo.setStorageItem(`${currentUid}-friend-applys-unread-count`, count)
+      },
+      refreshMenus: () => {
+        WKApp.menus.refresh()
+      },
+      warn: (message, error) => {
+        console.warn(message, error)
+      },
+    })
+  }, [isLogined, uid])
+}
+
+function syncElectronUnreadMessageCount() {
+  if (isElectronPowered()) {
+    sendElectronConversationUnreadCount(getElectronUnreadMessageCount())
+  }
+}
+
+let _menusRegistered = false
 async function registerMenus() {
+  if (_menusRegistered) return
+  _menusRegistered = true
 
   WKSDK.shared().conversationManager.addConversationListener(() => {
     WKApp.menus.refresh()
+    syncElectronUnreadMessageCount()
   })
+  addImChannelInfoListener(WKSDK.shared(), syncElectronUnreadMessageCount)
+  WKApp.mittBus.on("conversation-list-refreshed", syncElectronUnreadMessageCount)
+
+  // The conversation list can be restored after registration; the listener
+  // above will send the subsequent snapshot in that case.
+  syncElectronUnreadMessageCount()
 
   WKApp.endpointManager.setMethod("menus.friendapply.change", () => {
     WKApp.menus.refresh()
@@ -62,67 +117,15 @@ async function registerMenus() {
   })
 
   WKApp.menus.register("chat", (_context) => {
-    const m = new Menus("chat", "/", "会话", <ChatIcon />, <ChatIcon />)
-    let badge = 0;
-
-    for (const conversation of WKSDK.shared().conversationManager.conversations) {
-      const channelInfo = WKSDK.shared().channelManager.getChannelInfo(conversation.channel)
-      if (channelInfo?.mute) {
-        continue
-      }
-      // Space 过滤：复用 shouldSkipChannelForSpace 完整逻辑（含 channelSpaceMap 缓存）
-      if (shouldSkipChannelForSpace(conversation.channel)) {
-        continue
-      }
-      if (shouldSkipPersonConversationForSpace(conversation)) continue
-      // Person 频道在 Space 模式下优先使用 per-Space 未读计数
-      const currentSpaceId = WKApp.shared.currentSpaceId
-      if (currentSpaceId
-          && conversation.channel.channelType === ChannelTypePerson
-          && conversation.extra?.spaceUnread !== undefined) {
-        badge += conversation.extra.spaceUnread
-      } else {
-        badge += conversation.unread
-      }
-    }
-
-    // badge 和 favicon 角标已下线
-    clearFaviconBadge()
-
-    if ((window as any).__POWERED_ELECTRON__) {
-      (window as any).ipc.send("conversation-anager-unread-count", badge);
-    }
+    const m = new Menus("chat", "/", t("app.nav.chat"), <ChatIcon />, <ChatIcon />)
 
     return m
   }, 1000)
 
-  if (WKApp.loginInfo.isLogined()) {
-    WKApp.apiClient.get(`/user/reddot/friendApply`).then(res => {
-      WKApp.mittBus.emit('friend-applys-unread-count', res.count)
-      WKApp.loginInfo.setStorageItem(`${WKApp.loginInfo.uid}-friend-applys-unread-count`, res.count)
-      WKApp.menus.refresh();
-    }).catch(error => {
-      console.warn('Failed to fetch friend apply count:', error);
-    });
-  }
-
   WKApp.menus.register("contacts", (param) => {
-    const m = new Menus("contacts", "/contacts", "通讯录", <ContactsIcon />, <ContactsIcon />)
-    m.badge = WKApp.shared.getFriendApplysUnreadCount();
+    const m = new Menus("contacts", "/contacts", t("app.nav.contacts"), <ContactsIcon />, <ContactsIcon />)
     return m
   }, 4000)
-
-  WKApp.menus.register("summary", (_context) => {
-    const m = new Menus("summary", "/summary", "智能总结", <SummaryIcon />, <SummaryIcon />)
-    m.onPress = () => {
-      WKApp.routeLeft.popToRoot()
-      const page = WKApp.route.get("/summary/create")
-      if (page && React.isValidElement(page)) {
-        WKApp.routeRight.replaceToRoot(page)
-      }
-    }
-    return m
-  }, 5000)
 
   WKApp.route.register("/", () => {
     return <ChatPage></ChatPage>
@@ -135,4 +138,3 @@ async function registerMenus() {
 }
 
 export default App;
-

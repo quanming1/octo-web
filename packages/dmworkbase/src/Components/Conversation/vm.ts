@@ -1,8 +1,9 @@
-import { Channel, ChannelTypeGroup, ChannelTypePerson, ConversationAction, WKSDK, Message, MessageContent, MessageStatus, Subscriber, Conversation, MessageExtra, CMDContent, PullMode, MessageContentType, ChannelInfo, ChannelInfoListener, ConversationListener } from "wukongimjssdk";
+import { Channel, ChannelTypeGroup, ChannelTypePerson, ConversationAction, WKSDK, Message, MessageContent, MessageStatus, Subscriber, Conversation, MessageExtra, CMDContent, PullMode, MessageContentType, MessageText, ChannelInfo, ChannelInfoListener, ConversationListener, ConnectStatus, ConnectStatusListener } from "wukongimjssdk";
 import WKApp from "../../App";
 import { SyncMessageOptions } from "../../Service/DataSource/DataProvider";
 import { MessageWrap } from "../../Service/Model";
 import { ProviderListener } from "../../Service/Provider";
+import { isConversationDisbanded } from "../../Utils/groupDisband";
 import { animateScroll, scroller } from 'react-scroll';
 import { EndpointID, MessageContentTypeConst, OrderFactor, ChannelTypeCommunityTopic } from "../../Service/Const";
 import moment from 'moment'
@@ -11,14 +12,46 @@ import { HistorySplitContent } from "../../Messages/HistorySplit";
 import { MessageListener, MessageStatusListener } from "wukongimjssdk";
 import { SendackPacket, Setting } from "wukongimjssdk";
 import MergeforwardContent from "../../Messages/Mergeforward";
+import {
+    InteractiveCardContent,
+    InteractiveCardForwardBlockedError,
+    isInteractiveCardForwardable,
+} from "../../Messages/InteractiveCard/InteractiveCardContent";
 import { TypingListener, TypingManager } from "../../Service/TypingManager";
 import { ProhibitwordsService } from "../../Service/ProhibitwordsService";
 import { SYSTEM_BOTS } from "../../Service/SpaceService";
+import { isReplyAuthorAi } from "./replyAiIdentity";
+import { rememberSendIntent, trackMessageRevoked } from "../../Service/trackMessage";
 import { SuperGroup } from "../../Utils/const";
 import { SystemContent } from "wukongimjssdk";
 import { getFoldSessionExpandedMessages } from "./foldSessionSummary";
-import { getPulldownRestoredScrollTop } from "./historyScroll";
+import { getPulldownRestoredScrollTop, getRestoredAnchorScrollTop } from "./historyScroll";
 import { applyMsgLevelExternalFieldsWithFallback } from "../../Service/Convert";
+import { wrapSendContentForInjection } from "../../Utils/sendContentProxy";
+import { isMessageSelectable } from "../../Service/messageSelection";
+import { canReadMessageReaction } from "../../Service/featureFlags";
+import MessageReactionService from "../../Service/MessageReactionService";
+import {
+    createMessageReactionSyncController,
+    messageReactionCommandSeq,
+} from "../../features/messageReaction/syncController";
+import {
+    addImConnectStatusListener,
+    handleImReconnectRefresh,
+    removeImConnectStatusListener,
+} from "../../im-runtime/connectStatus";
+import {
+    addImChannelInfoListener,
+    addImSubscriberChangeListener,
+    fetchImChannelInfo,
+    getImChannelInfo,
+    getImChannelSubscribers,
+    notifyImSubscriberChangeListeners,
+    setImChannelSubscribersCache,
+    syncImChannelSubscribers,
+} from "../../im-runtime/channelRuntime";
+import { getBrowserUnreadConversationSync } from "../../features/documentTitle";
+import { isOwnedConversationSingleton } from "../../features/notifications/messageAttention";
 
 export interface FoldSessionParticipant {
     uid: string
@@ -64,7 +97,58 @@ export interface ConversationRenderFoldSessionItem {
 
 export type ConversationRenderItem = ConversationRenderMessageItem | ConversationRenderFoldSessionItem
 
+export interface ConversationVMOptions {
+    registerAsOpenConversation?: boolean
+}
+
+const PendingMessageOrderBase = Number.MAX_SAFE_INTEGER / 2
+
+/**
+ * botfather 命令前缀 → 事件名映射(§B)。仅当 channelID==="botfather" 时用于匹配
+ * content.text 的前缀选出事件名;绝不把正文存进 intent 或 props。
+ * /newbot 走既有 botCreateEntry 路径(bot_create_started),故不在此表。
+ * 各前缀互不为对方前缀,匹配顺序无关。
+ */
+const BOTFATHER_COMMAND_EVENTS: Array<[string, string]> = [
+    ["/quickstart", "botfather_quickstart_viewed"],
+    ["/setname", "bot_profile_edited"],
+    ["/setdescription", "bot_profile_edited"],
+    ["/mybots", "bot_list_viewed"],
+    ["/token", "bot_token_managed"],
+    ["/revoke", "bot_token_managed"],
+    ["/deletebot", "bot_deleted"],
+    ["/connect", "bot_connect_prompt_got"],
+    ["/disconnect", "bot_agent_disconnected"],
+    ["/pending", "bot_friend_request_handled"],
+    ["/approve", "bot_friend_request_handled"],
+    ["/reject", "bot_friend_request_handled"],
+    ["/help", "botfather_help_viewed"],
+    ["/cancel", "botfather_command_cancelled"],
+    ["/install", "chrome_plugin_install_triggered"],
+]
+
+/**
+ * 命令前缀边界:裸前缀,或 prefix 后紧跟任意空白(空格/换行/CRLF/制表符)才算命中,否则
+ * /installation 会误命中 /install、/newbotany 误命中 /newbot。用 \s 覆盖整类空白。
+ * (见 review P2-10 / 二审 P2-8 / 三审 nit:/newbot 分支也复用此边界。)
+ */
+function matchesCommandPrefix(text: string, prefix: string): boolean {
+    return text === prefix || (text.startsWith(prefix) && /\s/.test(text.charAt(prefix.length)))
+}
+
+/** 只判前缀选事件名。命中具体命令返回其事件,未命中但以 "/" 开头归兜底 botfather_command_sent。 */
+function matchBotfatherCommandEvent(text: string): string | undefined {
+    if (!text.startsWith("/")) return undefined
+    for (const [prefix, event] of BOTFATHER_COMMAND_EVENTS) {
+        if (matchesCommandPrefix(text, prefix)) return event
+    }
+    return "botfather_command_sent"
+}
+
 export default class ConversationVM extends ProviderListener {
+
+    private static nextMessageContainerSeq = 0
+    private static openConversationOwner?: symbol
 
     loading: boolean = false // 消息是否加载中
     channel: Channel
@@ -83,26 +167,36 @@ export default class ConversationVM extends ProviderListener {
     pullupHasMore: boolean = false // 上拉是否有更多
     pulldownFinished: boolean = false // 下拉完成
     pendingMessages: MessageWrap[] = [] // 缓冲区：pullupHasMore 期间收到的实时消息
-    messageContainerId = "viewport" // 消息容器的ID
+    messageContainerId = `viewport-${ConversationVM.nextMessageContainerSeq++}` // 消息容器的ID
     static sendQueue: Map<string, Array<MessageWrap>> = new Map() // 发送队列
     static foldSessionPreview: Map<string, { participants: string[], count: number }> = new Map() // 会话列表折叠预览缓存
     private _needSetUnread: boolean = false // 是否需要设置未读数量
 
     typingListener!: TypingListener // 输入中监听
     messageListener!: MessageListener // 消息监听
+    connectStatusListener!: ConnectStatusListener // 连接状态监听（重连补刷当前会话）
+    private lastReconnectRefreshAt: number = 0 // 重连补刷（离线消息）去抖时间戳
+    private lastSubscriberResyncAt: number = 0 // 成员重同步去抖时间戳（独立于消息补刷，避免前台成员刷压制重连消息补拉，octo-web#568 review）
     cmdListener!: MessageListener // cmd消息监听
     messageStatusListener!: MessageStatusListener // 消息状态监听
     conversationListener!: ConversationListener // 会话监听
     private channelInfoListener!: ChannelInfoListener // channelInfo 变化监听（bot 身份识别）
-    subscriberChangeListener!: (channel: Channel) => void // 订阅者变化监听
+    private unsubscribeChannelInfoListener?: () => void
+    subscriberChangeListener?: (channel: Channel) => void // 订阅者变化监听
+    private unsubscribeSubscriberChangeListener?: () => void
     lastMessage?: MessageWrap // 此会话的最后一条最新的消息
     lastLocalMessageElement?: HTMLElement | null // 最后一条消息的dom元素
     private _showScrollToBottomBtn?: boolean = false // 是否显示底部按钮
     subscribers: Subscriber[] = []
     private foldSessionState: Map<string, FoldSessionUIState> = new Map()
     private messageSeqToFoldSessionId: Map<number, string> = new Map()
+    private liveFoldRevokeClientMsgNos: Set<string> = new Set()
     afterFoldSessionClientMsgNos: Set<string> = new Set() // 紧跟在折叠卡片后的消息，需强制独立显示
     private foldSessionActiveTimer: ReturnType<typeof setTimeout> | null = null // 协作态超时自动结束
+    private reactionSyncController: ReturnType<typeof createMessageReactionSyncController>
+    private readonly registerAsOpenConversation: boolean
+    private readonly openConversationOwner = Symbol("openConversationOwner")
+    private ownedOpenConversation?: Conversation
 
     fileDragEnter?: boolean // 文件拖拽上传（拖进来了）
     fileDragLeave?: boolean // 文件拖拽上传（拖离开了）
@@ -125,9 +219,23 @@ export default class ConversationVM extends ProviderListener {
     private _subscribersResolved: boolean = false
     subscribersReady: Promise<void>
 
-    constructor(channel: Channel, initLocateMessageSeq?: number) {
+    constructor(
+        channel: Channel,
+        initLocateMessageSeq?: number,
+        options: ConversationVMOptions = {},
+    ) {
         super()
         this.channel = channel
+        this.registerAsOpenConversation = options.registerAsOpenConversation !== false
+        this.reactionSyncController = createMessageReactionSyncController({
+            channel,
+            // messagesOfOrigin 是已加载消息的权威集合；pullupHasMore 期间新消息先进入
+            // pendingMessages，必须一并参与 reaction 合并，避免游标先推进后漏掉该消息。
+            getMessages: () => [...this.messagesOfOrigin, ...this.pendingMessages]
+                .map((message) => message.message),
+            sync: (request) => MessageReactionService.sync(request),
+            notify: () => this.notifyListener(),
+        })
         if (initLocateMessageSeq == 0) {
             this.initLocateMessageSeq = undefined
         } else {
@@ -237,6 +345,9 @@ export default class ConversationVM extends ProviderListener {
 
     // 选中消息
     checkedMessage(message: Message, checked: boolean): void {
+        if (checked && !isMessageSelectable(message)) {
+            return
+        }
         let messageWrap = this.findMessageWithClientMsgNo(message.clientMsgNo)
         if (!messageWrap) {
             return
@@ -248,7 +359,7 @@ export default class ConversationVM extends ProviderListener {
     // 获取被选中的消息列表
     getCheckedMessages() {
         return this.messages.filter((m) => {
-            return m.checked
+            return m.checked && isMessageSelectable(m)
         })
     }
 
@@ -262,7 +373,10 @@ export default class ConversationVM extends ProviderListener {
         if (!this.supportsFolding) {
             return false
         }
-        if (message.revoke || message.send) {
+        if (message.send) {
+            return false
+        }
+        if (message.revoke && !this.liveFoldRevokeClientMsgNos.has(message.clientMsgNo)) {
             return false
         }
         if (message.contentType === MessageContentTypeConst.time
@@ -270,8 +384,27 @@ export default class ConversationVM extends ProviderListener {
             || message.contentType === MessageContentTypeConst.typing) {
             return false
         }
-        const channelInfo = WKSDK.shared().channelManager.getChannelInfo(new Channel(message.fromUID, ChannelTypePerson))
+        const channelInfo = getImChannelInfo(WKSDK.shared(), new Channel(message.fromUID, ChannelTypePerson))
         return channelInfo?.orgData?.robot === 1
+    }
+
+    // 不可折叠的独立交付物：带附件的消息（图片/GIF/小视频/文件/富文本）
+    // 以及互动卡片（interactiveCard=17）。
+    // 这类消息是用户需要直接看到、直接操作的交付物，不应被折叠进 FoldSessionCard
+    // ——尤其互动卡片带按钮/输入，一旦被折叠就无法交互。
+    // 注意：语音（voice=4）可以折叠，故不在此列。
+    private isUnfoldableDeliverable(message: MessageWrap): boolean {
+        switch (message.contentType) {
+            case MessageContentTypeConst.image:
+            case MessageContentTypeConst.gif:
+            case MessageContentTypeConst.smallVideo:
+            case MessageContentTypeConst.file:
+            case MessageContentTypeConst.richText:
+            case MessageContentTypeConst.interactiveCard:
+                return true
+            default:
+                return false
+        }
     }
 
     getSessionParticipants(messages: MessageWrap[]): FoldSessionParticipant[] {
@@ -283,7 +416,7 @@ export default class ConversationVM extends ProviderListener {
             }
             seenUIDs.add(message.fromUID)
             const channel = new Channel(message.fromUID, ChannelTypePerson)
-            const channelInfo = WKSDK.shared().channelManager.getChannelInfo(channel)
+            const channelInfo = getImChannelInfo(WKSDK.shared(), channel)
             // 优先使用 message.from.title, 再用 channelInfo.title, 最后用 fromUID
             const name = message.from?.title || channelInfo?.title || message.fromUID
             participants.push({
@@ -373,6 +506,13 @@ export default class ConversationVM extends ProviderListener {
 
         for (const message of sourceMessages) {
             if (this.isBotMessage(message)) {
+                // 带附件的 bot 消息 / 互动卡片作为折叠分组的边界：先 flush 当前分组，再独立渲染，
+                // 保证图片/文件/卡片等交付物始终可见，无需展开折叠卡片。
+                if (this.isUnfoldableDeliverable(message)) {
+                    flushPendingSession(false)
+                    renderItems.push({ type: "message", message })
+                    continue
+                }
                 if (pendingSessionMessages.length > 0) {
                     const previousMessage = pendingSessionMessages[pendingSessionMessages.length - 1]
                     if (message.timestamp - previousMessage.timestamp < 120) {
@@ -416,12 +556,11 @@ export default class ConversationVM extends ProviderListener {
             const lastItem = renderItems[renderItems.length - 1]
             // isBotMessage() excludes typing content type, so check fromUID directly
             const typingFromBot = typingMessage.fromUID &&
-                WKSDK.shared().channelManager.getChannelInfo(new Channel(typingMessage.fromUID, ChannelTypePerson))?.orgData?.robot === 1
+                getImChannelInfo(WKSDK.shared(), new Channel(typingMessage.fromUID, ChannelTypePerson))?.orgData?.robot === 1
             if (lastItem?.type === "foldSession" && lastItem.session.isActive && typingFromBot) {
                 lastItem.session.typing = typingMessage
                 lastItem.session.expandedMessages = getFoldSessionExpandedMessages({
                     messages: lastItem.session.messages,
-                    typing: typingMessage,
                 })
             } else {
                 renderItems.push({ type: "message", message: typingMessage })
@@ -467,10 +606,10 @@ export default class ConversationVM extends ProviderListener {
         for (const msg of this.messagesOfOrigin) {
             if (!msg.send && msg.fromUID && !seenUIDs.has(msg.fromUID)) {
                 seenUIDs.add(msg.fromUID)
-                const ci = WKSDK.shared().channelManager.getChannelInfo(new Channel(msg.fromUID, ChannelTypePerson))
+                const ci = getImChannelInfo(WKSDK.shared(), new Channel(msg.fromUID, ChannelTypePerson))
                 if (!ci) {
                     // channelInfo 还没缓存，fetch 后触发 channelInfoListener 自然 rebuild
-                    WKSDK.shared().channelManager.fetchChannelInfo(new Channel(msg.fromUID, ChannelTypePerson))
+                    fetchImChannelInfo(WKSDK.shared(), new Channel(msg.fromUID, ChannelTypePerson))
                 } else if (ci.orgData?.robot === 1) {
                     botUIDs.add(msg.fromUID)
                 }
@@ -492,6 +631,16 @@ export default class ConversationVM extends ProviderListener {
         if (renderItem && renderItem.type === "foldSession") {
             return renderItem.session
         }
+    }
+
+    foldSessionMessageElementId(message: MessageWrap | Message): string {
+        return `fold-session-message-${message.clientMsgNo}`
+    }
+
+    private messageSeqElement(messageSeq: number): HTMLElement | null {
+        return document.querySelector<HTMLElement>(
+            `[data-locate-message-row="true"][data-message-seq="${messageSeq}"]`,
+        )
     }
 
     setFoldSessionExpanded(sessionId: string, expanded: boolean, userToggled: boolean = false, stateCallback?: () => void) {
@@ -551,33 +700,45 @@ export default class ConversationVM extends ProviderListener {
         })
     }
 
-    sendMergeforward(toChannels: Channel[]) {
-        let users = new Array<any>();
-
-        let checkedMessages = this.getCheckedMessages().map((messageWrap: MessageWrap) => {
+    // 构建合并转发消息内容（不发送）。发送由上层 ForwardService 统一处理。
+    // 保留 InteractiveCard 校验：不可转发的编辑态卡片抛 InteractiveCardForwardBlockedError
+    // → ForwardService Phase 1 abort，Phase 2 完全不进入。
+    buildMergeforwardContent(checkedMessagesWrap: MessageWrap[]): MergeforwardContent {
+        const checkedMessages = checkedMessagesWrap.map((messageWrap: MessageWrap) => {
             const msg = messageWrap.message
             // 如果消息被编辑过，用编辑后内容替换 content，保证合并转发预览和内容正确
             if (msg.remoteExtra?.isEdit && msg.remoteExtra?.contentEdit) {
-                return Object.assign(Object.create(Object.getPrototypeOf(msg)), msg, {
+                const edited = Object.assign(Object.create(Object.getPrototypeOf(msg)), msg, {
                     content: msg.remoteExtra.contentEdit
                 })
+                if (
+                    edited.content instanceof InteractiveCardContent &&
+                    !isInteractiveCardForwardable(edited.content)
+                ) {
+                    throw new InteractiveCardForwardBlockedError()
+                }
+                return edited
+            }
+            if (
+                msg.content instanceof InteractiveCardContent &&
+                !isInteractiveCardForwardable(msg.content)
+            ) {
+                throw new InteractiveCardForwardBlockedError()
             }
             return msg
         })
+
+        const users = new Array<any>()
         if (checkedMessages && checkedMessages.length > 0) {
             const addedUIDs = new Set<string>()
             for (const message of checkedMessages) {
                 if (addedUIDs.has(message.fromUID)) continue
                 addedUIDs.add(message.fromUID)
-                let channelInfo = WKSDK.shared().channelManager.getChannelInfo(new Channel(message.fromUID, ChannelTypePerson))
+                const channelInfo = getImChannelInfo(WKSDK.shared(), new Channel(message.fromUID, ChannelTypePerson))
                 users.push({ uid: message.fromUID, name: channelInfo?.title })
             }
         }
-        if (toChannels && toChannels.length > 0) {
-            for (const destChannel of toChannels) {
-                this.sendMessage(new MergeforwardContent(this.channel.channelType, users, checkedMessages), destChannel)
-            }
-        }
+        return new MergeforwardContent(this.channel.channelType, users, checkedMessages)
     }
 
     // 删除消息
@@ -599,7 +760,9 @@ export default class ConversationVM extends ProviderListener {
     // 撤回消息
     async revokeMessage(message: Message): Promise<void> {
 
-        return WKApp.conversationProvider.revokeMessage(message)
+        await WKApp.conversationProvider.revokeMessage(message)
+        // 破例2:撤回成功后补点(ui_action,§5.2)
+        trackMessageRevoked(message.clientSeq, message.channel?.channelType ?? 0)
 
     }
 
@@ -659,6 +822,70 @@ export default class ConversationVM extends ProviderListener {
         }
     }
 
+    private static getSdkSendingQueues(): Map<number, unknown> | undefined {
+        const chatManager = WKSDK.shared().chatManager as unknown as { sendingQueues?: Map<number, unknown> }
+        return chatManager.sendingQueues
+    }
+
+    private static shouldKeepSendingMessage(message: MessageWrap, sdkSendingQueues?: Map<number, unknown>): boolean {
+        if (message.messageSeq && message.messageSeq > 0) {
+            return false
+        }
+        if (message.status === MessageStatus.Fail) {
+            return true
+        }
+        if (message.status !== MessageStatus.Wait) {
+            return false
+        }
+        if (!message.clientSeq || message.clientSeq <= 0 || !sdkSendingQueues) {
+            return true
+        }
+        return sdkSendingQueues.has(message.clientSeq)
+    }
+
+    private reconcileSendingMessages(channel: Channel): MessageWrap[] {
+        const channelKey = channel.getChannelKey()
+        const sendingMessages = ConversationVM.sendQueue.get(channelKey)
+        if (!sendingMessages || sendingMessages.length === 0) {
+            return []
+        }
+
+        const sdkSendingQueues = ConversationVM.getSdkSendingQueues()
+        const nextSendingMessages = sendingMessages.filter((message) => {
+            return ConversationVM.shouldKeepSendingMessage(message, sdkSendingQueues)
+        })
+
+        if (nextSendingMessages.length !== sendingMessages.length) {
+            if (nextSendingMessages.length > 0) {
+                ConversationVM.sendQueue.set(channelKey, nextSendingMessages)
+            } else {
+                ConversationVM.sendQueue.delete(channelKey)
+            }
+        }
+
+        return nextSendingMessages
+    }
+
+    private forEachLocalMessageWithClientSeq(clientSeq: number, handler: (message: MessageWrap) => void) {
+        const visited = new Set<MessageWrap>()
+        const visit = (messages?: MessageWrap[]) => {
+            if (!messages || messages.length === 0) {
+                return
+            }
+            for (const message of messages) {
+                if (message.clientSeq === clientSeq && !visited.has(message)) {
+                    visited.add(message)
+                    handler(message)
+                }
+            }
+        }
+
+        visit(this.messagesOfOrigin)
+        visit(this.pendingMessages)
+        visit(this.messages)
+        visit(ConversationVM.sendQueue.get(this.channel.getChannelKey()))
+    }
+
     // 取消所有消息的选中
     unCheckAllMessages() {
         let hasChange = false
@@ -671,6 +898,31 @@ export default class ConversationVM extends ProviderListener {
         if (hasChange) {
             this.notifyListener()
         }
+    }
+
+    private claimOpenConversation(conversation: Conversation): void {
+        if (!this.registerAsOpenConversation) {
+            return
+        }
+        WKSDK.shared().conversationManager.openConversation = conversation
+        this.ownedOpenConversation = conversation
+        ConversationVM.openConversationOwner = this.openConversationOwner
+    }
+
+    releaseOpenConversationOwnership(): void {
+        const conversationManager = WKSDK.shared().conversationManager
+        if (ConversationVM.openConversationOwner === this.openConversationOwner) {
+            if (
+                isOwnedConversationSingleton(
+                    conversationManager.openConversation,
+                    this.ownedOpenConversation,
+                )
+            ) {
+                conversationManager.openConversation = undefined
+            }
+            ConversationVM.openConversationOwner = undefined
+        }
+        this.ownedOpenConversation = undefined
     }
 
     didMount(): void {
@@ -736,6 +988,7 @@ export default class ConversationVM extends ProviderListener {
                         existMsg.message.streams.sort((a, b) => a.streamSeq - b.streamSeq)
                     }
                     existMsg.message.streamFlag = message.streamFlag
+                    this.rebuildRenderItems()
                     this.notifyListener()
                     return
                 }
@@ -755,7 +1008,11 @@ export default class ConversationVM extends ProviderListener {
                 let existMessage = this.findMessageWithMessageID(param.message_id)
                 if (existMessage) {
                     existMessage.revoke = true
-                    existMessage.revoker = existMessage.fromUID;
+                    existMessage.revoker = message.fromUID;
+                    if (this.findFoldSessionByMessageSeq(existMessage.messageSeq)) {
+                        this.liveFoldRevokeClientMsgNos.add(existMessage.clientMsgNo)
+                    }
+                    this.rebuildRenderItems()
                     this.notifyListener()
                 }
             } else if (cmdContent.cmd === 'syncMessageExtra') { // 同步消息扩展
@@ -767,6 +1024,13 @@ export default class ConversationVM extends ProviderListener {
                     })
                 }
 
+            } else if (canReadMessageReaction()) {
+                const seq = messageReactionCommandSeq(cmdContent.cmd, param, this.channel)
+                if (seq !== undefined) {
+                    void this.reactionSyncController.request(seq).catch((err) => {
+                        console.error('[ConversationVM] syncMessageReaction failed:', err)
+                    })
+                }
             }
         }
         WKSDK.shared().chatManager.addCMDListener(this.cmdListener)
@@ -797,7 +1061,7 @@ export default class ConversationVM extends ProviderListener {
                 this.notifyListener()
             }
         }
-        WKSDK.shared().channelManager.addListener(this.channelInfoListener)
+        this.unsubscribeChannelInfoListener = addImChannelInfoListener(WKSDK.shared(), this.channelInfoListener)
 
         WKApp.endpointManager.setMethod(EndpointID.clearChannelMessages, (channel: Channel) => {
             if (channel.isEqual(this.channel)) {
@@ -809,6 +1073,7 @@ export default class ConversationVM extends ProviderListener {
                 this.renderItems = []
                 this.foldSessionState.clear()
                 this.messageSeqToFoldSessionId.clear()
+                this.liveFoldRevokeClientMsgNos.clear()
                 if (this.foldSessionActiveTimer) {
                     clearTimeout(this.foldSessionActiveTimer)
                     this.foldSessionActiveTimer = null
@@ -821,12 +1086,12 @@ export default class ConversationVM extends ProviderListener {
         if (this.supportsFolding) {
 
             // 加载频道信息
-            this.channelInfo = WKSDK.shared().channelManager.getChannelInfo(this.channel)
+            this.channelInfo = getImChannelInfo(WKSDK.shared(), this.channel)
             if (this.channelInfo) {
                 this.loadChannelInfoFinished()
             } else {
-                WKSDK.shared().channelManager.fetchChannelInfo(this.channel).then(() => {
-                    this.channelInfo = WKSDK.shared().channelManager.getChannelInfo(this.channel)
+                fetchImChannelInfo(WKSDK.shared(), this.channel).then((channelInfo) => {
+                    this.channelInfo = channelInfo
                     this.loadChannelInfoFinished()
                 }).catch((err) => {
                     console.error('[ConversationVM] fetchChannelInfo failed:', err)
@@ -854,6 +1119,32 @@ export default class ConversationVM extends ProviderListener {
         }
         TypingManager.shared.addTypingListener(this.typingListener)
 
+        // 重连补刷：SDK 重连不补拉离线消息，断连期间当前会话窗口不刷新。
+        // Connected 时补刷首屏。5s 去抖（参考 App.tsx remoteConfig foreground
+        // refresh pattern），避免频繁断连重连重复拉首屏。
+        // ⚠️ 必须在 didUnMount 成对 removeConnectStatusListener，否则页面切换
+        // 累积 listener → 内存泄漏 + 重连时多实例并发拉首屏。
+        this.connectStatusListener = (status: ConnectStatus) => {
+            // 断连期间的成员变更 CMD（加/减成员，含龙虾）随 WS 丢失，SDK 重连
+            // 只 reSubscribe 不补拉，subscriberChangeListener 因此不会被触发，
+            // 导致 subscribers 停在断连前旧快照 → @ 提及弹窗搜不到新成员。
+            // 成员重同步自带独立节流（lastSubscriberResyncAt），不与上方消息补拉
+            // 共用时间戳，修复 octo-web#567/#568。
+            handleImReconnectRefresh(status, {
+                getLastRefreshAt: () => this.lastReconnectRefreshAt,
+                setLastRefreshAt: (time) => {
+                    this.lastReconnectRefreshAt = time
+                },
+                refreshMessages: () => this.requestMessagesOfFirstPage(0),
+                resyncSubscribers: () => this.resyncSubscribers(),
+            })
+        }
+        addImConnectStatusListener(WKSDK.shared(), this.connectStatusListener)
+
+        // 回前台补刷：合盖/息屏久后回到页面，WS 可能已断且成员变更事件已丢失。
+        // App.tsx 的 visibilitychange/focus 只刷 remoteConfig，不碰成员，这里补上。
+        WKApp.mittBus.on("wk:app-foreground", this._foregroundResyncHandler)
+
         const conversation = WKSDK.shared().conversationManager.findConversation(this.channel)
         if (conversation) {
             const unread = conversation.unread
@@ -875,19 +1166,21 @@ export default class ConversationVM extends ProviderListener {
                 this.updateLastMessageIfNeed(new MessageWrap(conversation.lastMessage))
             }
 
-            WKSDK.shared().conversationManager.openConversation = conversation
+            this.claimOpenConversation(conversation)
         }
 
         this.requestMessagesOfFirstPage(this.initLocateMessageSeq, () => {
             if (this.onFirstMessagesLoaded) {
                 this.onFirstMessagesLoaded()
             }
-            // 进入会话即标记 reminders 已读，避免折叠分组后 @ 角标残留
-            this.markReminderDones()
         })
 
         // 订阅 task 上传失败事件（module.tsx 全局触发，这里仅处理当前 channel）
         WKApp.mittBus.on("task-upload-failed", this._taskUploadFailedHandler)
+
+        // 订阅内置表情清单更新：清单异步到达后，已解析缓存的消息按新表(token→图/正则)
+        // 重新解析并重渲染一次，修复首屏竞态下新增服务端表情显示为裸 [xxx] 的问题。
+        WKApp.mittBus.on("emoji-manifest-updated", this._emojiManifestUpdatedHandler)
 
     }
     // task 上传失败通知处理器（module.tsx 的全局订阅 emit，这里接收并刷新 UI）
@@ -897,17 +1190,29 @@ export default class ConversationVM extends ProviderListener {
         }
     }
 
+    // 表情清单更新处理器：清空已渲染消息的解析缓存使其按新清单重解析，再重建渲染项并刷新。
+    private _emojiManifestUpdatedHandler = () => {
+        for (const m of this.messages) {
+            m.resetParts()
+        }
+        this.rebuildRenderItems()
+        this.notifyListener()
+    }
+
     didUnMount(): void {
-        this.markReminderDones()
+        this.releaseOpenConversationOwnership()
         WKSDK.shared().chatManager.removeMessageListener(this.messageListener)
         WKSDK.shared().chatManager.removeMessageStatusListener(this.messageStatusListener)
         WKApp.endpointManager.removeMethod(EndpointID.clearChannelMessages)
         WKSDK.shared().chatManager.removeCMDListener(this.cmdListener)
 
         TypingManager.shared.removeTypingListener(this.typingListener)
+        removeImConnectStatusListener(WKSDK.shared(), this.connectStatusListener)
         WKSDK.shared().conversationManager.removeConversationListener(this.conversationListener)
-        WKSDK.shared().channelManager.removeSubscriberChangeListener(this.subscriberChangeListener)
-        WKSDK.shared().channelManager.removeListener(this.channelInfoListener)
+        this.unsubscribeSubscriberChangeListener?.()
+        this.unsubscribeSubscriberChangeListener = undefined
+        this.unsubscribeChannelInfoListener?.()
+        this.unsubscribeChannelInfoListener = undefined
         if (this.foldSessionActiveTimer) {
             clearTimeout(this.foldSessionActiveTimer)
             this.foldSessionActiveTimer = null
@@ -915,6 +1220,8 @@ export default class ConversationVM extends ProviderListener {
         this.pendingMessages = [] // 清理缓冲区
 
         WKApp.mittBus.off("task-upload-failed", this._taskUploadFailedHandler)
+        WKApp.mittBus.off("emoji-manifest-updated", this._emojiManifestUpdatedHandler)
+        WKApp.mittBus.off("wk:app-foreground", this._foregroundResyncHandler)
     }
 
     // 加载频道信息完成
@@ -924,7 +1231,7 @@ export default class ConversationVM extends ProviderListener {
             const parentGroupNo = this.channelInfo?.orgData?.parentGroupNo
             if (parentGroupNo) {
                 const parentChannel = new Channel(parentGroupNo, ChannelTypeGroup)
-                const parentChannelInfo = WKSDK.shared().channelManager.getChannelInfo(parentChannel)
+                const parentChannelInfo = getImChannelInfo(WKSDK.shared(), parentChannel)
                 const isSuperGroup = parentChannelInfo?.orgData?.group_type == SuperGroup
                 if (isSuperGroup) {
                     // 超级群：只取第一页
@@ -935,25 +1242,27 @@ export default class ConversationVM extends ProviderListener {
                     this._resolveSubscribersReady()
                 } else {
                     // 普通群：从缓存拿，没有则同步
-                    const cached = WKSDK.shared().channelManager.getSubscribes(parentChannel)
+                    const cached = getImChannelSubscribers(WKSDK.shared(), parentChannel)
                     if (cached && cached.length > 0) {
                         this.subscribers = cached
                         this._resolveSubscribersReady()
                     } else {
-                        await WKSDK.shared().channelManager.syncSubscribes(parentChannel)
-                        this.subscribers = WKSDK.shared().channelManager.getSubscribes(parentChannel) || []
+                        await syncImChannelSubscribers(WKSDK.shared(), parentChannel)
+                        this.subscribers = getImChannelSubscribers(WKSDK.shared(), parentChannel)
                         this._resolveSubscribersReady()
                         // 注册前先移除旧监听器，避免多次调用时重复注册
-                        if (this.subscriberChangeListener) {
-                            WKSDK.shared().channelManager.removeSubscriberChangeListener(this.subscriberChangeListener)
-                        }
+                        this.unsubscribeSubscriberChangeListener?.()
+                        this.unsubscribeSubscriberChangeListener = undefined
                         this.subscriberChangeListener = (channel: Channel) => {
                             if (channel.channelID !== parentGroupNo) return
-                            this.subscribers = WKSDK.shared().channelManager.getSubscribes(parentChannel) || []
+                            this.subscribers = getImChannelSubscribers(WKSDK.shared(), parentChannel)
                             this._resolveSubscribersReady()
                             this.notifyListener()
                         }
-                        WKSDK.shared().channelManager.addSubscriberChangeListener(this.subscriberChangeListener)
+                        this.unsubscribeSubscriberChangeListener = addImSubscriberChangeListener(
+                            WKSDK.shared(),
+                            this.subscriberChangeListener
+                        )
                     }
                 }
                 this.notifyListener()
@@ -971,17 +1280,21 @@ export default class ConversationVM extends ProviderListener {
             this.reloadSubscribers()
             this._resolveSubscribersReady()
         }
-        WKSDK.shared().channelManager.addSubscriberChangeListener(this.subscriberChangeListener)
+        this.unsubscribeSubscriberChangeListener?.()
+        this.unsubscribeSubscriberChangeListener = addImSubscriberChangeListener(
+            WKSDK.shared(),
+            this.subscriberChangeListener
+        )
 
         if (this.channelInfo?.orgData?.group_type == SuperGroup) {
             // 如果是超级群则只获取第一页成员
             this.subscribers = await this.getFirstPageMembers()
             this._resolveSubscribersReady()
-            WKSDK.shared().channelManager.subscribeCacheMap.set(this.channel.getChannelKey(), this.subscribers)
-            WKSDK.shared().channelManager.notifySubscribeChangeListeners(this.channel)
+            setImChannelSubscribersCache(WKSDK.shared(), this.channel, this.subscribers)
+            notifyImSubscriberChangeListeners(WKSDK.shared(), this.channel)
             this.notifyListener()
         } else {
-            WKSDK.shared().channelManager.syncSubscribes(this.channel)
+            syncImChannelSubscribers(WKSDK.shared(), this.channel)
         }
 
     }
@@ -994,35 +1307,18 @@ export default class ConversationVM extends ProviderListener {
         })
     }
 
-    // 标记提醒已完成
-    markReminderDones() {
-        const conversation = WKSDK.shared().conversationManager.findConversation(this.channel)
-        if (conversation && conversation.reminders && conversation.reminders.length > 0) {
-            const ids = new Array<number>()
-            for (const reminder of conversation.reminders) {
-                if (!reminder.done) {
-                    ids.push(reminder.reminderID)
-                }
-            }
-            if (ids.length > 0) {
-                WKSDK.shared().reminderManager.done(ids)
-            }
-        }
-        // 进场兜底：清 SDK 本地的 isMentionMe，与 reminders done 保持一致
-        const conv = WKSDK.shared().conversationManager.findConversation(this.channel)
-        if (conv) {
-            conv.isMentionMe = false
-        }
-
-    }
-
     async onDownArrow() {
         const conversation = WKSDK.shared().conversationManager.findConversation(this.channel)
         let onlyScroll = false
+        let latestLoadedMessage: MessageWrap | undefined
         if (conversation && conversation.lastMessage) {
             if (this.messagesOfOrigin && this.messagesOfOrigin.length > 0) {
-                const lastMessage = this.messagesOfOrigin[this.messagesOfOrigin.length - 1]
-                if (lastMessage.messageSeq >= conversation.lastMessage.messageSeq) {
+                latestLoadedMessage = this.messagesOfOrigin[this.messagesOfOrigin.length - 1]
+                const latestKnownMessageSeq = Math.max(
+                    conversation.lastMessage.messageSeq,
+                    this.lastMessage?.messageSeq || 0
+                )
+                if (latestLoadedMessage.messageSeq >= latestKnownMessageSeq) {
                     onlyScroll = true
                 }
             }
@@ -1030,6 +1326,12 @@ export default class ConversationVM extends ProviderListener {
 
         if (onlyScroll) {
             this.scrollToBottom(true)
+            this.browseToMessageSeq = Math.max(
+                this.browseToMessageSeq,
+                latestLoadedMessage?.messageSeq || 0
+            )
+            this.showScrollToBottomBtn = false
+            await this.refreshNewMsgCount()
         } else {
             return this.requestMessagesOfFirstPage(0)
         }
@@ -1088,11 +1390,75 @@ export default class ConversationVM extends ProviderListener {
 
     // 重新加载订阅者
     reloadSubscribers() {
-        this.subscribers = WKSDK.shared().channelManager.getSubscribes(this.channel)
+        this.subscribers = getImChannelSubscribers(WKSDK.shared(), this.channel)
         if (this.subscribers.length > 0) {
             this._resolveSubscribersReady()
         }
         this.notifyListener()
+    }
+
+    // 回前台重刷处理器：App.tsx 回前台时全局 emit，这里直接重同步当前会话成员。
+    // 节流已下沉到 resyncSubscribers 内（lastSubscriberResyncAt），不再共用重连的
+    // lastReconnectRefreshAt，避免前台成员刷抢先设时间戳后压制重连的消息补拉（octo-web#568 review）。
+    private _foregroundResyncHandler = () => {
+        this.resyncSubscribers()
+    }
+
+    // 主动重同步当前会话成员列表（重连 / 回前台调用）。
+    // 断连期间的成员变更 CMD 随 WS 丢失、SDK 重连不补拉，subscriberChangeListener
+    // 因此不会触发，subscribers 停在旧快照 → @ 弹窗搜不到新成员（octo-web#567）。
+    // 自带 5s 节流（lastSubscriberResyncAt），与重连的消息补拉节流相互独立。
+    // 复用进频道时的加载分支：超级群（含子区的超级群父群）拉第一页，普通群走服务端全量同步。
+    async resyncSubscribers() {
+        const now = Date.now()
+        if (now - this.lastSubscriberResyncAt < 5000) {
+            return
+        }
+        this.lastSubscriberResyncAt = now
+        try {
+            if (this.channel.channelType === ChannelTypeCommunityTopic) {
+                // 子区用父群成员。需镜像进频道时的分支：父群是超级群时只拉第一页，
+                // 否则会对几千人的超级群父群每次重连/回前台都全量同步（octo-web#568 review）。
+                const parentGroupNo = this.channelInfo?.orgData?.parentGroupNo
+                if (!parentGroupNo) {
+                    return
+                }
+                const parentChannel = new Channel(parentGroupNo, ChannelTypeGroup)
+                const parentChannelInfo = getImChannelInfo(WKSDK.shared(), parentChannel)
+                const isSuperGroup = parentChannelInfo?.orgData?.group_type == SuperGroup
+                if (isSuperGroup) {
+                    // 超级群父群：只拉第一页（与进频道时一致）
+                    this.subscribers = await WKApp.dataSource.channelDataSource.subscribers(parentChannel, {
+                        limit: 100,
+                        page: 1,
+                    })
+                } else {
+                    // 普通父群：全量同步后取缓存
+                    await syncImChannelSubscribers(WKSDK.shared(), parentChannel)
+                    this.subscribers = getImChannelSubscribers(WKSDK.shared(), parentChannel)
+                }
+                this._resolveSubscribersReady()
+                this.notifyListener()
+                return
+            }
+            if (this.channel.channelType !== ChannelTypeGroup) {
+                return
+            }
+            if (this.channelInfo?.orgData?.group_type == SuperGroup) {
+                // 超级群只拉第一页（与进频道时一致）
+                this.subscribers = await this.getFirstPageMembers()
+                this._resolveSubscribersReady()
+                setImChannelSubscribersCache(WKSDK.shared(), this.channel, this.subscribers)
+                notifyImSubscriberChangeListeners(WKSDK.shared(), this.channel)
+                this.notifyListener()
+            } else {
+                // 普通群走服务端全量同步，完成后 subscriberChangeListener 回调刷新
+                await syncImChannelSubscribers(WKSDK.shared(), this.channel)
+                this.reloadSubscribers()
+            }
+        } catch (e) {
+            console.warn("[ConversationVM] resyncSubscribers failed", e)
+        }
     }
 
     // 通过uid获取订阅者对象
@@ -1110,24 +1476,31 @@ export default class ConversationVM extends ProviderListener {
     updateMessageStatusBySendAck(ackPacket: SendackPacket) {
         const message = this.findMessageWithClientSeq(ackPacket.clientSeq)
         if (message) {
-            message.message.messageID = ackPacket.messageID.toString()
-            message.message.messageSeq = ackPacket.messageSeq
-            if (ackPacket.reasonCode === 1) {
-                // 发送成功后同步更新 order，确保 sortMessages 能正确排序
-                message.order = ackPacket.messageSeq * OrderFactor
-                this.updateLastMessageIfNeed(message)
-                message.status = MessageStatus.Normal
-                this.removeSendingMessageIfNeed(ackPacket.clientSeq, this.channel)
-            } else {
-                message.status = MessageStatus.Fail
-                const sendingMessage = this.getSendingMessageWithClientMsgNo(message.clientMsgNo)
-                if (sendingMessage) {
-                    sendingMessage.reasonCode = ackPacket.reasonCode
-                    this.fillOrder(sendingMessage)
+            const ackOrder = ackPacket.messageSeq * OrderFactor
+            this.forEachLocalMessageWithClientSeq(ackPacket.clientSeq, (localMessage) => {
+                localMessage.message.messageID = ackPacket.messageID.toString()
+                localMessage.message.messageSeq = ackPacket.messageSeq
+                localMessage.reasonCode = ackPacket.reasonCode
+                if (ackPacket.reasonCode === 1) {
+                    localMessage.order = ackOrder
+                    localMessage.status = MessageStatus.Normal
+                } else {
+                    localMessage.status = MessageStatus.Fail
+                    this.fillOrder(localMessage)
                 }
-
+            })
+            if (ackPacket.reasonCode === 1) {
+                // 发送成功后同步更新 order 并重排渲染列表，纠正本地回显阶段的临时位置。
+                message.order = ackOrder
+                this.updateLastMessageIfNeed(message)
+                this.removeSendingMessageIfNeed(ackPacket.clientSeq, this.channel)
+                this.messagesOfOrigin = ConversationVM.deduplicateMessages(this.sortMessages(this.messagesOfOrigin))
+                this.refreshMessages(this.messagesOfOrigin)
+                // message_sent 等的 sendack 补点已搬到 trackMessage.ts 的常驻全局监听
+                // (按 clientSeq 消费,与本 VM 生命周期无关),避免切频道致发送 VM 卸载后
+                // 事件被静默丢弃(见 PR #1320 review P1-3)。此处不再补点。
+                return
             }
-            message.reasonCode = ackPacket.reasonCode
         }
         this.notifyListener()
     }
@@ -1156,7 +1529,8 @@ export default class ConversationVM extends ProviderListener {
         }
         for (let i = this.messages.length - 1; i >= 0; i--) {
             const message = this.messages[i]
-            if(message.content.reply === undefined){
+            // 防御畸形消息：content 可能整体缺失（#465 保留了此类消息），用可选链避免读取 undefined.reply 崩溃。
+            if (message.content?.reply === undefined) {
                 continue
             }
             if (message.content.reply.messageID && message.content.reply.messageID === extra.messageID) {
@@ -1165,25 +1539,24 @@ export default class ConversationVM extends ProviderListener {
         }
         this.notifyListener()
     }
-    // 通过clientSeq获取消息对象（同时搜索 messages 和 sendQueue，避免 ack 丢失）
+    // 通过clientSeq获取消息对象（同时搜索本地列表/缓冲区/sendQueue，避免 ack 丢失）
     findMessageWithClientSeq(clientSeq: number): MessageWrap | undefined {
-        if (this.messages && this.messages.length > 0) {
-            for (let i = this.messages.length - 1; i >= 0; i--) {
-                const message = this.messages[i]
+        const findIn = (messages?: MessageWrap[]) => {
+            if (!messages || messages.length <= 0) {
+                return
+            }
+            for (let i = messages.length - 1; i >= 0; i--) {
+                const message = messages[i]
                 if (message.clientSeq === clientSeq) {
                     return message
                 }
             }
         }
-        // 消息可能还在 sendQueue 中（尚未通过 appendMessage 合并到 messages）
-        const sending = ConversationVM.sendQueue.get(this.channel.getChannelKey())
-        if (sending && sending.length > 0) {
-            for (let i = sending.length - 1; i >= 0; i--) {
-                if (sending[i].clientSeq === clientSeq) {
-                    return sending[i]
-                }
-            }
-        }
+
+        return findIn(this.messages)
+            || findIn(this.messagesOfOrigin)
+            || findIn(this.pendingMessages)
+            || findIn(ConversationVM.sendQueue.get(this.channel.getChannelKey()))
     }
 
     // 通过clientMsgNo获取消息对象
@@ -1312,12 +1685,10 @@ export default class ConversationVM extends ProviderListener {
     }
 
     // 刷新新消息数量
-    refreshNewMsgCount() {
+    async refreshNewMsgCount() {
 
         const oldUnreadCount = this.unreadCount
-        if (this.browseToMessageSeq == 0) {
-            this.unreadCount = 0
-        } else if (!this.lastMessage) { // 没有给定最新的消息 没办法算未读数量
+        if (!this.lastMessage) { // 没有给定最新的消息 没办法算未读数量
             this.unreadCount = 0
         } else if (this.lastMessage.send) { // // 如果最后一条消息是自己发的 则新消息数量为0
             this.browseToMessageSeq = this.lastMessage.messageSeq
@@ -1333,11 +1704,43 @@ export default class ConversationVM extends ProviderListener {
             const conversation = WKSDK.shared().conversationManager.findConversation(this.channel)
             if (conversation) {
                 conversation.unread = this.unreadCount
+                if (
+                    WKApp.shared.currentSpaceId &&
+                    conversation.channel.channelType === ChannelTypePerson &&
+                    conversation.extra?.spaceUnread !== undefined
+                ) {
+                    conversation.extra.spaceUnread = this.unreadCount
+                }
+                getBrowserUnreadConversationSync().publish({
+                    accountId: WKApp.loginInfo.uid,
+                    spaceId: WKApp.shared.currentSpaceId || "",
+                    channelId: conversation.channel.channelID,
+                    channelType: conversation.channel.channelType,
+                    unread: this.unreadCount,
+                })
+            }
+            // 未读清零时：先持久化到服务端，成功后再通知监听者 + 刷新 sidebar 快照（#203）。
+            // markConversationUnread 是异步 HTTP PUT，必须 await 确保 /sidebar/sync 读到
+            // 的是已持久化的状态，而不是旧快照。
+            let shouldClear = this.unreadCount === 0 && oldUnreadCount > 0
+            // 先通知本地监听者：conversation.unread 已归零，让会话列表 UI 立即反映，
+            // 不等待网络请求。sidebar-reload 才需要等服务端确认后再触发（#203）。
+            if (conversation) {
                 WKSDK.shared().conversationManager.notifyConversationListeners(conversation, ConversationAction.update)
             }
-            // 未读数变为0时立即同步到服务端，防止会话列表同步时拿到旧的未读数
-            if (this.unreadCount === 0 && oldUnreadCount > 0) {
-                WKApp.conversationProvider.markConversationUnread(this.channel, 0)
+            if (shouldClear) {
+                try {
+                    await WKApp.conversationProvider.markConversationUnread(this.channel, 0)
+                } catch (_e) {
+                    // 清未读失败时跳过 sidebar 刷新——服务端还是旧状态，
+                    // sync 拉回来的快照仍是旧值，刷新没有意义。
+                    shouldClear = false
+                }
+            }
+            // 仅未读清零且服务端确认后刷新 sidebar：按 schema sidebar/sync 拿到最新 follow 快照，
+            // 关注 tab 中 sidebar-only 项的角标才能归零。
+            if (shouldClear) {
+                WKApp.mittBus.emit("sidebar-reload" as any)
             }
         }
 
@@ -1385,25 +1788,42 @@ export default class ConversationVM extends ProviderListener {
     // 获取第一屏消息
     requestMessagesOfFirstPage(lcateMessageSeq?: number, stateCallback?: () => void) {
 
+        // Only an explicit positive argument represents a user-initiated
+        // locate (for example from global search). The undefined path below
+        // may derive a seq from unread/scroll-restoration state and must not
+        // flash a message on every normal conversation open.
+        const shouldHighlightLocatedMessage = typeof lcateMessageSeq === "number" && lcateMessageSeq > 0
         this.initLocateMessageSeq = 0
+        let initLocateOffsetY = 0
         if (lcateMessageSeq === undefined) {
             if (this.currentConversation) {
                 const remoteExtra = this.currentConversation.remoteExtra
+                const savedKeepMessageSeq = Number(remoteExtra.keepMessageSeq || 0)
+                const savedKeepOffsetY = Number(remoteExtra.keepOffsetY || 0)
+                const keepMessageSeq = Number.isFinite(savedKeepMessageSeq) ? savedKeepMessageSeq : 0
+                const keepOffsetY = Number.isFinite(savedKeepOffsetY) ? savedKeepOffsetY : 0
                 if (this.currentConversation.unread > 0) {
-                    if (remoteExtra.keepMessageSeq != 0 && remoteExtra.keepMessageSeq < this.browseToMessageSeq) {
-                        this.initLocateMessageSeq = remoteExtra.keepMessageSeq
+                    if (keepMessageSeq > 0 && keepMessageSeq < this.browseToMessageSeq) {
+                        this.initLocateMessageSeq = keepMessageSeq
+                        initLocateOffsetY = keepOffsetY
                     } else {
                         this.initLocateMessageSeq = this.browseToMessageSeq
                     }
 
                 } else {
-                    this.initLocateMessageSeq = remoteExtra.keepMessageSeq
+                    this.initLocateMessageSeq = keepMessageSeq
+                    initLocateOffsetY = keepMessageSeq > 0 ? keepOffsetY : 0
                 }
             }
         } else {
             this.initLocateMessageSeq = lcateMessageSeq
         }
-        return this.syncMessages(this.initLocateMessageSeq, stateCallback)
+        return this.syncMessages(
+            this.initLocateMessageSeq,
+            stateCallback,
+            initLocateOffsetY,
+            shouldHighlightLocatedMessage,
+        )
     }
 
     // 最近会话显示的最后一条消息的messageSeq
@@ -1416,8 +1836,14 @@ export default class ConversationVM extends ProviderListener {
     }
 
     // 同步消息
-    async syncMessages(initMessageSeq?: number, stateCallback?: () => void) {
+    async syncMessages(
+        initMessageSeq?: number,
+        stateCallback?: () => void,
+        locateOffsetY: number = 0,
+        highlightLocatedMessage: boolean = false,
+    ) {
         this.loading = true
+        this.liveFoldRevokeClientMsgNos.clear()
         this.notifyListener()
 
         const opts = new SyncMessageOptions()
@@ -1478,6 +1904,9 @@ export default class ConversationVM extends ProviderListener {
                 }
             }
         }
+        if (initMessage && highlightLocatedMessage) {
+            initMessage.locateRemind = true
+        }
 
         this.messagesOfOrigin = allMessages
         this.refreshAndLocateMessages(allMessages, initMessage, true, () => {
@@ -1488,11 +1917,117 @@ export default class ConversationVM extends ProviderListener {
             // loading 完成后，主动确保 bot 消息的 channelInfo 已载入
             // 修复：loading 期间 channelInfoListener 会被跳过，导致 AI 标识不显示
             this.ensureBotChannelInfos()
+        }, locateOffsetY)
+    }
+
+    async requestMessagesAroundMessageSeq(messageSeq: number, stateCallback?: () => void) {
+        if (!messageSeq || messageSeq <= 0) {
+            if (stateCallback) {
+                stateCallback()
+            }
+            return
+        }
+
+        this.loading = true
+        this.initLocateMessageSeq = 0
+        this.liveFoldRevokeClientMsgNos.clear()
+        this.notifyListener()
+
+        // 搜索定位不依赖当前已加载列表，而是以目标 seq 建立一个前后都可继续分页的窗口。
+        const anchorStartMessageSeq = Math.max(0, messageSeq - 1)
+        const olderOpts = new SyncMessageOptions()
+        olderOpts.limit = WKApp.config.pageSizeOfMessage
+        olderOpts.pullMode = PullMode.Down
+        olderOpts.startMessageSeq = anchorStartMessageSeq
+
+        const newerOpts = new SyncMessageOptions()
+        newerOpts.limit = WKApp.config.pageSizeOfMessage
+        newerOpts.pullMode = PullMode.Up
+        newerOpts.startMessageSeq = anchorStartMessageSeq
+
+        const [olderRemoteMessages, newerRemoteMessages] = await Promise.all([
+            WKApp.conversationProvider.syncMessages(this.channel, olderOpts),
+            WKApp.conversationProvider.syncMessages(this.channel, newerOpts),
+        ])
+        const toAvailableMessageWraps = (remoteMessages?: Message[]) => {
+            const messages = new Array<Message>()
+            if (remoteMessages && remoteMessages.length > 0) {
+                remoteMessages.forEach(msg => {
+                    if (!msg.isDeleted) {
+                        messages.push(msg)
+                    }
+                })
+            }
+            return this.sortMessages(this.toMessageWraps(messages))
+        }
+
+        const olderWraps = toAvailableMessageWraps(olderRemoteMessages)
+        const newerWraps = toAvailableMessageWraps(newerRemoteMessages)
+        const sendingMessages = this.getSendingMessages(this.channel)
+        let allMessages = ConversationVM.deduplicateMessages([...olderWraps, ...newerWraps, ...sendingMessages])
+        allMessages = this.sortMessages(allMessages)
+
+        const firstSeq = olderWraps.find(msg => msg.messageSeq > 0)?.messageSeq
+            || newerWraps.find(msg => msg.messageSeq > 0)?.messageSeq
+            || 0
+        const lastSeq = [...newerWraps].reverse().find(msg => msg.messageSeq > 0)?.messageSeq
+            || [...olderWraps].reverse().find(msg => msg.messageSeq > 0)?.messageSeq
+            || 0
+        const lastRemoteMessageSeq = this.conversationLastMessageSeq()
+        const olderRemoteCount = olderRemoteMessages?.length || 0
+        const newerRemoteCount = newerRemoteMessages?.length || 0
+
+        this.pulldownFinished = firstSeq > 0
+            ? firstSeq <= 1
+            : olderRemoteCount <= 0
+        if (lastRemoteMessageSeq > 0 && lastSeq > 0) {
+            this.pullupHasMore = lastSeq < lastRemoteMessageSeq
+        } else {
+            this.pullupHasMore = newerRemoteCount >= newerOpts.limit
+        }
+
+        if (!this.pullupHasMore && this.pendingMessages.length > 0) {
+            allMessages = this.sortMessages([...allMessages, ...this.pendingMessages])
+            this.pendingMessages = []
+        }
+
+        this.messagesOfOrigin = allMessages
+        this.refreshMessages(this.messagesOfOrigin, () => {
+            this.loading = false
+            if (stateCallback) {
+                stateCallback()
+            }
+            this.ensureBotChannelInfos()
         })
     }
+
+    private getMessageSortOrder(message: MessageWrap): number {
+        if (message.messageSeq && message.messageSeq > 0) {
+            return message.messageSeq * OrderFactor
+        }
+        if (Number.isFinite(message.order) && message.order > 0) {
+            return message.order
+        }
+        const timestamp = Number.isFinite(message.timestamp) && message.timestamp > 0 ? message.timestamp : 0
+        const clientSeq = Number.isFinite(message.clientSeq) && message.clientSeq > 0 ? message.clientSeq : 0
+        return PendingMessageOrderBase + timestamp * 1000 + clientSeq
+    }
+
     sortMessages(messages: MessageWrap[]) {
         return messages.sort((a, b) => {
-            return a.order - b.order
+            const orderDiff = this.getMessageSortOrder(a) - this.getMessageSortOrder(b)
+            if (orderDiff !== 0) {
+                return orderDiff
+            }
+            const timestampDiff = (a.timestamp || 0) - (b.timestamp || 0)
+            if (timestampDiff !== 0) {
+                return timestampDiff
+            }
+            const clientSeqDiff = (a.clientSeq || 0) - (b.clientSeq || 0)
+            if (clientSeqDiff !== 0) {
+                return clientSeqDiff
+            }
+            return (a.clientMsgNo || "").localeCompare(b.clientMsgNo || "")
         })
     }
 
@@ -1513,10 +2048,10 @@ export default class ConversationVM extends ProviderListener {
     }
 
     // 刷新消息列表并定位到某条消息
-    refreshAndLocateMessages(messages: MessageWrap[], locateMessage?: MessageWrap, scrollBottom?: boolean, callback?: () => void) {
+    refreshAndLocateMessages(messages: MessageWrap[], locateMessage?: MessageWrap, scrollBottom?: boolean, callback?: () => void, locateOffsetY: number = 0) {
         this.refreshMessages(messages, () => {
             if (locateMessage) {
-                this.scrollToMessage(locateMessage)
+                this.scrollToMessage(locateMessage, locateOffsetY)
             } else if (scrollBottom) {
                 this.scrollToBottom(false)
             }
@@ -1571,6 +2106,16 @@ export default class ConversationVM extends ProviderListener {
 
     // 刷新消息列表
     refreshMessages(messages: MessageWrap[], callback?: () => void, options?: { allowFoldAnimation?: boolean }) {
+        // 单点归一（#465）：content 整体缺失的畸形消息（如 payload.type=text 但
+        // 解码失败）会让 SDK 的 Message.contentType getter 以及 MessageWrap 的
+        // flame / parts 解引用 undefined 而崩页，且这一步发生在下面排序 / 去重 /
+        // 渲染读取 contentType 之前。这里在任何 contentType 读取之前补一个空文本
+        // content，让畸形消息渲染成空气泡而非拖垮整个消息列表。
+        for (const m of messages) {
+            if (m.message.content == null) {
+                m.message.content = new MessageText("")
+            }
+        }
         let newMessages = messages
         // 渲染前先按 order（seq）排序，防止延迟推送/重连补推导致消息位置错乱
         newMessages = this.sortMessages(newMessages)
@@ -1581,7 +2126,11 @@ export default class ConversationVM extends ProviderListener {
         for (let i = 0; i < newMessages.length; i++) {
             const message = newMessages[i]
             if (message.contentType === MessageContentType.text) {
-                message.content.text = ProhibitwordsService.shared.filter(message.content.text)
+                // 防御畸形文本消息：content 整体缺失时跳过，避免读取 undefined.text 崩溃（#465）。
+                const content = message.content
+                if (content) {
+                    content.text = ProhibitwordsService.shared.filter(content.text)
+                }
             }
         }
         this.messages = this.genMessageLinkedData(newMessages)
@@ -1692,8 +2241,13 @@ export default class ConversationVM extends ProviderListener {
     // 获取当前消息列表的最小序列号的消息
     getMessageMax(): MessageWrap | undefined {
         if (this.messagesOfOrigin && this.messagesOfOrigin.length > 0) {
-            let lastMsg = this.messagesOfOrigin[this.messagesOfOrigin.length - 1];
-            return lastMsg;
+            let maxMessage = this.messagesOfOrigin[0]
+            for (const message of this.messagesOfOrigin) {
+                if (this.getMessageSortOrder(message) > this.getMessageSortOrder(maxMessage)) {
+                    maxMessage = message
+                }
+            }
+            return maxMessage
         }
     }
 
@@ -1752,7 +2306,7 @@ export default class ConversationVM extends ProviderListener {
 
     // 格式化时间
     formatMessageTime(message: MessageWrap) {
-        return moment(message.timestamp * 1000).format('MM月DD日');
+        return moment(message.timestamp * 1000).format('YYYY-MM-DD');
     }
 
     // 获取历史分割线消息
@@ -1775,12 +2329,80 @@ export default class ConversationVM extends ProviderListener {
             }
         }
     }
+    private messageScrollElement(message: MessageWrap): HTMLElement | null {
+        const foldSession = message.messageSeq && message.messageSeq > 0
+            ? this.findFoldSessionByMessageSeq(message.messageSeq)
+            : undefined
+        if (foldSession?.isExpanded) {
+            const expandedElement = document.getElementById(this.foldSessionMessageElementId(message))
+            if (expandedElement) {
+                return expandedElement
+            }
+        }
+        if (!foldSession && message.messageSeq && message.messageSeq > 0) {
+            const seqElement = this.messageSeqElement(message.messageSeq)
+            if (seqElement) {
+                return seqElement
+            }
+        }
+        const element = document.getElementById(message.clientMsgNo)
+        if (element) {
+            return element
+        }
+        if (!foldSession) {
+            return null
+        }
+        return document.getElementById(foldSession.anchorId)
+    }
+
+    private scrollTopForElement(viewport: HTMLElement, element: HTMLElement, keepOffsetY: number): number {
+        const viewportRect = viewport.getBoundingClientRect()
+        const elementRect = element.getBoundingClientRect()
+        const hasRectLayout = viewportRect.height > 0
+            || elementRect.height > 0
+            || viewportRect.top !== 0
+            || elementRect.top !== 0
+
+        if (hasRectLayout) {
+            const anchorOffsetTop = viewport.scrollTop + elementRect.top - viewportRect.top
+            return getRestoredAnchorScrollTop({
+                anchorOffsetTop,
+                keepOffsetY,
+            })
+        }
+
+        return getRestoredAnchorScrollTop({
+            anchorOffsetTop: element.offsetTop,
+            keepOffsetY,
+        })
+    }
+
     // 滚动到指定的消息
-    scrollToMessage(message: MessageWrap) {
+    scrollToMessage(message: MessageWrap, offsetY: number = 0) {
+        const viewport = document.getElementById(this.messageContainerId)
+        const element = this.messageScrollElement(message)
+        const keepOffsetY = Number.isFinite(offsetY) ? Math.max(0, offsetY) : 0
+        if (viewport && element) {
+            viewport.scrollTop = this.scrollTopForElement(viewport, element, keepOffsetY)
+            return
+        }
         scroller.scrollTo(message.clientMsgNo, {
             containerId: this.messageContainerId,
             "duration": 0,
         });
+        if (keepOffsetY > 0) {
+            const restoreOffset = () => {
+                const nextViewport = document.getElementById(this.messageContainerId)
+                if (nextViewport) {
+                    nextViewport.scrollTop += keepOffsetY
+                }
+            }
+            if (typeof requestAnimationFrame === "function") {
+                requestAnimationFrame(restoreOffset)
+            } else {
+                setTimeout(restoreOffset, 0)
+            }
+        }
     }
     // 只滚动到底部
     scrollToBottom(animate: boolean) {
@@ -1799,9 +2421,7 @@ export default class ConversationVM extends ProviderListener {
 
     // 获取当前发送中的消息
     getSendingMessages(channel: Channel) {
-        let channelKey = channel.getChannelKey();
-        let sending = ConversationVM.sendQueue.get(channelKey);
-        return sending || [];
+        return this.reconcileSendingMessages(channel)
     }
     // 获取当前发送中的消息
     getSendingMessageWithClientMsgNo(clientMsgNo: string) {
@@ -1829,29 +2449,96 @@ export default class ConversationVM extends ProviderListener {
 
     // 发送消息
     async sendMessage(content: MessageContent, channel: Channel): Promise<Message> {
-        // DM 消息注入 space_id，让 BotFather 等 Bot 知道用户当前 Space
-        const spaceId = WKApp.shared.currentSpaceId
-        if (spaceId && channel.channelType === ChannelTypePerson) {
-            const originalEncodeJSON = content.encodeJSON.bind(content)
-            content.encodeJSON = () => {
-                const obj = originalEncodeJSON()
-                obj.space_id = spaceId
-                return obj
-            }
-            // 同步 contentObj，让本地回显也通过 filterPersonMessagesBySpace (#784)
-            content.contentObj = { ...(content.contentObj || {}), space_id: spaceId }
+        // 解散守卫（最底层）：所有走 vm.sendMessage 的入口最终都汇到这里再调
+        // chatManager.send，因此守卫下沉到此处即可覆盖输入框发送、重发等路径。
+        // 转发（单条 / 多选 / 合并）现在走 ForwardService.send 独立发送路径，
+        // 在 Service 层内部也做了 isConversationDisbanded 过滤（见 ForwardService.ts）；
+        // 两条路径互不依赖，各自保留 disband 守卫，互为保险。
+        // 群/子区解散后只读，直接 reject——组件层 sendMessage/resendMessage 另有 toast。
+        if (isConversationDisbanded(channel)) {
+            return Promise.reject(new Error("group disbanded"))
         }
-        const channelInfo = WKSDK.shared().channelManager.getChannelInfo(channel)
+        // 发送前注入两类业务字段（详细原因见 sendContentProxy.ts header）：
+        //   1. space_id —— 仅 DM (ChannelTypePerson)，让 BotFather 等 Bot
+        //      知道用户当前 Space (#784)。
+        //   2. mention.humans / mention.ais —— 任意 channel（DM + Group）。
+        //      `wukongimjssdk@1.3.5` 的 `MessageContent.encode()` 丢弃 mention
+        //      的 humans/ais 三态字段。群聊里 @所有AI 后 server 收不到
+        //      `mention.ais=1`，AI bot 不响应（octo-web#62 / YUJ-1378）。
+        //
+        // wrapSendContentForInjection 不会污染原始 content（重要：转发场景
+        // 同一 content 可能被多目标复用，直接 monkey-patch 会有副作用）。
+        const spaceId = WKApp.shared.currentSpaceId
+        const mentionAny = content.mention as any
+        const sendContent = wrapSendContentForInjection(content, {
+            spaceId: channel.channelType === ChannelTypePerson ? spaceId : null,
+            mentionHumans: !!(mentionAny && mentionAny.humans),
+            mentionAis: !!(mentionAny && mentionAny.ais),
+        })
+        const channelInfo = getImChannelInfo(WKSDK.shared(), channel)
         let setting = new Setting()
         if (channelInfo?.orgData.receipt === 1) {
             setting.receiptEnabled = true
         }
-        const message = await WKSDK.shared().chatManager.send(content, channel, setting)
+        const message = await WKSDK.shared().chatManager.send(sendContent, channel, setting)
         // dmwork-web#1069 R5：SDK 内部 `Message.fromSendPacket` 产物的 Message，
         // wire 不携带 from_home_space_* 等字段；在业务层收尾统一补一次，避免自发送
         // bubble 丢外部来源标识。已有值不覆盖、失败静默。
         applyMsgLevelExternalFieldsWithFallback(message, undefined)
+        // 破例2(octo-dap §5 / §5.4):记发送意图,sendack Normal 时消费补点。
+        // /newbot 只测前缀识别已知命令,不采集正文;意图里不含任何正文。
+        {
+            let botCreateEntry: string | undefined
+            let botCommandEvent: string | undefined
+            // botfather 命令(/newbot、/help…)是 botfather 专属;门按 channelID==="botfather" 判,
+            // 与 BOTFATHER_COMMAND_EVENTS 注释(§B)对齐。不用 SYSTEM_BOTS.has():该集合未来加入其它
+            // 系统 bot 时会让别的 bot 的 /command 文本误命中 botfather 事件(见二审 nit)。
+            if (channel.channelID === "botfather" && content instanceof MessageText) {
+                const text = (content.text || "").trim()
+                if (matchesCommandPrefix(text, "/newbot")) {
+                    botCreateEntry = "botfather_im"
+                } else {
+                    // 泛化:命令前缀→事件名(只判前缀选事件名,绝不把 content.text 存进 intent/props)
+                    botCommandEvent = matchBotfatherCommandEvent(text)
+                }
+            }
+            // 被 @ 的 AI bot 列表(供 ai_mentioned 补 bot_id/bot_type;system 判据仅 SYSTEM_BOTS,余为 custom)
+            let mentionedBots: Array<{ id: string; type: string }> | undefined
+            const mentionUids: string[] = Array.isArray(mentionAny && mentionAny.uids) ? mentionAny.uids : []
+            if (mentionUids.length > 0) {
+                const bots: Array<{ id: string; type: string }> = []
+                for (const uid of mentionUids) {
+                    const sub = this.subscribers?.find((s: any) => s.uid === uid)
+                    if (sub && sub.orgData && sub.orgData.robot === 1) {
+                        bots.push({ id: uid, type: SYSTEM_BOTS.has(uid) ? "system" : "custom" })
+                    }
+                }
+                if (bots.length > 0) mentionedBots = bots
+            }
+            // message_replied 的 is_ai_msg:被回复消息作者(content.reply.fromUID)是否 AI/bot。
+            // 走 isReplyAuthorAi(按 uid 查 person channelInfo 的 robot 标记),DM/群统一 ——
+            // 不再查 this.subscribers(仅群/子区填充,DM 恒空会把 human↔AI DM 回复误判 false;见 #1452 review P1)。
+            const replyFromUid = content.reply?.fromUID
+            const isReplyToAi: boolean | undefined = content.reply ? isReplyAuthorAi(replyFromUid) : undefined
+            rememberSendIntent(message.clientSeq, {
+                channelId: channel.channelID,
+                channelType: channel.channelType,
+                mentionAis: !!(mentionAny && mentionAny.ais),
+                botCreateEntry,
+                botCommandEvent,
+                isReply: !!content.reply,
+                // message_replied 的 message_id = 被回复消息的 ID(content.reply.messageID,
+                // 发送时即可得;server 侧新消息 id 此刻尚未分配)。无 reply 时 undefined,
+                // 但此时 isReply=false,message_replied 根本不发。
+                messageId: content.reply?.messageID,
+                isReplyToAi,
+                // ai_mentioned 的 user_id 由生产者注入,避免 leaf service trackMessage 静态 import App
+                userId: WKApp.loginInfo.uid || null,
+                mentionedBots,
+            })
+        }
         const messageWrap = new MessageWrap(message)
+        this.fillOrder(messageWrap)
 
         this.addSendMessageToQueue(messageWrap)
         return message
@@ -1868,13 +2555,13 @@ export default class ConversationVM extends ProviderListener {
         if (maxMessage) {
             if (message.clientMsgNo === maxMessage.clientMsgNo) {
                 if (maxMessage.preMessage) {
-                    message.order = maxMessage.preMessage.order + 1
+                    message.order = this.getMessageSortOrder(maxMessage.preMessage) + 1
                 } else {
                     message.order = OrderFactor + 1
                 }
 
             } else {
-                message.order = maxMessage.order + 1
+                message.order = this.getMessageSortOrder(maxMessage) + 1
             }
 
         } else {

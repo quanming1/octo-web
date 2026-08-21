@@ -1,13 +1,14 @@
 import { useState, useEffect, useCallback } from "react"
 import WKApp from "../App"
 import CategoryService, { CategoryItem } from "../Service/CategoryService"
+import { t } from "../i18n"
 
 export interface UseCategoryListResult {
     categories: CategoryItem[]
     isLoading: boolean
     error: string | null
     reload: () => void
-    createCategory: (name: string) => Promise<void>
+    createCategory: (name: string) => Promise<CategoryItem>
     renameCategory: (categoryId: string, name: string) => Promise<void>
     deleteCategory: (categoryId: string) => Promise<void>
     sortCategories: (categoryIds: string[]) => Promise<void>
@@ -31,7 +32,7 @@ export function useCategoryList(): UseCategoryListResult {
             // 保留所有项，类型守卫在 ConversationListGrouped 的 ValidCategoryItem 处处理。
             setCategories(result)
         } catch (e: any) {
-            setError(e?.message || "加载分组失败")
+            setError(e?.message || t("base.categoryList.loadFailed"))
         } finally {
             setIsLoading(false)
         }
@@ -42,13 +43,14 @@ export function useCategoryList(): UseCategoryListResult {
     }, [load])
 
     const createCategory = async (name: string) => {
-        if (!spaceId) throw new Error("未选中 Space")
-        await CategoryService.create(spaceId, { name })
+        if (!spaceId) throw new Error(t("base.categoryList.noSpaceSelected"))
+        const created = await CategoryService.create(spaceId, { name })
         await load()
+        return created
     }
 
     const renameCategory = async (categoryId: string, name: string) => {
-        if (!spaceId) throw new Error("未选中 Space")
+        if (!spaceId) throw new Error(t("base.categoryList.noSpaceSelected"))
         await CategoryService.update(spaceId, categoryId, { name })
         setCategories(prev =>
             prev.map(c => c.category_id === categoryId ? { ...c, name } : c)
@@ -56,13 +58,13 @@ export function useCategoryList(): UseCategoryListResult {
     }
 
     const deleteCategory = async (categoryId: string) => {
-        if (!spaceId) throw new Error("未选中 Space")
+        if (!spaceId) throw new Error(t("base.categoryList.noSpaceSelected"))
         await CategoryService.delete(spaceId, categoryId)
         setCategories(prev => prev.filter(c => c.category_id !== categoryId))
     }
 
     const sortCategories = async (categoryIds: string[]) => {
-        if (!spaceId) throw new Error("未选中 Space")
+        if (!spaceId) throw new Error(t("base.categoryList.noSpaceSelected"))
         await CategoryService.sort(spaceId, { category_ids: categoryIds })
         // 按新顺序重排本地数据
         setCategories(prev => {

@@ -5,17 +5,23 @@ export type VoiceMode = "smart" | "append_only" | "edit_only";
 
 export interface VoiceConfig {
   enabled: boolean;
-  max_duration: number;
+  max_duration?: number;
   max_file_size: number;
   local_enabled?: boolean;
   local_timeout_ms?: number;
   local_probe_url?: string;
   local_transcribe_url?: string;
+  feedback_url?: string;
+  feedback_privacy_url?: string;
+  feedback_user_agreement_url?: string;
+  engine?: string;
+  edit_mode?: string;
 }
 
 export interface TranscribeResult {
   text: string;
   m: string; // shortened model name from backend
+  request_id?: string;
 }
 
 export interface VoiceContextResponse {
@@ -56,10 +62,13 @@ export default class VoiceService {
     personalContext?: string,
     memberContext?: string,
     mode?: VoiceMode,
-    skipLocal?: boolean
+    skipLocal?: boolean,
+    channelType?: number,
+    allowFeedback?: boolean,
+    selfName?: string,
   ): Promise<TranscribeResult> {
     if (!skipLocal) {
-      const localResult = await LocalModelService.shared.transcribe(audio, contextText, chatContext, personalContext, memberContext, mode);
+      const localResult = await LocalModelService.shared.transcribe(audio, contextText, chatContext, personalContext, memberContext, mode, selfName);
       if (localResult) {
         return localResult;
       }
@@ -83,7 +92,34 @@ export default class VoiceService {
     if (mode) {
       formData.append("mode", mode);
     }
+    if (channelType !== undefined) {
+      formData.append("channel_type", String(channelType));
+    }
+    if (allowFeedback !== undefined) {
+      formData.append("allow_feedback", String(allowFeedback));
+    }
+    if (selfName) {
+      formData.append("self_name", selfName);
+    }
     return APIClient.shared.post("/voice/transcribe", formData);
+  }
+
+  /** @deprecated Local voice settings are now migrated to voiceSettingsStore. */
+  async putLocalConfig(config: { enabled: boolean; timeout_ms?: number; probe_url?: string; transcribe_url?: string }): Promise<void> {
+    await APIClient.shared.put("/voice/local-config", config);
+  }
+
+  /** @deprecated Local voice settings are now migrated to voiceSettingsStore. */
+  async getLocalConfig(): Promise<{ status: number; enabled: boolean; timeout_ms: number | null; probe_url: string | null; transcribe_url: string | null }> {
+    return APIClient.shared.get("/voice/local-config");
+  }
+
+  /** @deprecated Local voice settings are now migrated to voiceSettingsStore. */
+  async deleteLocalConfig(): Promise<void> { await APIClient.shared.delete("/voice/local-config"); }
+
+  /** @deprecated Local voice settings are now migrated to voiceSettingsStore. */
+  async resetLocalConfig(config: { enabled: boolean }): Promise<void> {
+    await APIClient.shared.post("/voice/local-config/reset", config);
   }
 
   async getVoiceContext(spaceId: string): Promise<VoiceContextResponse> {

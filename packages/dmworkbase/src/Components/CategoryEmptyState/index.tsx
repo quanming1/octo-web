@@ -1,4 +1,5 @@
 import React from "react"
+import { useI18n } from "../../i18n"
 import "./index.css"
 
 export interface CategoryEmptyStateProps {
@@ -26,20 +27,22 @@ const CategoryEmptyState: React.FC<CategoryEmptyStateProps> = ({
     noGroups,
     onStartGroup,
 }) => {
+    const { t } = useI18n()
+
     if (noGroups) {
         return (
             <div className="wk-category-empty-state">
                 <div className="wk-category-empty-state__icon-wrap">
                     <ChatIcon />
                 </div>
-                <p className="wk-category-empty-state__title">还没有群聊</p>
+                <p className="wk-category-empty-state__title">{t("base.categoryEmpty.noGroupsTitle")}</p>
                 <p className="wk-category-empty-state__desc">
-                    发起一个群聊，和朋友或同事一起聊天吧。
+                    {t("base.categoryEmpty.noGroupsDesc")}
                 </p>
                 {onStartGroup && (
                     <button className="wk-category-empty-state__primary-btn" onClick={onStartGroup}>
                         <PlusIcon />
-                        发起群聊
+                        {t("base.categoryEmpty.startGroup")}
                     </button>
                 )}
             </div>
@@ -53,13 +56,13 @@ const CategoryEmptyState: React.FC<CategoryEmptyStateProps> = ({
                     <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
                 </svg>
             </div>
-            <p className="wk-category-empty-state__title">整理你的群聊</p>
+            <p className="wk-category-empty-state__title">{t("base.categoryEmpty.organizeTitle")}</p>
             <p className="wk-category-empty-state__desc">
-                创建分组，把群聊按工作、项目、生活分类，快速找到想看的对话。
+                {t("base.categoryEmpty.organizeDesc")}
             </p>
             <button className="wk-category-empty-state__primary-btn" onClick={onCreateCategory}>
                 <PlusIcon />
-                新建分组
+                {t("base.categoryEmpty.createCategory")}
             </button>
         </div>
     )

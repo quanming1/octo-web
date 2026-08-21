@@ -6,7 +6,9 @@ Thanks for your interest in contributing to OCTO! 🐙 We welcome contributions 
 
 1. **Fork** the repo and create your branch from `main`.
 2. **Install dependencies** — see the project's README for setup instructions.
-3. **Make your changes** — follow existing code style.
+3. **Make your changes** — follow existing code style. For frontend feature or module work, read
+   [DEVELOPMENT.md](DEVELOPMENT.md) and
+   [docs/new-module-development-guide.md](docs/new-module-development-guide.md) before coding.
 4. **Add tests** — if you're fixing a bug or adding a feature, please add tests.
 5. **Update docs** — if behavior changes, update the README/docs accordingly.
 6. **Open a Pull Request** — fill in the PR template.
@@ -14,9 +16,21 @@ Thanks for your interest in contributing to OCTO! 🐙 We welcome contributions 
 ## Development Workflow
 
 - All changes go through a Pull Request.
-- PRs must pass CI before merging.
-- PRs require at least one approving review from a maintainer.
-- We use squash-merge to keep history clean.
+- PRs must pass CI before merging (the `Build` and `code-review` checks are required).
+- PRs require approving reviews from maintainers before merging; review routing is automatic via [`.github/CODEOWNERS`](.github/CODEOWNERS).
+- Keep your branch up to date with `main` — stale branches may miss required CI checks and need a rebase before they can merge.
+- We use squash-merge with a linear history to keep the log clean.
+
+## Review SLA
+
+We aim to give every PR a fast first response so contributing here stays low-friction:
+
+- **First review within 3 business days** of a PR being opened (or updated out of draft).
+- If a PR needs changes, maintainers leave concrete, actionable feedback rather than a bare rejection.
+- If a PR is superseded or out of scope, maintainers close it with a short, polite explanation.
+- A PR with no maintainer response after 3 business days is fair game to ping in the thread or in [Discussions](https://github.com/orgs/Mininglamp-OSS/discussions) — a nudge is welcome, not noise.
+
+Maintainers: keep no open PR older than ~14 days without a first review. Triage oldest-first.
 
 ## Commit Messages
 

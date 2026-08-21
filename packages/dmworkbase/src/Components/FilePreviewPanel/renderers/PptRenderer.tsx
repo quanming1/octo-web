@@ -8,6 +8,7 @@ import React, {
 import { LoaderCircle } from "lucide-react";
 import { BaseRendererProps } from "../types";
 import PptPageRenderer, { PptPageContent } from "./PptPageRenderer";
+import { useI18n } from "../../../i18n";
 import "./PptRenderer.css";
 
 /** PPT 页面数据 */
@@ -40,12 +41,13 @@ export interface PptRendererProps extends BaseRendererProps {
  * 2. URL 指向的 JSON 文件
  */
 const parsePptData = async (
-  url: string
+  url: string,
+  t: (key: string) => string
 ): Promise<{ data: PptData | null; error: string | null }> => {
   try {
     const response = await fetch(url);
     if (!response.ok) {
-      return { data: null, error: "加载 PPT 数据失败" };
+      return { data: null, error: t("base.filePreview.ppt.loadDataFailed") };
     }
 
     const json = await response.json();
@@ -55,14 +57,14 @@ const parsePptData = async (
       typeof json.total !== "number" ||
       !Array.isArray(json.data)
     ) {
-      return { data: null, error: "PPT 数据格式错误" };
+      return { data: null, error: t("base.filePreview.ppt.invalidData") };
     }
 
     return { data: json as PptData, error: null };
   } catch (err) {
     return {
       data: null,
-      error: err instanceof Error ? err.message : "解析 PPT 数据失败",
+      error: err instanceof Error ? err.message : t("base.filePreview.ppt.parseDataFailed"),
     };
   }
 };
@@ -74,6 +76,7 @@ const parsePptData = async (
  */
 const PptRenderer = forwardRef<PptRendererRef, PptRendererProps>(
   ({ file, onError, previewOnly = false }, ref) => {
+    const { t } = useI18n();
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [pptData, setPptData] = useState<PptData | null>(null);
@@ -99,7 +102,7 @@ const PptRenderer = forwardRef<PptRendererRef, PptRendererProps>(
         setLoading(true);
         setError(null);
 
-        const { data, error: parseError } = await parsePptData(file.url);
+        const { data, error: parseError } = await parsePptData(file.url, t);
 
         if (parseError) {
           setError(parseError);
@@ -112,7 +115,7 @@ const PptRenderer = forwardRef<PptRendererRef, PptRendererProps>(
       };
 
       loadPptData();
-    }, [file.url, onError]);
+    }, [file.url, onError, t]);
 
     // 加载中状态
     if (loading) {
@@ -120,7 +123,7 @@ const PptRenderer = forwardRef<PptRendererRef, PptRendererProps>(
         <div className="wk-file-preview-ppt-renderer wk-file-preview-ppt-renderer--loading">
           <LoaderCircle className="wk-file-preview-ppt-renderer__spinner" />
           <span className="wk-file-preview-ppt-renderer__loading-text">
-            正在加载演示文稿...
+            {t("base.filePreview.ppt.loadingPresentation")}
           </span>
         </div>
       );
@@ -139,7 +142,7 @@ const PptRenderer = forwardRef<PptRendererRef, PptRendererProps>(
     if (!pptData || pptData.data.length === 0) {
       return (
         <div className="wk-file-preview-ppt-renderer wk-file-preview-ppt-renderer--empty">
-          暂无 PPT 内容
+          {t("base.filePreview.ppt.noContent")}
         </div>
       );
     }

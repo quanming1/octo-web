@@ -4,11 +4,13 @@ import Section from "./section";
 import ItemMessage from "./item-message";
 import WKApp from "../../App";
 import "./tab-all.css"
-import WKSDK, { Channel, ChannelInfo, ChannelInfoListener, ChannelTypePerson, MessageContentType } from "wukongimjssdk";
+import { Channel, ChannelInfo, ChannelInfoListener, ChannelTypePerson, MessageContentType } from "wukongimjssdk";
 import { MessageContentTypeConst } from "../../Service/Const";
 import { debounce, throttle } from "../../Utils/rateLimit";
 import { resolveExternalForViewer } from "../../Utils/externalViewer";
 import VisibilityTrigger from "../VisibilityTrigger";
+import { I18nContext } from "../../i18n";
+import { addCurrentImChannelInfoListener, fetchCurrentImChannelInfo, getCurrentImChannelInfo } from "../../im-runtime/currentChannelRuntime";
 
 
 interface TabAllProps {
@@ -20,6 +22,8 @@ interface TabAllProps {
 }
 
 export default class TabAll extends Component<TabAllProps> {
+    static contextType = I18nContext;
+    declare context: React.ContextType<typeof I18nContext>;
 
     handleScroll = throttle((event: React.UIEvent<HTMLDivElement>) => {
         const { scrollTop, scrollHeight, clientHeight } = event.currentTarget;
@@ -33,6 +37,7 @@ export default class TabAll extends Component<TabAllProps> {
     // 懒加载：仅视口内的消息才拉发送者 channelInfo。debounce 合批 forceUpdate，
     // fetchedUids 防止同 uid 重复请求。
     private _channelInfoListener!: ChannelInfoListener
+    private unsubscribeChannelInfoListener?: () => void
     private _forceUpdateDebounced = debounce(() => this.forceUpdate(), 150)
     private fetchedUids = new Set<string>()
 
@@ -42,22 +47,21 @@ export default class TabAll extends Component<TabAllProps> {
                 this._forceUpdateDebounced()
             }
         }
-        WKSDK.shared().channelManager.addListener(this._channelInfoListener)
+        this.unsubscribeChannelInfoListener = addCurrentImChannelInfoListener(this._channelInfoListener)
     }
 
     componentWillUnmount() {
-        if (this._channelInfoListener) {
-            WKSDK.shared().channelManager.removeListener(this._channelInfoListener)
-        }
+        this.unsubscribeChannelInfoListener?.()
+        this.unsubscribeChannelInfoListener = undefined
         this._forceUpdateDebounced.cancel()
     }
 
     private requestSenderChannelInfoIfNeeded = (fromUid: string) => {
         if (!fromUid || this.fetchedUids.has(fromUid)) return
         const senderChannel = new Channel(fromUid, ChannelTypePerson)
-        if (WKSDK.shared().channelManager.getChannelInfo(senderChannel)) return
+        if (getCurrentImChannelInfo(senderChannel)) return
         this.fetchedUids.add(fromUid)
-        WKSDK.shared().channelManager.fetchChannelInfo(senderChannel)
+        void fetchCurrentImChannelInfo(senderChannel)
     }
 
     /**
@@ -81,7 +85,7 @@ export default class TabAll extends Component<TabAllProps> {
         // 兜底：从发送者 channelInfo.orgData 取（tab-all 已经 fetch/获取过）
         if (!homeId && (isExternalLegacy === undefined || isExternalLegacy === null) && item.from_uid) {
             const senderChannel = new Channel(item.from_uid, ChannelTypePerson)
-            const ci = WKSDK.shared().channelManager.getChannelInfo(senderChannel)
+            const ci = getCurrentImChannelInfo(senderChannel)
             const org = ci?.orgData
             if (org) {
                 // homeId / isExternalLegacy 已经过 !homeId / undefined|null 判据，
@@ -113,17 +117,17 @@ export default class TabAll extends Component<TabAllProps> {
             {
                 !this.props.searchResult && !this.props.keyword && (
                     <div style={{ textAlign: 'center', color: 'var(--wk-text-tertiary, #9498A8)', padding: '48px 0', fontSize: '13px' }}>
-                        输入关键词开始搜索
+                        {this.context.t("base.globalSearch.startHint")}
                     </div>
                 )
             }
 
             {
                 existMessages ? (
-                    <Section title="消息">
+                    <Section title={this.context.t("base.globalSearch.messages")}>
                         {
                             this.props.searchResult?.messages.map((item: any) => {
-                                let digest = "[未知消息]"
+                                let digest = this.context.t("base.globalSearch.unknownMessage")
                                 if(item.content) {
                                     digest = item.content.conversationDigest
                                 }else {
@@ -138,7 +142,7 @@ export default class TabAll extends Component<TabAllProps> {
                                 let sender;
                                 if (item.channel?.channel_type !== ChannelTypePerson && item.from_uid && item.from_uid !== "") {
                                     const senderChannel = new Channel(item.from_uid, ChannelTypePerson)
-                                    const channelInfo = WKSDK.shared().channelManager.getChannelInfo(senderChannel)
+                                    const channelInfo = getCurrentImChannelInfo(senderChannel)
                                     if (channelInfo) {
                                         sender = channelInfo.title
                                     }

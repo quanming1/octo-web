@@ -11,17 +11,18 @@ const meta: Meta<typeof SidebarTabBar> = {
     docs: {
       description: {
         component: `
-群聊/私聊 Tab 切换栏。
+关注/最近 Tab 切换栏。
 
 **Props：**
-- \`activeTab\`：当前激活的 Tab（'group' | 'dm'）
-- \`groupUnread\`：群聊未读总数
-- \`dmUnread\`：私聊未读总数
+- \`activeTab\`：当前激活的 Tab（'follow' | 'recent'）
+- \`followUnread\`：关注未读总数
+- \`recentUnread\`：最近未读总数
 - \`onTabChange\`：切换回调
+- \`onActiveTabClick\`：点击当前已激活 Tab 时触发
 
 **States：**
-- 群聊激活
-- 私聊激活
+- 关注激活
+- 最近激活
 - 有未读角标（数字 / 99+）
 - 无未读
         `,
@@ -42,18 +43,18 @@ type Story = StoryObj<typeof SidebarTabBar>
 
 // ─── 静态 Stories ───────────────────────────────────────────
 
-export const GroupsActive: Story = {
-  name: '群聊 Tab 激活',
+export const FollowActive: Story = {
+  name: '关注 Tab 激活',
   args: {
-    activeTab: 'group',
-    groupUnread: 5,
-    dmUnread: 3,
+    activeTab: 'follow',
+    followUnread: 5,
+    recentUnread: 3,
     onTabChange: () => {},
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     const btns = canvas.getAllByRole('button')
-    // 群聊按钮有 active 样式
+    // 关注按钮有 active 样式
     expect(btns[0].className).toContain('active')
     // 角标数字正确
     expect(canvas.getByText('5')).toBeInTheDocument()
@@ -61,12 +62,12 @@ export const GroupsActive: Story = {
   },
 }
 
-export const DmsActive: Story = {
-  name: '私聊 Tab 激活',
+export const RecentActive: Story = {
+  name: '最近 Tab 激活',
   args: {
-    activeTab: 'dm',
-    groupUnread: 5,
-    dmUnread: 3,
+    activeTab: 'recent',
+    followUnread: 5,
+    recentUnread: 3,
     onTabChange: () => {},
   },
   play: async ({ canvasElement }) => {
@@ -79,13 +80,12 @@ export const DmsActive: Story = {
 export const NoBadge: Story = {
   name: '无未读角标',
   args: {
-    activeTab: 'group',
-    groupUnread: 0,
-    dmUnread: 0,
+    activeTab: 'follow',
+    followUnread: 0,
+    recentUnread: 0,
     onTabChange: () => {},
   },
   play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement)
     // 无角标元素
     expect(canvasElement.querySelectorAll('.wk-sidebar-tabbar__badge').length).toBe(0)
   },
@@ -94,9 +94,9 @@ export const NoBadge: Story = {
 export const LargeUnread: Story = {
   name: '99+ 角标',
   args: {
-    activeTab: 'group',
-    groupUnread: 999,
-    dmUnread: 100,
+    activeTab: 'follow',
+    followUnread: 999,
+    recentUnread: 100,
     onTabChange: () => {},
   },
   play: async ({ canvasElement }) => {
@@ -111,12 +111,12 @@ export const LargeUnread: Story = {
 export const TabSwitch: Story = {
   name: 'Tab 切换交互（play function）',
   render: () => {
-    const [tab, setTab] = useState<SidebarTab>('group')
+    const [tab, setTab] = useState<SidebarTab>('follow')
     return (
       <SidebarTabBar
         activeTab={tab}
-        groupUnread={5}
-        dmUnread={3}
+        followUnread={5}
+        recentUnread={3}
         onTabChange={setTab}
       />
     )
@@ -125,17 +125,46 @@ export const TabSwitch: Story = {
     const canvas = within(canvasElement)
     const btns = canvas.getAllByRole('button')
 
-    // 初始：群聊 active
+    // 初始：关注 active
     expect(btns[0].className).toContain('active')
     expect(btns[1].className).not.toContain('active')
 
-    // 点击私聊 Tab
+    // 点击最近 Tab
     await userEvent.click(btns[1])
     expect(btns[1].className).toContain('active')
     expect(btns[0].className).not.toContain('active')
 
-    // 再点回群聊
+    // 再点回关注
     await userEvent.click(btns[0])
     expect(btns[0].className).toContain('active')
+  },
+}
+
+export const ActiveTabClick: Story = {
+  name: '点击已激活 Tab',
+  render: () => {
+    const [activeClicks, setActiveClicks] = useState<SidebarTab[]>([])
+    return (
+      <div>
+        <SidebarTabBar
+          activeTab="recent"
+          followUnread={0}
+          recentUnread={3}
+          onTabChange={() => {}}
+          onActiveTabClick={(tab) => setActiveClicks((items) => [...items, tab])}
+        />
+        <div data-testid="active-clicks">{activeClicks.join(',')}</div>
+      </div>
+    )
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const btns = canvas.getAllByRole('button')
+
+    await userEvent.click(btns[1])
+    expect(canvas.getByTestId('active-clicks').textContent).toBe('recent')
+
+    await userEvent.click(canvas.getByText('3'))
+    expect(canvas.getByTestId('active-clicks').textContent).toBe('recent,recent')
   },
 }

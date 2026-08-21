@@ -1,9 +1,13 @@
+import React from 'react';
+import ReactDOM from 'react-dom';
+import { act } from 'react-dom/test-utils';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
+import { fireEvent, screen, waitFor } from '@testing-library/dom';
+import '@testing-library/jest-dom';
 import ClawCoreFilesTab from '../ClawCoreFilesTab';
 import AgentCardService from '../../../Service/AgentCardService';
 import type { AgentCardData } from '../../../Service/AgentCardService';
+import { I18nProvider, i18n } from '../../../i18n';
 
 // Mock AgentCardService
 vi.mock('../../../Service/AgentCardService', () => ({
@@ -13,6 +17,23 @@ vi.mock('../../../Service/AgentCardService', () => ({
     buildFileGroups: vi.fn(),
   },
 }));
+
+let container: HTMLDivElement;
+
+const render = (ui: React.ReactElement) => {
+  act(() => {
+    ReactDOM.render(<I18nProvider>{ui}</I18nProvider>, container);
+  });
+
+  return {
+    container,
+    rerender: (nextUi: React.ReactElement) => {
+      act(() => {
+        ReactDOM.render(<I18nProvider>{nextUi}</I18nProvider>, container);
+      });
+    },
+  };
+};
 
 describe('ClawCoreFilesTab', () => {
   const mockBotId = '01913a2b3c4d5e6f7890abcd_bot';
@@ -46,10 +67,17 @@ describe('ClawCoreFilesTab', () => {
   ];
 
   beforeEach(() => {
+    i18n.setLocale('zh-CN', { notify: false, persist: false });
     vi.clearAllMocks();
+    container = document.createElement('div');
+    document.body.appendChild(container);
   });
 
   afterEach(() => {
+    act(() => {
+      ReactDOM.unmountComponentAtNode(container);
+    });
+    container.remove();
     vi.restoreAllMocks();
   });
 
@@ -92,7 +120,6 @@ describe('ClawCoreFilesTab', () => {
   });
 
   it('应该在点击重试按钮时重新加载', async () => {
-    const user = userEvent.setup();
     vi.mocked(AgentCardService.getAgentCard).mockRejectedValueOnce(new Error('Network error'));
 
     render(<ClawCoreFilesTab botId={mockBotId} />);
@@ -106,7 +133,9 @@ describe('ClawCoreFilesTab', () => {
     vi.mocked(AgentCardService.buildFileGroups).mockReturnValue(mockFileGroups);
 
     const retryButton = screen.getByText('重试');
-    await user.click(retryButton);
+    act(() => {
+      fireEvent.click(retryButton);
+    });
 
     await waitFor(() => {
       expect(screen.getByTestId('file-viewer')).toBeInTheDocument();

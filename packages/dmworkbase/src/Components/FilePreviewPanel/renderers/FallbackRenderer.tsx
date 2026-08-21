@@ -11,6 +11,8 @@ import {
 } from "lucide-react";
 import { BaseRendererProps } from "../types";
 import { formatFileSize } from "../config";
+import { downloadFile } from "../../../Utils/download";
+import { useI18n } from "../../../i18n";
 import "./FallbackRenderer.css";
 
 export interface FallbackRendererProps extends BaseRendererProps {}
@@ -63,19 +65,14 @@ function getFileIcon(
  */
 const FallbackRenderer: React.FC<FallbackRendererProps> = ({ file }) => {
   const [loading, setLoading] = useState(false);
+  const { t } = useI18n();
 
   const handleDownload = async () => {
     if (loading) return;
 
     setLoading(true);
     try {
-      const a = document.createElement("a");
-      a.href = file.url;
-      a.download = file.name || "file";
-      a.target = "_blank";
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
+      await downloadFile(file.url, file.name || "file");
     } finally {
       // 模拟下载延迟，给用户反馈
       setTimeout(() => setLoading(false), 500);
@@ -110,6 +107,7 @@ const FallbackRenderer: React.FC<FallbackRendererProps> = ({ file }) => {
 
         {/* 下载按钮 */}
         <button
+          type="button"
           className="wk-file-preview-fallback-renderer__download-btn"
           onClick={handleDownload}
           disabled={loading}
@@ -122,14 +120,14 @@ const FallbackRenderer: React.FC<FallbackRendererProps> = ({ file }) => {
           ) : (
             <Download size={16} />
           )}
-          <span>下载</span>
+          <span>{t("base.filePreview.download")}</span>
         </button>
       </div>
 
       {/* 提示信息 */}
       <div className="wk-file-preview-fallback-renderer__hint">
         <Info size={16} />
-        <span>暂不支持预览此文件类型</span>
+        <span>{t("base.filePreview.unsupportedType")}</span>
       </div>
     </div>
   );

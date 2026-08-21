@@ -3,6 +3,7 @@ import { Component, ReactNode, createRef } from "react";
 import ConversationContext from "../Conversation/context";
 import { Toast } from "@douyinfe/semi-ui";
 import IconClick from "../IconClick";
+import { t } from "../../i18n";
 
 import "./index.css";
 
@@ -24,6 +25,7 @@ export default class FileToolbar extends Component<FileToolbarProps> {
     // 通过比较焦点所在的 .wk-messageinput-box 和当前 toolbar 所在的 .wk-messageinput-box
     // 确保只有焦点所在的输入框响应粘贴，避免重复上传。
     this.pasteListen = (event: ClipboardEvent) => {
+      if (event.defaultPrevented) return;
       const activeBox = document.activeElement?.closest?.(
         ".wk-messageinput-box"
       );
@@ -53,16 +55,18 @@ export default class FileToolbar extends Component<FileToolbarProps> {
         // 每次粘贴时获取最新的 conversationContext，避免闭包捕获旧引用
         const { conversationContext } = this.props;
         // 粘贴来源标记为 'paste'
-        const err = conversationContext.addPendingAttachments(files, "paste");
-        if (err) Toast.error(err);
+        void conversationContext.addPendingAttachments(files, "paste").then((err) => {
+          if (err) Toast.error(err);
+        });
       }
     };
     document.addEventListener("paste", this.pasteListen);
 
     // 拖拽文件 → 入队（视为上传来源）
     conversationContext.setDragFileCallback((file: File) => {
-      const err = conversationContext.addPendingAttachments([file], "upload");
-      if (err) Toast.error(err);
+      void conversationContext.addPendingAttachments([file], "upload").then((err) => {
+        if (err) Toast.error(err);
+      });
     });
   }
 
@@ -76,7 +80,7 @@ export default class FileToolbar extends Component<FileToolbarProps> {
     (event.target as HTMLInputElement).value = "";
   };
 
-  onFileChange = () => {
+  onFileChange = async () => {
     const { conversationContext } = this.props;
     const files = Array.from(this.$fileInput?.files || []);
     if (!files || files.length === 0) return;
@@ -87,11 +91,11 @@ export default class FileToolbar extends Component<FileToolbarProps> {
     );
     const hasDuplicate = files.some((f) => currentNames.has(f.name));
     if (hasDuplicate) {
-      Toast.warning("包含同名文件，已追加到待发送列表");
+      Toast.warning(t("base.fileToolbar.duplicateAdded"));
     }
 
     // 通过上传按钮选择的文件，标记为 'upload'
-    const err = conversationContext.addPendingAttachments(files, "upload");
+    const err = await conversationContext.addPendingAttachments(files, "upload");
     if (err) {
       Toast.error(err);
     }
@@ -108,6 +112,7 @@ export default class FileToolbar extends Component<FileToolbarProps> {
       <div className="wk-filetoolbar" ref={this.containerRef}>
         <IconClick
           icon={typeof icon === "string" ? <img src={icon} alt="" /> : icon}
+          data-testid="input-attachment-btn"
           onClick={this.chooseFile}
           size="sm"
         />

@@ -1,4 +1,5 @@
 export const TOP_HISTORY_TRIGGER_OFFSET = 250
+export const BOTTOM_SCROLL_TOLERANCE = 20
 
 export interface PulldownScrollRestoreInput {
     previousScrollHeight: number
@@ -6,9 +7,29 @@ export interface PulldownScrollRestoreInput {
     nextScrollHeight: number
 }
 
+export interface ScrollAnchorOffsetInput {
+    scrollTop: number
+    anchorOffsetTop: number
+}
+
+export interface AnchorScrollRestoreInput {
+    anchorOffsetTop: number
+    keepOffsetY: number
+}
+
 export function getPulldownRestoredScrollTop(input: PulldownScrollRestoreInput): number {
     const nextScrollTop = input.previousScrollTop + (input.nextScrollHeight - input.previousScrollHeight)
     return nextScrollTop < 0 ? 0 : nextScrollTop
+}
+
+export function getScrollAnchorOffsetY(input: ScrollAnchorOffsetInput): number {
+    const offsetY = input.scrollTop - input.anchorOffsetTop
+    return offsetY < 0 ? 0 : offsetY
+}
+
+export function getRestoredAnchorScrollTop(input: AnchorScrollRestoreInput): number {
+    const scrollTop = input.anchorOffsetTop + input.keepOffsetY
+    return scrollTop < 0 ? 0 : scrollTop
 }
 
 export function shouldPulldownOnWheel(deltaY: number, scrollTop: number, isFullScreen: boolean): boolean {
@@ -19,4 +40,17 @@ export function shouldPulldownOnWheel(deltaY: number, scrollTop: number, isFullS
         return true
     }
     return scrollTop <= TOP_HISTORY_TRIGGER_OFFSET
+}
+
+export function shouldShowScrollToBottom(
+    scrollOffsetTop: number,
+    lastMessageHeight?: number
+): boolean {
+    if (scrollOffsetTop <= BOTTOM_SCROLL_TOLERANCE) {
+        return false
+    }
+    if (lastMessageHeight === undefined) {
+        return true
+    }
+    return scrollOffsetTop > lastMessageHeight + BOTTOM_SCROLL_TOLERANCE
 }

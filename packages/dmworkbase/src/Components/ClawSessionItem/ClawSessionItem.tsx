@@ -1,13 +1,25 @@
 import React, { useState } from "react";
+import { Locale, useI18n } from "../../i18n";
+import type { I18nFormatter } from "../../i18n";
 import "./ClawSessionItem.css";
 
 /**
  * 格式化 ISO 8601 时间为 "2026-05-10 12:30:00"
  */
-function formatDateTime(isoString: string): string {
+function formatDateTime(isoString: string, locale: Locale, format: I18nFormatter): string {
   const date = new Date(isoString);
   if (Number.isNaN(date.getTime())) {
     return "—";
+  }
+  if (locale !== "zh-CN") {
+    return format.dateTime(date, {
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      month: "2-digit",
+      second: "2-digit",
+      year: "numeric",
+    });
   }
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -59,6 +71,7 @@ export interface ClawSessionItemProps {
  * AC-8: 上下文进度条 > 70% 显示警告色
  */
 export default function ClawSessionItem({ session }: ClawSessionItemProps) {
+  const { t, locale, format } = useI18n();
   const [collapsed, setCollapsed] = useState(true); // 默认折叠
 
   const {
@@ -193,7 +206,7 @@ export default function ClawSessionItem({ session }: ClawSessionItemProps) {
 
             {/* 模型 */}
             <div className="wk-session-field">
-              <span className="wk-session-field__label">模型</span>
+              <span className="wk-session-field__label">{t("base.claw.session.model")}</span>
               <span
                 className="wk-session-field__value"
                 data-testid="claw-session-model"
@@ -204,12 +217,12 @@ export default function ClawSessionItem({ session }: ClawSessionItemProps) {
 
             {/* 最近活跃时间 */}
             <div className="wk-session-field">
-              <span className="wk-session-field__label">最近活跃时间</span>
+              <span className="wk-session-field__label">{t("base.claw.session.lastActiveAt")}</span>
               <span
                 className="wk-session-field__value"
                 data-testid="claw-session-last-active"
               >
-                {formatDateTime(lastActiveAt)}
+                {formatDateTime(lastActiveAt, locale, format)}
               </span>
             </div>
 
@@ -229,7 +242,7 @@ export default function ClawSessionItem({ session }: ClawSessionItemProps) {
 
             {/* 上下文窗口（占满 3 列） */}
             <div className="wk-session-field wk-session-field--full">
-              <span className="wk-session-field__label">上下文窗口</span>
+              <span className="wk-session-field__label">{t("base.claw.session.contextWindow")}</span>
               <div className="wk-context-bar" data-testid="claw-context-bar">
                 {/* 进度条轨道 */}
                 <div className="wk-context-bar__track">

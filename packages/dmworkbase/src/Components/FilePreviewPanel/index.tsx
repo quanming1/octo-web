@@ -1,7 +1,9 @@
 import React from "react";
 import { X, Download, ExternalLink } from "lucide-react";
 import { fileRendererRegistry } from "./registry";
+import { downloadFile } from "../../Utils/download";
 import { FilePreviewInfo, FilePreviewPanelProps, getExtension } from "./types";
+import { useI18n } from "../../i18n";
 import "./index.css";
 
 /**
@@ -11,20 +13,17 @@ import "./index.css";
 const FilePreviewPanel: React.FC<FilePreviewPanelProps> = ({
   file,
   onClose,
+  showOpenExternal = true,
 }) => {
+  const { t } = useI18n();
+
   if (!file) return null;
 
   const ext = getExtension(file.extension, file.name);
   const { renderer: Renderer } = fileRendererRegistry.getRenderer(ext);
 
   const handleDownload = () => {
-    const a = document.createElement("a");
-    a.href = file.url;
-    a.download = file.name || "file";
-    a.target = "_blank";
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    void downloadFile(file.url, file.name || "file");
   };
 
   const handleOpenExternal = () => {
@@ -43,23 +42,25 @@ const FilePreviewPanel: React.FC<FilePreviewPanelProps> = ({
           {file.name}
         </div>
         <div className="wk-file-preview-actions">
+          {showOpenExternal && (
+            <button
+              className="wk-file-preview-action"
+              title={t("base.filePreview.openInNewWindow")}
+              onClick={handleOpenExternal}
+            >
+              <ExternalLink size={18} />
+            </button>
+          )}
           <button
             className="wk-file-preview-action"
-            title="在新窗口打开"
-            onClick={handleOpenExternal}
-          >
-            <ExternalLink size={18} />
-          </button>
-          <button
-            className="wk-file-preview-action"
-            title="下载"
+            title={t("base.filePreview.download")}
             onClick={handleDownload}
           >
             <Download size={18} />
           </button>
           <button
             className="wk-file-preview-action wk-file-preview-close"
-            title="关闭"
+            title={t("base.filePreview.close")}
             onClick={onClose}
           >
             <X size={20} />

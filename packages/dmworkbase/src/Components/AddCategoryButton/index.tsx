@@ -1,4 +1,5 @@
 import React from "react"
+import { useI18n } from "../../i18n"
 import "./index.css"
 
 export interface AddCategoryButtonProps {
@@ -6,10 +7,12 @@ export interface AddCategoryButtonProps {
 }
 
 const AddCategoryButton: React.FC<AddCategoryButtonProps> = ({ onClick }) => {
+    const { t } = useI18n()
+
     return (
         <button className="wk-add-category-btn" onClick={onClick}>
             <span>+</span>
-            <span>新建分组</span>
+            <span>{t("base.categoryEmpty.createCategory")}</span>
         </button>
     )
 }

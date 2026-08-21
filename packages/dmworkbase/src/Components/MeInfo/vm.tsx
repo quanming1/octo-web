@@ -1,15 +1,5 @@
-import React from "react";
-import QRCodeMy from "../QRCodeMy";
 import WKApp from "../../App";
-import RouteContext, { FinishButtonContext, RouteContextConfig } from "../../Service/Context";
 import { ProviderListener } from "../../Service/Provider";
-import { Row, Section } from "../../Service/Section";
-import { InputEdit } from "../InputEdit";
-import { ListItem, ListItemIcon } from "../ListItem";
-import { Sex, SexSelect } from "../SexSelect";
-import { ListItemAvatar } from "../ListItemAvatar";
-import RealnameVerifiedBadge from "../RealnameVerifiedBadge";
-import axios from "axios";
 import { Toast } from "@douyinfe/semi-ui";
 import WKSDK, { Channel } from "wukongimjssdk";
 import { ChannelInfoListener } from "wukongimjssdk";
@@ -17,6 +7,25 @@ import { ChannelInfo, ChannelTypePerson } from "wukongimjssdk";
 import { Convert } from "../../Service/Convert";
 import { isRealnameVerified } from "../../Utils/displayName";
 import { resolveRealnameVerifyUrl } from "./realnameVerifyUrl";
+import { t } from "../../i18n";
+import UserService from "../../Service/UserService";
+import { addImChannelInfoListener } from "../../im-runtime/channelRuntime";
+import { getElectronLinksBridge } from "../../electron/desktopBridge";
+import { isHttpOrigin, resolveWebOrigin } from "../../Utils/webOrigin";
+
+/**
+ * 「实验性功能」入口在 MeInfo 默认隐藏 —— 通过连击「OCTO 号」行 5 次解锁
+ * （类似 Android 开发者模式）。解锁后写 localStorage flag，主面板重新
+ * 渲染时读 flag 决定是否挂入口。
+ *
+ * - LAB_MODE_TAP_TARGET：触发解锁需要的连击次数。
+ * - LAB_MODE_TAP_WINDOW_MS：相邻两次点击的最大时间间隔（毫秒），超出则计数重置。
+ *   2000ms 对照 Android 开发者模式的 1500–2000ms 经验值，留一点余量给慢手用户。
+ * - LAB_MODE_STORAGE_KEY：localStorage key，独立命名空间避免和其它 flag 撞。
+ */
+const LAB_MODE_TAP_TARGET = 5;
+const LAB_MODE_TAP_WINDOW_MS = 2000;
+const LAB_MODE_STORAGE_KEY = "lab_mode_enabled";
 
 /**
  * MeInfoVM — 自己的「个人信息 / 设置」页面 ViewModel
@@ -26,8 +35,7 @@ import { resolveRealnameVerifyUrl } from "./realnameVerifyUrl";
  *   verify-service 翻译接口。
  * GH #1174：IdP 域名改为按环境从后端 appconfig 下发的
  *   `oidc_providers[].account_url` 字段读, 而非硬编码 prod URL。
- *   im-test 会拿到 `accounts-test.imocto.cn`, im-prod 拿到 `accounts.xming.ai`,
- *   和 NavSettingsPanel 「账户中心」入口口径一致。
+ *   测试/生产环境地址均由 appconfig 下发，和 NavSettingsPanel「账户中心」入口口径一致。
  *
  * GH #1180（Phase 2e 闭环）:im-test 实机发现原方案有 2 个闭环 bug,
  *   本 VM 的职责是把前端部分修好:
@@ -57,9 +65,22 @@ import { resolveRealnameVerifyUrl } from "./realnameVerifyUrl";
  */
 export class MeInfoVM extends ProviderListener {
 
+    constructor(private readonly onRealnameStatusChange?: (verified: boolean) => void) {
+        super()
+    }
+
     channelInfoListener!:ChannelInfoListener
+    unsubscribeChannelInfoListener?: () => void
     /** 本页加载时主动拉取的自身 profile（含 realname_verified / real_name） */
     selfChannelInfo?: ChannelInfo
+
+    /**
+     * 「OCTO 号」行的连击解锁状态。实例变量即可 —— 不需要进 state，因为
+     * 中间过程不渲染 UI（只在第 N 次解锁的瞬间才 Toast + notifyListener）。
+     * 计数窗口逻辑见 LAB_MODE_TAP_WINDOW_MS 注释。
+     */
+    private labModeTapCount = 0
+    private labModeLastTapTime = 0
 
     didMount(): void {
         this.channelInfoListener = (channelInfo:ChannelInfo)=>{
@@ -77,7 +98,7 @@ export class MeInfoVM extends ProviderListener {
             this.selfChannelInfo = channelInfo
             this.notifyListener()
         }
-        WKSDK.shared().channelManager.addListener(this.channelInfoListener)
+        this.unsubscribeChannelInfoListener = addImChannelInfoListener(WKSDK.shared(), this.channelInfoListener)
 
         // pull-from-idp endpoint 已废弃(dmworkim 侧),本页打开时仅做两件事:
         //   1. 同步清掉 ?verified=1 query(回跳兜底,避免二次进入重复触发)
@@ -104,7 +125,8 @@ export class MeInfoVM extends ProviderListener {
     }
 
     didUnMount(): void {
-        WKSDK.shared().channelManager.removeListener(this.channelInfoListener)
+        this.unsubscribeChannelInfoListener?.()
+        this.unsubscribeChannelInfoListener = undefined
     }
 
     /**
@@ -114,6 +136,7 @@ export class MeInfoVM extends ProviderListener {
     private syncRealnameFromOrgData(orgData: any) {
         const verified = isRealnameVerified(orgData)
         WKApp.loginInfo.realnameVerified = verified
+        this.onRealnameStatusChange?.(verified)
         if (verified && typeof orgData?.real_name === "string" && orgData.real_name.length > 0) {
             WKApp.loginInfo.realName = orgData.real_name
         } else {
@@ -130,7 +153,7 @@ export class MeInfoVM extends ProviderListener {
         const uid = WKApp.loginInfo.uid
         if (!uid) return
         try {
-            const res = await WKApp.apiClient.get<any>(`users/${uid}`)
+            const res = await UserService.getUserProfile(uid)
             const channelInfo = Convert.userToChannelInfo(res)
             this.selfChannelInfo = channelInfo
             this.syncRealnameFromOrgData(channelInfo.orgData)
@@ -164,8 +187,7 @@ export class MeInfoVM extends ProviderListener {
      * URL 解析口径（resolveRealnameVerifyUrl）：
      *   - 按 loginInfo.loginProvider 在 remoteConfig.oidcProviders 里查
      *     对应 provider 的 accountUrl, 拼 `${accountUrl}/profile/info?anchor=verification&return_to=…`。
-     *     与 NavSettingsPanel「账户中心」入口口径一致（accounts-test.imocto.cn
-     *     on im-test / accounts.xming.ai on im-prod, 后端下发）。
+ *     与 NavSettingsPanel「账户中心」入口口径一致（按环境由后端下发）。
      *   - loginProvider=local / 空 / provider 无 account_url / provider 不在
      *     下发列表里 → Toast 明示, 不跳转。严禁回退到任何硬编码 prod 域。
      *
@@ -189,10 +211,30 @@ export class MeInfoVM extends ProviderListener {
         //   - 原 URL `/me`(无 query)→ returnTo `/me?verified=1`
         //   - 原 URL `/me?verified=0` → returnTo `/me?verified=1`(URLSearchParams.set 覆盖旧值)
         //   - hash 不带入 —— IdP 对超长 return_to / 含 fragment 的 URL 可能校验失败
+        // Round-8 (yujiawei B2 / Jerry-Xin B1): building return_to from
+        // window.location on the packaged file:// shell produced
+        // https://<api-host>/<asar-filesystem-path>/index.html?… — leaking
+        // local paths into IdP logs and landing on a 404, so ?verified=1
+        // never fired. The return target is now a real web route: the
+        // document origin+path when http(s), otherwise the API-origin /me
+        // route with the same query (the ?verified=1 landing handler works
+        // from any surface). resolveWebOrigin is the shared allowlist
+        // helper; WKApp.apiClient is the injected apiURL source (importing
+        // the APIClient singleton here would pull axios side effects into
+        // this module's unit-test import chain).
         const returnToParams = new URLSearchParams(window.location.search)
         returnToParams.set("verified", "1")
         const returnToQuery = returnToParams.toString()
-        const returnTo = `${window.location.origin}${window.location.pathname}${returnToQuery ? "?" + returnToQuery : ""}`
+        const docOrigin = window.location.origin
+        const webOriginValue = resolveWebOrigin(
+            docOrigin,
+            WKApp.apiClient?.config?.apiURL,
+        )
+        const returnTo = isHttpOrigin(docOrigin)
+            ? `${docOrigin}${window.location.pathname}${returnToQuery ? "?" + returnToQuery : ""}`
+            : webOriginValue
+              ? `${webOriginValue}/me${returnToQuery ? "?" + returnToQuery : ""}`
+              : `${docOrigin}${window.location.pathname}${returnToQuery ? "?" + returnToQuery : ""}`
 
         // 读按环境下发的 account_url —— 防止把 im-test 用户甩到 prod IdP。
         // 具体行为合约见 resolveRealnameVerifyUrl 的 JSDoc 和 __tests__/realnameVerifyUrl.test.ts。
@@ -207,18 +249,40 @@ export class MeInfoVM extends ProviderListener {
                     // 理论上到这里时用户已经登录；空 provider 一般是 SID 存储格式历史遗留,
                     // 展示同 local 的提示即可,引导用户联系管理员。
                 case "local_account":
-                    Toast.error("当前账号不支持在线实名认证，请联系管理员")
+                    Toast.error(t("base.me.realname.unsupported"))
                     break
                 case "no_account_url":
                     // appconfig 没下发对应 provider 的 account_url：要么配置漏了,
                     // 要么用户登录用的 provider 已被后端下掉。兜底 Toast, 不跳 prod。
-                    Toast.error("当前环境未配置实名认证入口，请稍后再试或联系管理员")
+                    Toast.error(t("base.me.realname.notConfigured"))
                     break
             }
             return
         }
         const verifyUrl = resolved.url
         // 新 tab 打开,必须能区分「真被浏览器拦截」vs「成功打开」。
+        //
+        // Desktop shell: use the dedicated IPC bridge — setWindowOpenHandler
+        // routes everything to the system browser, so the web-era
+        // about:blank dance would never produce a usable window reference.
+        const linksBridge = getElectronLinksBridge();
+        if (linksBridge) {
+            // verifyUrl is always an absolute http(s) URL (resolved from the
+            // account_url provider config), so no origin normalization needed.
+            linksBridge
+                .openExternal(verifyUrl)
+                .then((result) => {
+                    if (!result.ok) {
+                        Toast.warning(t("base.me.realname.popupBlocked"))
+                    }
+                })
+                .catch(() => {
+                    Toast.warning(t("base.me.realname.popupBlocked"))
+                })
+            return
+        }
+        // Web: the about:blank dance stays. See the comment below for why
+        // `window.open(url, "_blank", "noopener,noreferrer")` is wrong here.
         //
         // Jerry R3 blocking:
         //   之前写法 `window.open(url, "_blank", "noopener,noreferrer")` 有致命坑 ——
@@ -237,7 +301,7 @@ export class MeInfoVM extends ProviderListener {
             // 弹窗被浏览器拦截:提示用户允许弹窗后重试,不自动替换当前 tab。
             // 即使用户不允许,当前 tab 的 MeInfo 状态保留,避免 "?verified=1 handler
             // 无法触发" 的二次事故。
-            Toast.warning("浏览器拦截了新窗口，请允许本站弹窗后重试「去认证」")
+            Toast.warning(t("base.me.realname.popupBlocked"))
             return
         }
         // 手动解除 opener,等价 noopener 安全隔离(防 IdP 通过 window.opener 反操作本页)。
@@ -250,194 +314,157 @@ export class MeInfoVM extends ProviderListener {
         opened.location.href = verifyUrl
     }
 
-    uploadAvatar(file: File) {
-        const param = new FormData();
-        param.append("file", file);
-        return axios.post(`users/${WKApp.loginInfo.uid}/avatar`, param, {
-            headers: { "Content-Type": "multipart/form-data", "token": WKApp.loginInfo.token || "" },
-        }).catch(error => {
-        })
+    uid(): string {
+        return WKApp.loginInfo.uid || ""
     }
 
-    updateMyInfo(field: string, value: string) {
-        let param: any = {}
-        param[field] = value
-        return WKApp.apiClient.put("user/current", param).catch((err) => {
-            Toast.error(err.msg)
-        })
+    currentUserChannel(uid = this.uid()): Channel {
+        return new Channel(uid, ChannelTypePerson)
     }
 
-    inputEditPush(context: RouteContext<any>, defaultValue: string, onFinish: (value: string) => Promise<void>, placeholder?: string,maxCount?:number) {
-        let value: string
-        let finishButtonContext: FinishButtonContext
-        context.push(<InputEdit maxCount={maxCount} defaultValue={defaultValue} placeholder={placeholder} onChange={(v) => {
-            value = v
-            if (!value || value === "") {
-                finishButtonContext.disable(true)
-            } else {
-                finishButtonContext.disable(false)
-            }
-        }}></InputEdit>, new RouteContextConfig({
-            showFinishButton: true,
-            onFinishContext: (finishBtnContext) => {
-                finishButtonContext = finishBtnContext
-                finishBtnContext.disable(true)
-            },
-            onFinish: async () => {
-                finishButtonContext.loading(true)
-                await onFinish(value)
-                finishButtonContext.loading(false)
-
-                context.pop()
-            }
-        }))
+    appName(): string {
+        return WKApp.config.appName
     }
 
-    /**
-     * 「名字」行的 subTitle — 已认证时展示 「real_name ✓ 已实名」，
-     * 未认证时退化为普通昵称字符串。
-     * 已实名时的 displayName 走 `loginInfo.selfDisplayName()`，和
-     * 气泡 / QRCode / 好友申请文案同一处结算，规则改动全局一致。
-     */
-    private nameRowSubTitle(): React.ReactNode {
-        if (WKApp.loginInfo.realnameVerified !== true) {
-            return WKApp.loginInfo.name || ""
+    name(): string {
+        return WKApp.loginInfo.name || ""
+    }
+
+    selfDisplayName(): string {
+        if (WKApp.loginInfo.realnameVerified === true) {
+            return WKApp.loginInfo.selfDisplayName()
         }
-        return (
-            <span style={{ display: "inline-flex", alignItems: "center" }}>
-                {WKApp.loginInfo.selfDisplayName()}
-                <RealnameVerifiedBadge />
-            </span>
-        )
+        return WKApp.loginInfo.name || ""
+    }
+
+    shortNo(): string {
+        return WKApp.loginInfo.shortNo || ""
+    }
+
+    sex(): number {
+        const sex = Number(WKApp.loginInfo.sex)
+        // Keep the legacy app/backend contract as 0 = female, 1 = male.
+        // Treat 2 as female defensively if a newer payload appears, but do not
+        // write 2 back from this component.
+        return sex === 0 || sex === 2 ? 0 : 1
+    }
+
+    sexLabel(): string {
+        const sex = this.sex()
+        if (sex === 1) {
+            return t("base.me.male")
+        }
+        return t("base.me.female")
+    }
+
+    isRealnameVerified(): boolean {
+        return WKApp.loginInfo.realnameVerified === true
+    }
+
+    uploadAvatar(file: File, uid = this.uid()) {
+        return UserService.uploadUserAvatar(uid, file)
+    }
+
+    markAvatarChanged(uid = this.uid()) {
+        if (!uid) return
+        const channel = this.currentUserChannel(uid)
+        WKApp.shared.changeChannelAvatarTag(channel)
+        WKApp.shared.myUserAvatarChange()
+    }
+
+    updateMyInfo(field: string, value: string | number) {
+        return UserService.updateCurrentUser({ [field]: value }).catch((err) => {
+            Toast.error(err?.msg || t("base.me.updateFailed"))
+            throw err
+        })
+    }
+
+    async updateName(value: string) {
+        await this.updateMyInfo("name", value)
+        WKApp.loginInfo.name = value
+        WKApp.loginInfo.save()
+        this.notifyListener()
+    }
+
+    async updateSex(sex: number) {
+        const normalizedSex = sex === 1 ? 1 : 0
+        await this.updateMyInfo("sex", normalizedSex.toString())
+        WKApp.loginInfo.sex = normalizedSex
+        WKApp.loginInfo.save()
+        this.notifyListener()
     }
 
     /**
      * 格式化「已认证 · 2025-03」展示文本。
      * verified_at 字段后端若缺失，只展示「已认证」不拼年月，避免显示 NaN。
      */
-    private formatVerifiedAtLabel(): string {
+    formatVerifiedAtLabel(): string {
         const ts = WKApp.loginInfo.realnameVerifiedAt
         if (!ts || typeof ts !== "number" || ts <= 0) {
-            return "已认证"
+            return t("base.me.realname.verified")
         }
         // 后端通常发秒级时间戳，兼容毫秒
         const ms = ts > 10_000_000_000 ? ts : ts * 1000
         const d = new Date(ms)
         if (Number.isNaN(d.getTime())) {
-            return "已认证"
+            return t("base.me.realname.verified")
         }
         const yyyy = d.getFullYear()
         const mm = String(d.getMonth() + 1).padStart(2, "0")
-        return `已认证 · ${yyyy}-${mm}`
+        return t("base.me.realname.verifiedWithDate", {
+            values: { year: yyyy, month: mm },
+        })
     }
 
-    sections(context: RouteContext<any>) {
-
-        let sections = new Array<Section>()
-        sections.push(new Section({
-            rows: [
-                new Row({
-                    cell: ListItemAvatar,
-                    properties: {
-                        title: `头像`,
-                        context: context,
-                        avatar: <img style={{ "width": "24px", "height": "24px", "borderRadius": "50%" }} src={WKApp.shared.avatarUser(WKApp.loginInfo.uid || "")}></img>,
-                        onFileUpload: async (f: File) => {
-                            await this.uploadAvatar(f)
-                            WKApp.shared.changeChannelAvatarTag(new Channel(WKApp.loginInfo.uid||"", ChannelTypePerson))
-                        }
-                    }
-                }),
-                new Row({
-                    cell: ListItem,
-                    properties: {
-                        title: "名字",
-                        subTitle: this.nameRowSubTitle(),
-                        onClick: () => {
-                            this.inputEditPush(context, WKApp.loginInfo.name || "", async (value) => {
-                                if (value.trim() === "") {
-                                    Toast.error("名字不能为空！")
-                                    return
-                                }
-                                return this.updateMyInfo("name",value).then(()=>{
-                                    WKApp.loginInfo.name = value
-                                    WKApp.loginInfo.save()
-                                })
-                            }, "设置名字",20)
-                        }
-                    }
-                }),
-                new Row({
-                    cell: ListItem,
-                    properties: {
-                        title: `${WKApp.config.appName}号`,
-                        subTitle: WKApp.loginInfo.shortNo,
-                        onClick: () => {
-
-                        }
-                    }
-                }),
-                new Row({
-                    cell: ListItemIcon,
-                    properties: {
-                        title: `我的二维码`,
-                        icon: <img style={{ "width": "24px", "height": "24px" }} src={require("./../../assets/icon_qrcode.png")}></img>,
-                        onClick: () => {
-                            context.push(<QRCodeMy disableHeader={true}></QRCodeMy>)
-                        }
-                    }
-                })
-            ]
-        }))
-
-        let sex = WKApp.loginInfo.sex === 0 ? Sex.Female : Sex.Male
-        let sexStr = "男"
-        if (sex === Sex.Female) {
-            sexStr = "女"
+    /**
+     * 「OCTO 号」行连击解锁实验性功能 —— 类似 Android 开发者模式。
+     *
+     * 计数语义：
+     *   - 与上次点击间隔 < LAB_MODE_TAP_WINDOW_MS → 计数 +1（连击保持）。
+     *   - 否则重置为 1（新一轮连击的第一下）。
+     *   - 达到 LAB_MODE_TAP_TARGET → 写 localStorage flag、Toast 成功、
+     *     调 notifyListener 触发主面板重渲染，把入口挂出来；同时清零计数
+     *     避免再连击重复触发 Toast。
+     *
+     * 已解锁时直接 no-op：不重弹 Toast，避免反复点击噪音；用户若想关闭实验性
+     * 功能，目前没有 UI 入口（后续若需要可放在 ExperimentalFeatures 子页面里做开关）。
+     *
+     * localStorage 写入失败（隐私模式 / 配额满）静默吞掉 —— 用户最多体验到
+     * 「点 5 下没反应」，不阻塞主页面其它交互。
+     */
+    handleShortNoTap() {
+        if (this.isLabModeEnabled()) {
+            return
         }
+        const now = Date.now()
+        if (now - this.labModeLastTapTime < LAB_MODE_TAP_WINDOW_MS) {
+            this.labModeTapCount += 1
+        } else {
+            this.labModeTapCount = 1
+        }
+        this.labModeLastTapTime = now
+        if (this.labModeTapCount < LAB_MODE_TAP_TARGET) {
+            return
+        }
+        this.labModeTapCount = 0
+        try {
+            window.localStorage.setItem(LAB_MODE_STORAGE_KEY, "1")
+        } catch {
+            // 隐私模式 / 配额满 / 非浏览器宿主下静默降级 —— 不阻塞主流程。
+            return
+        }
+        Toast.success(t("base.me.labEnabled"))
+        this.notifyListener()
+    }
 
-        sections.push(new Section({
-            rows: [
-                new Row({
-                    cell: ListItem,
-                    properties: {
-                        title: "性别",
-                        subTitle: sexStr,
-                        onClick: () => {
-                            context.push(<SexSelect sex={sex} onSelect={ async (sex) => {
-                                this.updateMyInfo("sex",sex.toString())
-                                context.pop()
-                                WKApp.loginInfo.sex = sex
-                                WKApp.loginInfo.save()
-                            }}></SexSelect>)
-                        }
-                    }
-                }),
-            ]
-        }))
-
-        // 账号安全 · 实名认证。
-        // Phase 2a：未认证点击直跳 IdP 账户页。
-        const verified = !!WKApp.loginInfo.realnameVerified
-        sections.push(new Section({
-            title: "账号安全",
-            rows: [
-                new Row({
-                    cell: ListItem,
-                    properties: {
-                        title: "实名认证",
-                        subTitle: verified
-                            ? this.formatVerifiedAtLabel()
-                            : "去认证",
-                        onClick: () => {
-                            if (verified) return
-                            this.startRealnameVerify()
-                        }
-                    }
-                })
-            ]
-        }))
-
-        return sections
+    /**
+     * 读 localStorage 的 lab_mode flag。读失败（譬如沙箱）一律按未解锁处理。
+     */
+    isLabModeEnabled(): boolean {
+        try {
+            return window.localStorage.getItem(LAB_MODE_STORAGE_KEY) === "1"
+        } catch {
+            return false
+        }
     }
 }

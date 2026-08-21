@@ -6,6 +6,7 @@ import "./index.css";
 import { IconSearchStroked } from "@douyinfe/semi-icons";
 import { animateScroll, scroller } from "react-scroll";
 import AiBadge from "../AiBadge";
+import { I18nContext } from "../../i18n";
 
 export class IndexTableItem {
   id!: string;
@@ -38,6 +39,9 @@ export default class IndexTable extends Component<
   IndexTableProps,
   IndexTableState
 > {
+  static contextType = I18nContext;
+  declare context: React.ContextType<typeof I18nContext>;
+
   constructor(props: IndexTableProps) {
     super(props);
     this.state = {
@@ -232,7 +236,7 @@ export default class IndexTable extends Component<
                 onChange={(v) => {
                   this.onSearch(v.target.value);
                 }}
-                placeholder={"搜索"}
+                placeholder={this.context.t("base.common.search")}
                 ref={(rf) => {}}
                 type="text"
                 style={{ fontSize: "17px" }}

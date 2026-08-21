@@ -1,19 +1,31 @@
-import { Channel, ChannelTypePerson, WKSDK, Message } from "wukongimjssdk";
+import { Channel, WKSDK, Message } from "wukongimjssdk";
 import WKApp from "./App";
 import React, { Component, ReactNode } from "react";
 import { ChatContentPage } from "./Pages/Chat";
 import { EndpointCategory, EndpointID } from "./Service/Const";
 import { EndpointManager } from "./Service/Module";
 import ConversationContext from "./Components/Conversation/context";
+import { isChannelSearchEnabled } from "./features/channelSearch/feature";
 
 export class MessageContextMenus {
   title!: string;
   onClick?: () => void;
+  /** 测试锚点（kebab-case），透传到菜单项 <li> 的 data-testid，供埋点规则命中 */
+  testid?: string;
 }
 
 export class ShowConversationOptions {
   // 聊天消息定位的messageSeq
   initLocateMessageSeq?: number;
+  /** 打开会话后同时展开右侧聊天记录搜索面板 */
+  openChannelSearch?: boolean;
+  /**
+   * sidebar 列表内点击会话时传 true，避免被强制切到 recent。外部入口
+   * （联系人/全局搜索/通知/bot store 等）不传，让 EndpointCommon 默认
+   * 把 sidebar 切到 recent —— recent 是 filter='all'，能展示并高亮目标
+   * 会话；不切的话用户在 follow tab 上打开未关注会话会"消失"。
+   */
+  fromSidebarList?: boolean;
 }
 
 /**
@@ -68,9 +80,8 @@ export class EndpointCommon {
   }
 
   showConversation(channel: Channel, opts?: ShowConversationOptions) {
-    WKApp.shared.openChannel = channel;
-
     const dispatch = () => {
+      WKApp.shared.openChannel = channel;
       EndpointManager.shared.invoke(EndpointID.showConversation, {
         channel: channel,
         opts: opts,
@@ -83,8 +94,7 @@ export class EndpointCommon {
     // event. Without this delay the UI can end up in a broken state when
     // the user later switches back to another tab.
     if (WKApp.switchToMenuById && WKApp.currentMenuId !== "chat") {
-      WKApp.switchToMenuById("chat");
-      setTimeout(dispatch, 50);
+      WKApp.switchToMenuById("chat", () => setTimeout(dispatch, 50));
       return;
     }
 
@@ -121,9 +131,15 @@ export class EndpointCommon {
           opts = param.opts
         }
 
-        const targetTab = channel.channelType === ChannelTypePerson ? "dm" : "group";
-        WKApp.mittBus.emit("wk:switch-sidebar-tab", targetTab);
-
+        // 外部入口（联系人/全局搜索/通知/bot store）打开会话时把 sidebar 切到
+        // recent —— recent tab filter='all'，不论目标是否关注都能展示并高亮；留在
+        // follow tab 时未关注的会话不会出现在列表里也无法激活。sidebar 列表内
+        // 点击则带 fromSidebarList=true，保持当前 tab，避免点 follow 列表里的
+        // 会话被强切到 recent。followedKeys 检查放在 sidebar 列表点击侧（已在
+        // follow tab 里的项必然 followed），这里不做 React-tree-外的同步读。
+        if (!opts.fromSidebarList) {
+          WKApp.mittBus.emit("wk:switch-sidebar-tab", "recent");
+        }
         let initLocateMessageSeq = 0;
         if (opts && opts.initLocateMessageSeq && opts.initLocateMessageSeq > 0) {
           initLocateMessageSeq = opts.initLocateMessageSeq;
@@ -153,6 +169,9 @@ export class EndpointCommon {
             key={key}
             channel={channel}
             initLocateMessageSeq={initLocateMessageSeq}
+            initialShowChannelSearch={
+              !!opts.openChannelSearch && isChannelSearchEnabled(channel)
+            }
           ></ChatContentPage>
         );
       },
@@ -269,11 +288,12 @@ export class EndpointCommon {
     );
   }
 
-  organizationalLayer(channel: Channel | null, options?: { defaultCategoryId?: string; onSuccess?: () => void }): void {
+  organizationalLayer(channel: Channel | null, options?: { defaultCategoryId?: string; onSuccess?: () => void; keepSidebarTab?: boolean }): void {
     return EndpointManager.shared.invoke(EndpointCategory.organizationalLayer, {
       channel: channel,
       defaultCategoryId: options?.defaultCategoryId,
       onSuccess: options?.onSuccess,
+      keepSidebarTab: options?.keepSidebarTab,
     });
   }
 
@@ -289,47 +309,57 @@ export class EndpointCommon {
     );
   }
 
-  chatMatterPanel(channel: Channel, onClose: () => void): JSX.Element | undefined {
-    return EndpointManager.shared.invoke(EndpointCategory.chatMatterPanel, {
+  chatSummaryPanel(
+    channel: Channel,
+    onClose: () => void,
+    summaryPanelView?: "history" | "new",
+  ): JSX.Element | undefined {
+    return EndpointManager.shared.invoke(EndpointCategory.chatSummaryPanel, {
       channel,
       onClose,
+      summaryPanelView,
     });
   }
 
-  registerChatMatterPanel(
+  registerChatSummaryPanel(
     sid: string,
     callback: (param: any) => JSX.Element | undefined
   ) {
     EndpointManager.shared.setMethod(
-      EndpointCategory.chatMatterPanel,
+      EndpointCategory.chatSummaryPanel,
       (param) => {
         return callback(param);
       },
       {
-        category: EndpointCategory.chatMatterPanel,
+        category: EndpointCategory.chatSummaryPanel,
       }
     );
   }
 
-  /** v0.7 Matter 详情面板（跟子区/文件预览/事项列表可并存） */
-  chatMatterDetailPanel(channel: Channel, onClose: () => void): JSX.Element | undefined {
-    return EndpointManager.shared.invoke(EndpointCategory.chatMatterDetailPanel, {
-      channel,
-      onClose,
-    });
+  chatWebhookIssuePreview(target: {
+    workspaceSlug: string;
+    issueIdentifier: string;
+    sourceUrl: string;
+  }): JSX.Element | undefined {
+    return EndpointManager.shared.invoke(
+      EndpointCategory.chatWebhookIssuePreview,
+      target
+    );
   }
 
-  registerChatMatterDetailPanel(
+  registerChatWebhookIssuePreview(
     sid: string,
-    callback: (param: any) => JSX.Element | undefined
+    callback: (target: {
+      workspaceSlug: string;
+      issueIdentifier: string;
+      sourceUrl: string;
+    }) => JSX.Element | undefined
   ) {
     EndpointManager.shared.setMethod(
-      EndpointCategory.chatMatterDetailPanel,
-      (param) => {
-        return callback(param);
-      },
+      EndpointCategory.chatWebhookIssuePreview,
+      callback,
       {
-        category: EndpointCategory.chatMatterDetailPanel,
+        category: EndpointCategory.chatWebhookIssuePreview,
       }
     );
   }

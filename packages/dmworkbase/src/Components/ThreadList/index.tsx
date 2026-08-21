@@ -1,5 +1,5 @@
 import React, { Component } from "react"
-import { Button, Spin, Modal, Toast, Tooltip } from "@douyinfe/semi-ui"
+import { Button, Spin, Toast, Tooltip } from "@douyinfe/semi-ui"
 import { Channel } from "wukongimjssdk"
 import { UserPlus, LogOut, Trash2 } from "lucide-react"
 import { Thread, ThreadStatus } from "../../Service/Thread"
@@ -8,6 +8,8 @@ import WKApp from "../../App"
 import RouteContext from "../../Service/Context"
 import { ThreadListVM, ThreadListState } from "./vm"
 import { ThreadCreate } from "../ThreadCreate"
+import { I18nContext, t } from "../../i18n"
+import { wkConfirm } from "../WKModal"
 import "./index.css"
 
 export interface ThreadListProps {
@@ -16,6 +18,9 @@ export interface ThreadListProps {
 }
 
 export class ThreadList extends Component<ThreadListProps, ThreadListState> {
+  static contextType = I18nContext
+  declare context: React.ContextType<typeof I18nContext>
+
   private vm: ThreadListVM
 
   constructor(props: ThreadListProps) {
@@ -31,6 +36,8 @@ export class ThreadList extends Component<ThreadListProps, ThreadListState> {
   }
 
   componentDidMount() {
+    // channel_subchannel_panel_opened 不在此处发:ThreadList 为死组件(实际渲染 ThreadPanel),
+    // 挂载埋点永不触发(见二审 P1-2)。已收口到 Pages/Chat/index.tsx 子区 header 开关的「仅开边沿」。
     this.vm.load()
   }
 
@@ -58,14 +65,14 @@ export class ThreadList extends Component<ThreadListProps, ThreadListState> {
 
   handleDelete = (thread: Thread, e: React.MouseEvent) => {
     e.stopPropagation()
-    Modal.confirm({
-      title: "删除子区",
-      content: `确定要删除子区 "${thread.name}" 吗？此操作不可恢复。`,
+    wkConfirm({
+      title: t("base.threadPanel.delete"),
+      content: t("base.threadList.deleteConfirm", { values: { name: thread.name } }),
       okType: "danger",
       onOk: async () => {
         try {
           await this.vm.delete(thread.short_id)
-          Toast.success("已删除")
+          Toast.success(t("base.threadList.deleted"))
         } catch (err: any) {
           Toast.error(err.message)
         }
@@ -77,7 +84,7 @@ export class ThreadList extends Component<ThreadListProps, ThreadListState> {
     e.stopPropagation()
     try {
       await this.vm.join(thread.short_id)
-      Toast.success("已加入")
+      Toast.success(t("base.threadList.joined"))
     } catch (err: any) {
       Toast.error(err.message)
     }
@@ -85,13 +92,13 @@ export class ThreadList extends Component<ThreadListProps, ThreadListState> {
 
   handleLeave = (thread: Thread, e: React.MouseEvent) => {
     e.stopPropagation()
-    Modal.confirm({
-      title: "离开子区",
-      content: `确定要离开子区 "${thread.name}" 吗？`,
+    wkConfirm({
+      title: t("base.module.thread.leave"),
+      content: t("base.threadList.leaveConfirm", { values: { name: thread.name } }),
       onOk: async () => {
         try {
           await this.vm.leave(thread.short_id)
-          Toast.success("已离开")
+          Toast.success(t("base.threadList.left"))
         } catch (err: any) {
           Toast.error(err.message)
         }
@@ -105,13 +112,13 @@ export class ThreadList extends Component<ThreadListProps, ThreadListState> {
     const diff = now.getTime() - date.getTime()
     const days = Math.floor(diff / (1000 * 60 * 60 * 24))
     if (days === 0) {
-      return "今天"
+      return this.context.t("base.threadList.today")
     } else if (days === 1) {
-      return "昨天"
+      return this.context.t("base.threadList.yesterday")
     } else if (days < 7) {
-      return `${days}天前`
+      return this.context.t("base.threadList.daysAgo", { values: { count: days } })
     } else {
-      return date.toLocaleDateString()
+      return this.context.format.date(date)
     }
   }
 
@@ -133,7 +140,7 @@ export class ThreadList extends Component<ThreadListProps, ThreadListState> {
         <div className="wk-thread-list">
           <div className="wk-thread-list-empty">
             <span className="wk-thread-list-empty-text">{error}</span>
-            <Button onClick={() => this.vm.load()}>重试</Button>
+            <Button onClick={() => this.vm.load()}>{t("base.threadList.retry")}</Button>
           </div>
         </div>
       )
@@ -144,16 +151,16 @@ export class ThreadList extends Component<ThreadListProps, ThreadListState> {
     return (
       <div className="wk-thread-list">
         <div className="wk-thread-list-header">
-          <span className="wk-thread-list-title">子区列表</span>
+          <span className="wk-thread-list-title">{t("base.threadList.title")}</span>
           <Button size="small" onClick={this.handleCreateThread}>
-            新建子区
+            {t("base.threadPanel.newThread")}
           </Button>
         </div>
         <div className="wk-thread-list-content">
           {activeThreads.length === 0 ? (
             <div className="wk-thread-list-empty">
-              <span className="wk-thread-list-empty-text">暂无子区</span>
-              <Button onClick={this.handleCreateThread}>创建第一个子区</Button>
+              <span className="wk-thread-list-empty-text">{t("base.threadList.empty")}</span>
+              <Button onClick={this.handleCreateThread}>{t("base.threadList.createFirst")}</Button>
             </div>
           ) : (
             activeThreads.map((thread) => (
@@ -167,45 +174,45 @@ export class ThreadList extends Component<ThreadListProps, ThreadListState> {
                   <div className="wk-thread-item-name">
                     <span className="wk-thread-item-name-text">{thread.name}</span>
                     {thread.is_member && (
-                      <span className="wk-thread-item-badge">已加入</span>
+                      <span className="wk-thread-item-badge">{t("base.threadList.joined")}</span>
                     )}
                   </div>
                   <div className="wk-thread-item-meta">
                     {thread.member_count !== undefined && thread.member_count > 0 && (
-                      <span>{thread.member_count} 人 · </span>
+                      <span>{t("base.threadList.memberCount", { values: { count: thread.member_count } })}</span>
                     )}
-                    创建于 {this.formatTime(thread.created_at)}
+                    {t("base.threadList.createdAt", { values: { time: this.formatTime(thread.created_at) } })}
                   </div>
                 </div>
                 <div className="wk-thread-item-actions">
                   {thread.is_member ? (
-                    <Tooltip content="离开">
+                    <Tooltip content={t("base.threadList.leave")}>
                       <Button
                         size="small"
                         type="tertiary"
                         icon={<LogOut size={14} />}
-                        aria-label="离开子区"
+                        aria-label={t("base.module.thread.leave")}
                         onClick={(e) => this.handleLeave(thread, e)}
                       />
                     </Tooltip>
                   ) : (
-                    <Tooltip content="加入">
+                    <Tooltip content={t("base.threadList.join")}>
                       <Button
                         size="small"
                         type="primary"
                         icon={<UserPlus size={14} />}
-                        aria-label="加入子区"
+                        aria-label={t("base.threadList.joinThread")}
                         onClick={(e) => this.handleJoin(thread, e)}
                       />
                     </Tooltip>
                   )}
                   {thread.creator_uid === WKApp.loginInfo.uid && (
-                    <Tooltip content="删除">
+                    <Tooltip content={t("base.threadPanel.delete")}>
                       <Button
                         size="small"
                         type="danger"
                         icon={<Trash2 size={14} />}
-                        aria-label="删除子区"
+                        aria-label={t("base.threadPanel.delete")}
                         className="wk-thread-item-action-btn"
                         onClick={(e) => this.handleDelete(thread, e)}
                       />

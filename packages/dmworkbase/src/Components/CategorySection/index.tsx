@@ -1,7 +1,9 @@
 import React from "react"
 import CategoryHeader from "../CategoryHeader"
+import { useDndContext } from "@dnd-kit/core"
 import { useSortable } from "@dnd-kit/sortable"
 import { CSS } from "@dnd-kit/utilities"
+import { useI18n } from "../../i18n"
 import "./index.css"
 
 export interface CategorySectionProps {
@@ -36,11 +38,14 @@ const CategorySectionInner: React.FC<CategorySectionProps> = ({
     onRenameConfirm,
     onRenameCancel,
 }) => {
+    const { t } = useI18n()
+    const { active } = useDndContext()
     // useSortable：分组整体排序（同时作为 droppable，接受 group item 的 drop）
     const {
         attributes,
         listeners,
         setNodeRef,
+        setActivatorNodeRef,
         transform,
         transition,
         isDragging,
@@ -54,12 +59,13 @@ const CategorySectionInner: React.FC<CategorySectionProps> = ({
     }
 
     const isEmpty = category.isEmpty ?? (!children || (Array.isArray(children) && children.length === 0))
+    const showDropOver = isOver && active?.data.current?.type === 'category'
 
     return (
         <div
             ref={setNodeRef}
             style={style}
-            className={`wk-category-section${isOver ? ' wk-category-section--drop-over' : ''}`}
+            className={`wk-category-section${showDropOver ? ' wk-category-section--drop-over' : ''}${isDragging ? ' wk-category-section--dragging' : ''}`}
         >
             <CategoryHeader
                 name={category.name}
@@ -74,7 +80,9 @@ const CategorySectionInner: React.FC<CategorySectionProps> = ({
                 isEditing={isEditing}
                 onRenameConfirm={onRenameConfirm}
                 onRenameCancel={onRenameCancel}
-                dragHandleProps={{ ...attributes, ...listeners }}
+                dragHandleRef={setActivatorNodeRef}
+                dragHandleAttributes={attributes}
+                dragHandleListeners={listeners}
             />
             <div
                 className={`wk-category-section__content ${
@@ -84,7 +92,7 @@ const CategorySectionInner: React.FC<CategorySectionProps> = ({
                 }`}
             >
                 {isEmpty ? (
-                    <div className="wk-category-section__empty">暂无群聊</div>
+                    <div className="wk-category-section__empty">{t("base.categorySection.noGroups")}</div>
                 ) : (
                     children
                 )}
@@ -105,6 +113,7 @@ const CategorySectionStatic: React.FC<CategorySectionProps> = ({
     onRenameConfirm,
     onRenameCancel,
 }) => {
+    const { t } = useI18n()
     const isEmpty = category.isEmpty ?? (!children || (Array.isArray(children) && children.length === 0))
 
     return (
@@ -131,7 +140,7 @@ const CategorySectionStatic: React.FC<CategorySectionProps> = ({
                 }`}
             >
                 {isEmpty ? (
-                    <div className="wk-category-section__empty">暂无群聊</div>
+                    <div className="wk-category-section__empty">{t("base.categorySection.noGroups")}</div>
                 ) : (
                     children
                 )}

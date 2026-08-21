@@ -5,13 +5,16 @@ import './index.css'
 import { MessageWrap } from "../../Service/Model"
 import WKApp from "../../App"
 import { isSafeUrl } from "../../Utils/security"
+import { I18nContext } from "../../i18n"
 
 export class ApproveGroupMemberCell extends MessageCell {
+    static contextType = I18nContext
+    declare context: React.ContextType<typeof I18nContext>
 
     render() {
         const { message } = this.props
         const content = message.content as SystemContent
-        return <div className="wk-message-system">{content.displayText}<a href="#" onClick={() => this.goApproval(message)} className="wk-message-approve">去审核</a></div>
+        return <div className="wk-message-system">{content.displayText}<a href="#" onClick={() => this.goApproval(message)} className="wk-message-approve">{this.context.t("base.message.approveGroupMember.review")}</a></div>
     }
 
     async goApproval(message: MessageWrap) {

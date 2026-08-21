@@ -4,15 +4,42 @@ import {
     Spin,
     Toast,
     Banner,
-    Dropdown,
     Tag,
+    Modal,
+    Popconfirm,
+    Tooltip,
+    Dropdown,
 } from "@douyinfe/semi-ui";
-import { IconEdit, IconMore, IconSend, IconClock, IconTick, IconClose, IconInfoCircle, IconHistory, IconUser } from "@douyinfe/semi-icons";
-import { Channel, ChannelTypeGroup, ChannelTypePerson, MessageText, WKSDK } from "wukongimjssdk";
+import { IconEdit, IconSend, IconClock, IconTick, IconClose, IconInfoCircle, IconHistory, IconRefresh, IconUser, IconPlus, IconMinusCircle, IconExit, IconDelete, IconMore } from "@douyinfe/semi-icons";
+import { Bot, ChevronDown, Check, X } from "lucide-react";
+import WKSDK, { Channel, ChannelTypeGroup, MessageText } from "wukongimjssdk";
+import {
+  I18nContext,
+  t,
+  ForwardService,
+  interpretForwardResult,
+  titleContextStore,
+  SummaryNotifyContent,
+  isConversationDisbanded,
+  Dap,
+} from "@octo/base";
 import WKApp from "@octo/base/src/App";
+import VoiceInputButton from "@octo/base/src/Components/VoiceInputButton";
+import type { ReplaceMode, SelectionRange } from "@octo/base/src/Components/VoiceInputButton";
+import RouteContext, { RouteContextConfig } from "@octo/base/src/Service/Context";
+import { SubscriberList } from "@octo/base/src/Components/Subscribers/list";
+import RoutePage from "@octo/base/src/Components/RoutePage";
+import { Channel as WkChannel } from "wukongimjssdk";
 import { splitSummaryText } from "../utils/splitMessage";
+import { sendGroupSummaryCompletionTips } from "../utils/groupSummaryNotify";
+import { applyRegenerateVoiceInput } from "../utils/regenerateInput";
 import SummaryConfirmPage from "./SummaryConfirmPage";
 import * as api from "../api/summaryApi";
+import { SUMMARY_INPUT_MAX_LENGTH } from "../constants/limits";
+import { deriveSummaryDisplayContent } from "../utils/templateResolver";
+import { refreshPendingInvitationBadge } from "../utils/summaryMenuBadge";
+// RefineSection 已移除 — 反馈修改改为在智能总结 chat 里引用总结迭代
+// (见 CHAT-REFERENCE-BASED-DESIGN-v1)
 import OverflowTooltip from "../components/OverflowTooltip";
 import type {
     SummaryDetail,
@@ -20,26 +47,40 @@ import type {
     MemberStatus,
     ScheduleItem,
     ScheduleConfig,
+    WorkflowStage,
+    SummaryVersionDetail,
+    SummaryVersionItem,
 } from "../types/summary";
-import { TaskStatus, SummaryMode, ParticipantStatus } from "../types/summary";
+import { TaskStatus, SummaryMode, ParticipantStatus, TriggerType } from "../types/summary";
 import {
     formatDate,
     canCancel,
     canRegenerate,
-    cronToScheduleConfig,
-    scheduleToCron,
+    scheduleItemToConfig,
+    scheduleToParams,
+    formatScheduleSummary,
+    shouldReactivateOnSave,
+    isReferenceable,
 } from "../utils/summaryHelpers";
-import SummaryContent from "../components/SummaryContent";
+import { summaryTestIds } from "../utils/testIds";
 import CitationText from "../components/CitationText";
 import SelectedSourcesPanel from "../components/SelectedSourcesPanel";
 import ScheduleConfigModal from "../components/ScheduleConfigModal";
-import MatterPickerModal from "../components/MatterPickerModal";
-import * as matterBridge from "../api/matterBridge";
 import SummaryEditor from "../components/SummaryEditor";
+import SummaryVersionPanel from "../components/SummaryVersionPanel";
 
 interface SummaryDetailPageProps {
-    taskId?: number;
+    taskId?: number | string;
+    /** Called after delete/leave in embedded mode so the panel can switch back to list. */
+    onAfterMutate?: () => void;
+    /** Only the list-owned detail route emits list-highlight events. Embedded
+     *  instances (ChatSummaryPanel, SummaryConfirmPage) must not pollute the
+     *  list selection state. */
+    emitSelection?: boolean;
 }
+
+type RegenerateMode = "refine" | "full";
+type RefineLoadingTarget = "personal" | "team" | "summary";
 
 interface SummaryDetailPageState {
     detail: SummaryDetail | null;
@@ -51,18 +92,136 @@ interface SummaryDetailPageState {
     membersLoading: boolean;
     scheduleLoading: boolean;
     scheduleItem: ScheduleItem | null;
+    scheduleDisabling: boolean;
     showScheduleConfig: boolean;
     scheduleConfig: ScheduleConfig | null;
+    pendingScheduleInstruction: string;
     lastKnownStatus?: number;
     expandedReports: Record<string, boolean>;
+    personalExpanded: boolean;
     isEditing: boolean;
-    showMatterPicker: boolean;
-    forwardingToMatter: boolean;
+    /** need3：行内编辑「自己的个人报告」中。 */
+    editingPersonalReport: boolean;
+    /** need4：行内编辑「团队总结」中（仅 creator）。 */
+    editingTeamSummary: boolean;
+    /** OCT-21：提交前编辑「我自己的个人报告」草稿中（行内编辑器接管「我（未提交）」行）。 */
+    editingMyDraft: boolean;
+    showRegenerateModal: boolean;
+    regenerateMode: RegenerateMode;
+    regenerateTopic: string;
+    refineFeedback: string;
+    regenerateSubmitting: boolean;
+    refineLoadingTarget: RefineLoadingTarget | null;
+    versions: SummaryVersionItem[];
+    versionsRetention: number | null;
+    versionsLoading: boolean;
+    restoringVersionId: number | null;
+    personalVersions: SummaryVersionItem[];
+    personalVersionsRetention: number | null;
+    personalVersionsLoading: boolean;
+    restoringPersonalVersionId: number | null;
+    showVersionDetailModal: boolean;
+    /** 版本记录右侧滑入面板是否展开 */
+    versionPanelOpen: boolean;
+    /** 本文目录：从正文标题提取的大纲 */
+    tocItems: { id: string; text: string; level: number }[];
+    /** 当前滚动高亮的目录项 id */
+    activeTocId: string;
+    /** Width of the SummaryDetailPage layout container, tracked with a
+     * ResizeObserver on this.layoutRef. Used to gate the `.has-toc` layout
+     * shift so it only applies when the container is actually wide enough
+     * for the TOC to render — the chat side panel (`.wk-summary-panel`,
+     * clamped to 320–720px) is a container-query context whose width can
+     * be far below the viewport, so a viewport-keyed @media rule alone
+     * would leave the body text clipped 36px off the panel's left edge
+     * (see shouldShowToc). Null until the first observer
+     * callback. */
+    layoutWidth: number | null;
+    versionDetailLoading: boolean;
+    versionDetail: SummaryVersionDetail | null;
+    versionDetailIsPersonal: boolean;
+    /** V5：schedule 级一次性确认提交中 */
+    confirmingSchedule: boolean;
+    workflowDisplayIndex: number;
+    workflowGateContent: boolean;
+    workflowRevealDone: boolean;
+    streaming: boolean;
+    streamingContent: string;
+    streamError: string | null;
+    teamStreaming: boolean;
+    teamStreamingContent: string;
+    teamStreamError: string | null;
 }
 
 const INTER_MESSAGE_DELAY_MS = 200;
+const PERSONAL_RESULT_POLL_INTERVAL_MS = 1500;
+const WORKFLOW_COMPLETE_REVEAL_DELAY_MS = 650;
+
+const SUMMARY_WORKFLOW_STAGES: Array<{ key: WorkflowStage; labelKey: string }> = [
+    { key: "understand_question", labelKey: "summary.detail.workflowUnderstandQuestion" },
+    { key: "find_relevant_chats", labelKey: "summary.detail.workflowFindRelevantChats" },
+    { key: "filter_useful_content", labelKey: "summary.detail.workflowFilterUsefulContent" },
+    { key: "analyze_chat_content", labelKey: "summary.detail.workflowAnalyzeChatContent" },
+    { key: "generate_summary", labelKey: "summary.detail.workflowGenerateSummary" },
+];
+
+/**
+ * AbstractCallout renders the short AI abstract (backend Option-B) as the
+ * lavender callout above the summary body. Renders nothing when the abstract is
+ * empty (older rows / generation failure), so it never leaves a blank card.
+ */
+function AbstractCallout({ abstract, title }: { abstract?: string; title: string }) {
+    if (!abstract || !abstract.trim()) return null;
+    return (
+        <div className="summary-detail-abstract">
+            <div className="summary-detail-abstract__icon" aria-hidden>✦</div>
+            <div className="summary-detail-abstract__body">
+                <div className="summary-detail-abstract__title">{title}</div>
+                <div className="summary-detail-abstract__text">{abstract}</div>
+            </div>
+        </div>
+    );
+}
 
 export default class SummaryDetailPage extends Component<SummaryDetailPageProps, SummaryDetailPageState> {
+    static contextType = I18nContext;
+    declare context: React.ContextType<typeof I18nContext>;
+    private readonly titleContextOwner = Symbol("summary-title-context");
+
+    private regenerateTopicRef = React.createRef<HTMLTextAreaElement>();
+    private contentScrollRef = React.createRef<HTMLDivElement>();
+    private layoutRef = React.createRef<HTMLDivElement>();
+    private layoutResizeObserver: ResizeObserver | null = null;
+    private tocObserver: IntersectionObserver | null = null;
+    private tocSignature = "";
+    private tocHeadingNodes: HTMLElement[] = [];
+    private regenerateVoiceMode: RegenerateMode | null = null;
+
+    private handleRegenerateVoiceRecordingStart = () => {
+        this.regenerateVoiceMode = this.state.regenerateMode;
+    };
+
+    private handleRegenerateInputVoice = (
+        text: string,
+        mode: ReplaceMode,
+        savedRange?: SelectionRange
+    ) => {
+        const regenerateMode = this.regenerateVoiceMode ?? this.state.regenerateMode;
+        this.regenerateVoiceMode = null;
+        this.setState((prev) => {
+            const field = regenerateMode === "refine" ? "refineFeedback" : "regenerateTopic";
+            return {
+                [field]: applyRegenerateVoiceInput(
+                    prev[field],
+                    text,
+                    mode,
+                    savedRange,
+                    SUMMARY_INPUT_MAX_LENGTH,
+                ),
+            } as Pick<SummaryDetailPageState, typeof field>;
+        });
+    };
+
     state: SummaryDetailPageState = {
         detail: null,
         loading: false,
@@ -73,67 +232,501 @@ export default class SummaryDetailPage extends Component<SummaryDetailPageProps,
         membersLoading: false,
         scheduleLoading: false,
         scheduleItem: null,
+        scheduleDisabling: false,
         showScheduleConfig: false,
         scheduleConfig: null,
         expandedReports: {},
+        personalExpanded: true,
         isEditing: false,
-        showMatterPicker: false,
-        forwardingToMatter: false,
+        editingPersonalReport: false,
+        editingTeamSummary: false,
+        editingMyDraft: false,
+        showRegenerateModal: false,
+        regenerateMode: "refine",
+        regenerateTopic: "",
+        refineFeedback: "",
+        regenerateSubmitting: false,
+        refineLoadingTarget: null,
+        versions: [],
+        versionsLoading: false,
+        versionsRetention: null,
+        restoringVersionId: null,
+        personalVersions: [],
+        personalVersionsRetention: null,
+        personalVersionsLoading: false,
+        restoringPersonalVersionId: null,
+        showVersionDetailModal: false,
+        versionPanelOpen: false,
+        tocItems: [],
+        activeTocId: "",
+        layoutWidth: null,
+        versionDetailLoading: false,
+        versionDetail: null,
+        versionDetailIsPersonal: false,
+        pendingScheduleInstruction: "",
+        confirmingSchedule: false,
+        workflowDisplayIndex: -1,
+        workflowGateContent: false,
+        workflowRevealDone: false,
+        streaming: false,
+        streamingContent: "",
+        streamError: null,
+        teamStreaming: false,
+        teamStreamingContent: "",
+        teamStreamError: null,
     };
 
     private personalPollTimer: ReturnType<typeof setInterval> | null = null;
     private fallbackPollTimer: ReturnType<typeof setInterval> | null = null;
     private fallbackStartTimeout: ReturnType<typeof setTimeout> | null = null;
+    private workflowAdvanceTimer: ReturnType<typeof setTimeout> | null = null;
+    private workflowCompleteTimer: ReturnType<typeof setTimeout> | null = null;
+    private streamAbortController: AbortController | null = null;
+    private streamingTaskId: number | null = null;
+    private streamClosedTaskId: number | null = null;
+    private editorSaveFn: (() => void) | null = null;
+    private teamStreamAbortController: AbortController | null = null;
+    private teamStreamingTaskId: number | null = null;
+    private teamStreamClosedTaskId: number | null = null;
+    private refineStreamAbortController: AbortController | null = null;
+    private unmounted = false;
+    private workflowTargetIndex = -1;
     private listPageActive = false;
     private lastEventTime = 0;
     private isPersonalPolling = false;
+    // R3 blocker（Jerry-Xin 三审）：smart_summary_completed 的 exactly-once 去重锚点。
+    // 状态订阅路径(:handleStatusChangeEvent)与兜底轮询路径(:doFallbackPollOnce)都在各自
+    // await 之前捕获 prevStatus 快照，stopFallbackPoll() 无法取消已越过 await 的 tick，故仅靠
+    // 「prev !== new 状态沿」判定不足以防双计：两路可各自读到 prev=RUNNING、await 后同见
+    // COMPLETED，双双越过边界守卫各发一次。以「已发 completed 的 taskId」为锚，先发者写锚，
+    // 后到者 id 相等即跳过——按 task 维度精确一次。task 切换后 id 不同，自然重新计一次。
+    private completedTrackedTaskId: number | null = null;
+    // Blocking 5（跨 task 串台 / async race）：单调递增的「调度加载序列号」。
+    // 每次发起一轮 detail+schedule 加载（loadDetail / 状态切换补拉 / 重新加载）都 bump，
+    // loadSchedule 在 setState 前用「发起时捕获的 seq」与最新 seq 比对：不一致说明期间
+    // 已切换 task 或重新加载，旧请求的响应必须丢弃，绝不污染当前 task 的 scheduleItem。
+    private scheduleLoadSeq = 0;
+    private publishedTitleLocale?: string;
 
-    componentDidMount() {
-        window.addEventListener("summary-status-change", this.handleStatusChangeEvent);
-        window.addEventListener("summary-batch-heartbeat", this.handleBatchHeartbeat);
-        window.addEventListener("summary-list-unmount", this.handleListPageUnmount);
-        this.loadDetail();
+    /** bump 并返回最新调度加载序列号；任何会改变「当前 scheduleItem 归属」的入口都应调用。 */
+    private nextScheduleSeq(): number {
+        this.scheduleLoadSeq += 1;
+        return this.scheduleLoadSeq;
     }
 
-    componentDidUpdate(prevProps: any) {
-        const prevTaskId = prevProps.taskId;
-        const currentTaskId = this.taskId;
-        if (prevTaskId !== currentTaskId && currentTaskId != null) {
-            this.listPageActive = false;
-            this.clearAllTimers();
-            this.loadDetail();
+    /**
+     * 「运行→终态」沿的 smart_summary_completed 单发 + regenerate 复位。状态订阅
+     * (handleStatusChangeEvent) 与兜底轮询(doFallbackPollOnce)两路共用本方法与
+     * completedTrackedTaskId 去重锚(见三审 R3):先检出者写锚并发,后到者 id 相等即跳过——
+     * 按 task 精确一次。终态含 COMPLETED / FAILED / CANCELLED 三态,以 result 字段区分。
+     * **离开终态**(如 regenerate 把状态就地推回 PENDING)时清锚,
+     * 使同一 taskId 的下一次完成能再计一次(见六审 P1b:原先锚只写不清 → 除首次外每轮 regenerate
+     * 的完成都命中 id 相等而被跳过,flagship 漏斗 smart_summary_completed 系统性漏计)。
+     * 两路必须走同一入口,避免各自内联再次跑偏(这正是三→六审反复回炉的同源)。
+     */
+    private trackSummaryCompletedOnce(status: TaskStatus, taskId: number) {
+        // 终态三选一：完成 / 失败 / 取消，都算「一次结束」，按 result 区分。去重锚
+        // completedTrackedTaskId 仍按 task 维度精确一次（先到者写锚发送，后到者 id 相等即跳过）；
+        // 离开终态（如 regenerate 推回 PENDING）时清锚，使同一 taskId 的下一次结束能再计一次。
+        const result =
+            status === TaskStatus.COMPLETED ? "completed" :
+            status === TaskStatus.FAILED ? "failed" :
+            status === TaskStatus.CANCELLED ? "cancelled" :
+            null;
+        if (result) {
+            if (this.completedTrackedTaskId !== taskId) {
+                this.completedTrackedTaskId = taskId;
+                Dap.shared.track("smart_summary_completed", { result });
+            }
+        } else if (this.completedTrackedTaskId === taskId) {
+            this.completedTrackedTaskId = null;
         }
     }
 
+    componentDidMount() {
+        this.unmounted = false;
+        window.addEventListener("summary-status-change", this.handleStatusChangeEvent);
+        window.addEventListener("summary-batch-heartbeat", this.handleBatchHeartbeat);
+        window.addEventListener("summary-list-unmount", this.handleListPageUnmount);
+        window.addEventListener("summary-detail-regenerate", this.handleRegenerateFromList);
+        window.addEventListener("summary-detail-edit", this.handleEditFromList);
+        // Observe the SummaryDetailPage layout container's width so the
+        // TOC (`.has-toc` shift + the <aside> mount + the CSS visibility
+        // rule) can be gated on real layout room rather than viewport
+        // size — the chat side panel is a container-query context and can
+        // be as narrow as 320px on any viewport. Seed layoutWidth with a
+        // synchronous getBoundingClientRect so the first paint knows the
+        // real container width, then keep it in sync with a ResizeObserver.
+        // Fail-closed: layoutWidth null keeps the TOC off until we have a
+        // real measurement (see shouldShowToc).
+        if (this.layoutRef.current) {
+            const initialWidth = Math.round(this.layoutRef.current.getBoundingClientRect().width);
+            if (initialWidth > 0 && initialWidth !== this.state.layoutWidth) {
+                this.setState({ layoutWidth: initialWidth });
+            }
+            if (typeof ResizeObserver !== "undefined") {
+                this.layoutResizeObserver = new ResizeObserver((entries) => {
+                    for (const entry of entries) {
+                        const w = Math.round(entry.contentRect.width);
+                        this.setState((prev) => (w === prev.layoutWidth ? null : { layoutWidth: w }));
+                    }
+                });
+                this.layoutResizeObserver.observe(this.layoutRef.current);
+            }
+        }
+        this.loadDetail();
+        if (this.props.emitSelection) {
+            const activeTaskId = this.taskId;
+            if (activeTaskId != null) {
+                window.dispatchEvent(new CustomEvent("summary-detail-active", { detail: { taskId: activeTaskId } }));
+            }
+        }
+    }
+
+    componentDidUpdate(prevProps: any, prevState?: SummaryDetailPageState) {
+        if (
+            this.props.emitSelection &&
+            this.state.detail &&
+            this.publishedTitleLocale !== this.context?.locale
+        ) {
+            this.publishDetailTitle(this.state.detail);
+        }
+        const prevTaskId = prevProps.taskId;
+        const currentTaskId = this.detailLookupId;
+        if (prevTaskId !== currentTaskId && currentTaskId != null) {
+            if (this.props.emitSelection) {
+                titleContextStore.clear("summary", this.titleContextOwner);
+            }
+            this.listPageActive = false;
+            this.clearAllTimers();
+            // Blocking 5：切 task 立即清空上一 task 的 schedule 状态，避免在新 detail
+            // 返回前闪现旧定时（bump seq 由 loadDetail 内部完成，令旧 loadSchedule 作废）。
+            this.setState({
+                scheduleItem: null,
+                scheduleLoading: false,
+                showRegenerateModal: false,
+                regenerateSubmitting: false,
+                refineLoadingTarget: null,
+                showVersionDetailModal: false,
+                versionPanelOpen: false,
+                versionDetailLoading: false,
+                versionDetail: null,
+                restoringVersionId: null,
+                restoringPersonalVersionId: null,
+                pendingScheduleInstruction: "",
+                streamingContent: "",
+                streamError: null,
+                streaming: false,
+                teamStreamingContent: "",
+                teamStreamError: null,
+                teamStreaming: false,
+            });
+            this.streamClosedTaskId = null;
+            this.teamStreamClosedTaskId = null;
+            this.loadDetail();
+            if (this.props.emitSelection) {
+                const nextActiveTaskId = this.taskId;
+                if (nextActiveTaskId != null) {
+                    window.dispatchEvent(new CustomEvent("summary-detail-active", { detail: { taskId: nextActiveTaskId } }));
+                }
+            }
+        }
+        if (prevState && prevState.showVersionDetailModal !== this.state.showVersionDetailModal) {
+            this.syncVersionDetailScrollLock();
+        }
+        // 正文渲染后（或内容变化后）重建本文目录。rebuildToc 内部按签名去重，
+        // 不会因自身 setState 造成循环。
+        this.rebuildToc();
+    }
+
+    private handleRegenerateFromList = (e: Event) => {
+        const detail = e as CustomEvent;
+        if (detail.detail?.taskId === this.taskId) {
+            this.handleRegenerate();
+        }
+    };
+
+    private handleEditFromList = (e: Event) => {
+        const detail = e as CustomEvent;
+        if (detail.detail?.taskId === this.taskId) {
+            this.handleStartEdit();
+        }
+    };
+
     componentWillUnmount() {
+        if (this.props.emitSelection) {
+            titleContextStore.clear("summary", this.titleContextOwner);
+        }
+        this.unmounted = true;
+        this.teardownTocObserver();
+        if (this.layoutResizeObserver) {
+            this.layoutResizeObserver.disconnect();
+            this.layoutResizeObserver = null;
+        }
         window.removeEventListener("summary-status-change", this.handleStatusChangeEvent);
         window.removeEventListener("summary-batch-heartbeat", this.handleBatchHeartbeat);
         window.removeEventListener("summary-list-unmount", this.handleListPageUnmount);
+        window.removeEventListener("summary-detail-regenerate", this.handleRegenerateFromList);
+        window.removeEventListener("summary-detail-edit", this.handleEditFromList);
+        this.setVersionDetailScrollLock(false);
         this.clearAllTimers();
+        if (this.props.emitSelection) {
+            const inactiveTaskId = this.taskId;
+            if (inactiveTaskId != null) {
+                window.dispatchEvent(new CustomEvent("summary-detail-inactive", { detail: { taskId: inactiveTaskId } }));
+            }
+        }
     }
 
     private clearAllTimers() {
+        this.stopSummaryStream();
+        this.stopTeamSummaryStream();
+        this.stopRefineStream();
         if (this.personalPollTimer) {
             clearInterval(this.personalPollTimer);
             this.personalPollTimer = null;
         }
         this.stopFallbackPoll();
+        if (this.workflowAdvanceTimer) {
+            clearTimeout(this.workflowAdvanceTimer);
+            this.workflowAdvanceTimer = null;
+        }
+        if (this.workflowCompleteTimer) {
+            clearTimeout(this.workflowCompleteTimer);
+            this.workflowCompleteTimer = null;
+        }
+        this.workflowTargetIndex = -1;
+    }
+
+    private setVersionDetailScrollLock(locked: boolean) {
+        document.documentElement.classList.toggle("summary-version-detail-open", locked);
+        document.body.classList.toggle("summary-version-detail-open", locked);
+    }
+
+    private syncVersionDetailScrollLock() {
+        this.setVersionDetailScrollLock(this.state.showVersionDetailModal);
+    }
+
+    private workflowStageIndex(stage?: string): number {
+        if (!stage) return -1;
+        return SUMMARY_WORKFLOW_STAGES.findIndex((item) => item.key === stage);
+    }
+
+    private setWorkflowStageDirectly(index: number) {
+        if (index < 0) return;
+        if (this.workflowAdvanceTimer) {
+            clearTimeout(this.workflowAdvanceTimer);
+            this.workflowAdvanceTimer = null;
+        }
+        if (this.workflowCompleteTimer) {
+            clearTimeout(this.workflowCompleteTimer);
+            this.workflowCompleteTimer = null;
+        }
+        const nextIndex = Math.max(this.state.workflowDisplayIndex, index);
+        this.workflowTargetIndex = nextIndex;
+        this.setState({
+            workflowDisplayIndex: nextIndex,
+            workflowGateContent: true,
+            workflowRevealDone: false,
+        });
+    }
+
+    private finishWorkflowBriefly() {
+        if (this.workflowAdvanceTimer) {
+            clearTimeout(this.workflowAdvanceTimer);
+            this.workflowAdvanceTimer = null;
+        }
+        if (this.workflowCompleteTimer) {
+            clearTimeout(this.workflowCompleteTimer);
+            this.workflowCompleteTimer = null;
+        }
+        const lastIndex = SUMMARY_WORKFLOW_STAGES.length - 1;
+        this.workflowTargetIndex = lastIndex;
+        this.setState({
+            workflowDisplayIndex: lastIndex,
+            workflowGateContent: true,
+            workflowRevealDone: false,
+        }, () => {
+            this.workflowCompleteTimer = setTimeout(() => {
+                this.workflowCompleteTimer = null;
+                this.setState({ workflowRevealDone: true });
+            }, WORKFLOW_COMPLETE_REVEAL_DELAY_MS);
+        });
+    }
+
+    private shouldGateWorkflowForPersonalResult(result: PersonalResult): boolean {
+        const { detail } = this.state;
+        if (detail?.summary_mode !== SummaryMode.BY_PERSON) return false;
+
+        const personalRunning = result.worker_status === 0 || result.worker_status === 1;
+        const personalFailed = result.worker_status === 3;
+
+        // 已经进入过生成态的页面，收到 completed 后保留一次短收尾；
+        // 历史已完成总结首次打开时不 gate，避免闪现 workflow 卡片。
+        return personalRunning || personalFailed || this.state.workflowGateContent;
+    }
+
+    private syncWorkflowProgress(result: PersonalResult) {
+        const stageIndex = this.workflowStageIndex(result.workflow_stage);
+        if (result.worker_status === 3) {
+            if (this.workflowAdvanceTimer) {
+                clearTimeout(this.workflowAdvanceTimer);
+                this.workflowAdvanceTimer = null;
+            }
+            this.workflowTargetIndex = stageIndex >= 0
+                ? stageIndex
+                : Math.max(this.state.workflowDisplayIndex, 0);
+            this.setState({
+                workflowDisplayIndex: this.workflowTargetIndex,
+                workflowGateContent: true,
+                workflowRevealDone: false,
+            });
+            return;
+        }
+        if (result.worker_status === 2) {
+            this.finishWorkflowBriefly();
+            return;
+        }
+        if (result.worker_status === 0 || result.worker_status === 1) {
+            this.setWorkflowStageDirectly(stageIndex >= 0 ? stageIndex : 0);
+        }
     }
 
     get taskId(): number | null {
+        // 数字 taskId 直接用；字符串 taskNo 深链时先返回 null，待 detail 落库后回填 detail.task_id。
+        return typeof this.props.taskId === "number" ? this.props.taskId : this.state.detail?.task_id ?? null;
+    }
+
+    // 深链原始标识：数字 task_id 或字符串 task_no，仅用于首次 detail 拉取与切换检测。
+    private get detailLookupId(): number | string | null {
         return this.props.taskId ?? null;
     }
 
-    async loadDetail() {
-        if (this.taskId == null) return;
-        this.setState({ loading: true, error: null });
-        try {
-            const detail = await api.getSummaryDetail(this.taskId);
-            this.setState({ detail, loading: false, lastKnownStatus: detail.status });
+    private shouldOperateOnTeamSummary(): boolean {
+        const { detail } = this.state;
+        return !!(
+            detail?.summary_mode === SummaryMode.BY_PERSON &&
+            this.isMultiCollab() &&
+            detail.result &&
+            detail.result_id
+        );
+    }
 
-            // Load schedule if associated
+    private isMultiCollabRegenerating(): boolean {
+        const { detail } = this.state;
+        return !!(
+            detail?.summary_mode === SummaryMode.BY_PERSON &&
+            this.isMultiCollab() &&
+            (detail.status === TaskStatus.PENDING || detail.status === TaskStatus.PROCESSING)
+        );
+    }
+
+    async loadDetail() {
+        const lookupId = this.detailLookupId;
+        if (lookupId == null) return;
+        // Blocking 5：每轮 detail 加载开始就 bump 序列号。这样旧 task 未完成的
+        // loadSchedule（包括本函数下面发起的）都会被后续轮作废，不会回填到新 task。
+        const seq = this.nextScheduleSeq();
+        const requestTaskId = lookupId;
+        const isSameTask = typeof requestTaskId === "number"
+            ? this.state.detail?.task_id === requestTaskId
+            : this.state.detail?.task_no === requestTaskId;
+        const previousStatus = isSameTask ? this.state.lastKnownStatus : undefined;
+        // F1：切 task / 重拉 detail 时复位全部编辑态，避免旧 task 编辑态（尤其
+        // editingTeamSummary）被带入新 task——否则切到非 creator 新 task 会绕过权限进编辑器。
+        // FE-1（切任务竞态）：开始新 task 加载时同步清空上一 task 的 personalResult/members，
+        // 避免旧任务成员报告 / 个人结果在新 detail 返回前残留显示（泄漏他人报告）。
+        if (this.workflowAdvanceTimer) {
+            clearTimeout(this.workflowAdvanceTimer);
+            this.workflowAdvanceTimer = null;
+        }
+        if (this.workflowCompleteTimer) {
+            clearTimeout(this.workflowCompleteTimer);
+            this.workflowCompleteTimer = null;
+        }
+        this.workflowTargetIndex = -1;
+        // P1-1：切换任务时清除上一个编辑器暴露的 save 闭包，防止在新任务上点保存
+        // 触发对上一个任务内容的写入（闭包持有旧 taskId/baseResultId/content）。
+        this.editorSaveFn = null;
+
+        this.setState({
+            loading: true,
+            error: null,
+            editingTeamSummary: false,
+            editingPersonalReport: false,
+            editingMyDraft: false,
+            isEditing: false,
+            personalResult: null,
+            members: [],
+            personalLoading: false,
+            membersLoading: false,
+            workflowDisplayIndex: -1,
+            workflowGateContent: false,
+            workflowRevealDone: false,
+            refineLoadingTarget: null,
+            versions: [],
+            versionsLoading: false,
+            restoringVersionId: null,
+            personalVersions: [],
+            personalVersionsLoading: false,
+            restoringPersonalVersionId: null,
+        });
+        try {
+            const detail = await api.getSummaryDetail(lookupId);
+            // detail 本身也可能是旧请求：期间切了 task / 又发了一轮 loadDetail 就丢弃。
+            if (this.scheduleLoadSeq !== seq || this.detailLookupId !== requestTaskId) return;
+            this.notifyGroupsOnCompletion(previousStatus, detail);
+            this.setState({
+                detail,
+                loading: false,
+                lastKnownStatus: detail.status,
+                workflowGateContent: false,
+            });
+            // 八审 🔴2:loadDetail 也是 lastKnownStatus 的写入者(regenerate 走 handleRegenerateConfirm →
+            // 就地置 PENDING → this.loadDetail(),不经 summary-status-change 订阅)。此前它是唯一不维护
+            // completedTrackedTaskId 去重锚的写入者 → 离开 COMPLETED 时锚不清 → 同一 taskId 的下一次完成
+            // 命中 id 相等被跳过而丢事件(六审 P1b 的复位在这条真实 regenerate 路径上失效)。
+            // 按与两个状态订阅入口(handleStatusChangeEvent / doFallbackPollOnce)完全相同的「状态沿」语义
+            // 维护锚:仅在观测到状态变化时走 helper(COMPLETED 写锚+发一次,离开 COMPLETED 清锚)。
+            // **首次加载(previousStatus===undefined)不发**——打开一条历史已完成的总结属「查看」,不是一次
+            // 新完成;若在此发,completed 会随每次翻阅历史而超过 started(见八审 P2:首屏已完成的漏计是已知
+            // 方向性偏差,不能用「查看即完成」去补,否则引入更糟的高计)。
+            if (
+                previousStatus !== undefined &&
+                previousStatus !== detail.status &&
+                typeof detail.task_id === "number"
+            ) {
+                this.trackSummaryCompletedOnce(detail.status, detail.task_id);
+            }
+            this.publishDetailTitle(detail);
+            if (detail.status === TaskStatus.COMPLETED && detail.result_id) {
+                const markRead = api.markSummaryRead;
+                if (markRead) void markRead(detail.task_id, { team_result_id: detail.result_id }).then((attention) => {
+                    // Guard with the request sequence/lookup key rather than
+                    // comparing numeric detail.task_id with a task_no deep-link.
+                    if (this.scheduleLoadSeq === seq && this.detailLookupId === requestTaskId) {
+                        window.dispatchEvent(new CustomEvent("summary-read", {
+                            detail: {
+                                taskId: detail.task_id,
+                                isUnread: attention.is_unread,
+                                needsAttention: attention.needs_attention,
+                            },
+                        }));
+                    }
+                }).catch(() => { /* keep unread on failure */ });
+            }
+            if (detail.status === TaskStatus.COMPLETED && detail.result) {
+                this.loadVersions(detail.task_id);
+            }
+
+            // Blocking 5（跨 task 串台）：scheduleItem 必须始终对应当前 detail。
+            // 同步部分：从「有定时」总结导航到「无定时」总结时，若不显式清空，旧 scheduleItem
+            // 会残留 → renderScheduleButton 误判有定时、保存可能把旧定时重绑到新 task。
+            // 异步部分：loadSchedule 带上 seq，响应迟到时对比 seq/taskId 才 setState（见 loadSchedule）。
             if (detail.schedule_id && detail.schedule_id > 0) {
-                this.loadSchedule(detail.schedule_id);
+                this.loadSchedule(detail.schedule_id, seq);
+            } else {
+                this.setState({ scheduleItem: null, scheduleLoading: false });
             }
 
             // Start fallback poll if task is in progress
@@ -143,48 +736,153 @@ export default class SummaryDetailPage extends Component<SummaryDetailPageProps,
                 detail.status === TaskStatus.WAITING_CONFIRM
             ) {
                 this.startFallbackPoll();
+                if (detail.summary_mode === SummaryMode.BY_PERSON && this.streamClosedTaskId !== detail.task_id) {
+                    this.startSummaryStream(detail.task_id);
+                }
+                const isMultiByPerson = detail.summary_mode === SummaryMode.BY_PERSON && ((detail.participants?.length || 0) > 1);
+                if (isMultiByPerson && this.teamStreamClosedTaskId !== detail.task_id) {
+                    this.startTeamSummaryStream(detail.task_id);
+                }
             } else {
                 this.stopFallbackPoll();
+                this.stopSummaryStream(true);
+                this.stopTeamSummaryStream();
+                this.setState({ teamStreaming: false, teamStreamingContent: "", teamStreamError: null });
             }
             // Load BY_PERSON data
             if (detail.summary_mode === SummaryMode.BY_PERSON) {
-                this.loadPersonalResult();
-                this.loadMembers();
+                // FE-1：把本轮 seq 传给二次异步加载，迟到响应按 seq/taskId 校验后才 setState。
+                // 字符串 taskNo 深链时 this.taskId 依赖 state.detail（setState 未提交会为 null），
+                // 故显式传入刚拿到的 detail.task_id（数字），避开 setState 竞态。
+                this.loadPersonalResult(seq, false, detail.task_id);
+                this.loadMembers(seq, detail.task_id);
             }
         } catch (err: any) {
-            this.setState({ error: err.message || "加载失败", loading: false });
+            // FE-1（切 task 竞态）：迟到的失败响应也要校验归属，否则旧 task 的加载失败
+            // 会把错误/loading 状态写到已切换的新 task 上。
+            if (this.scheduleLoadSeq !== seq || this.detailLookupId !== requestTaskId) return;
+            this.setState({ error: err.message || t("summary.common.loadingFailed"), loading: false });
         }
     }
 
-    async loadSchedule(scheduleId: number) {
+    private publishDetailTitle(detail: SummaryDetail): void {
+        if (!this.props.emitSelection) return;
+        this.publishedTitleLocale = this.context?.locale;
+        const primaryTitle = deriveSummaryDisplayContent(detail.topic || detail.title || "");
+        if (!primaryTitle) {
+            titleContextStore.clear("summary", this.titleContextOwner);
+            return;
+        }
+        const moduleTitle =
+            WKApp.menus.menusList().find((menu) => menu.id === "summary")?.title ||
+            t("summary.menu.title");
+        titleContextStore.set(
+            "summary",
+            { primaryTitle, moduleTitle },
+            this.titleContextOwner
+        );
+    }
+
+    /**
+     * Blocking 5（async race）：只有当发起请求时捕获的 seq 与当前 seq 一致、
+     * 且 taskId 未变时，才能把响应写回 scheduleItem。不传 seq 时（handleScheduleSave
+     * 等同一 task 内的主动刷新）自动 bump 一个新 seq 作为基准，语义上代表
+     * 「这次是最新的一次 schedule 加载」。
+     */
+    async loadSchedule(scheduleId: number, seq?: number) {
+        const reqSeq = seq ?? this.nextScheduleSeq();
+        const requestTaskId = this.taskId;
         this.setState({ scheduleLoading: true });
         try {
             const item = await api.getSchedule(scheduleId);
+            // 旧请求（期间又发了一轮加载 / 切了 task）迟到 resolve：丢弃，不污染新 task。
+            if (this.scheduleLoadSeq !== reqSeq || this.taskId !== requestTaskId) return;
             this.setState({ scheduleItem: item, scheduleLoading: false });
         } catch {
-            this.setState({ scheduleLoading: false });
+            // 同样：只有仍是最新请求才允许清空，避免旧请求的失败反而抹掉新 task 的定时。
+            if (this.scheduleLoadSeq !== reqSeq || this.taskId !== requestTaskId) return;
+            // Blocking 5：加载失败也要清空 scheduleItem，避免上一条总结的定时残留，
+            // 保证 scheduleItem 始终对应当前 detail（宁可显示「设置定时」也不串台）。
+            this.setState({ scheduleItem: null, scheduleLoading: false });
         }
     }
 
-    async loadPersonalResult() {
-        if (this.taskId == null) return;
+    /**
+     * FE-1（切 task 竞态）：与 loadSchedule 同风格的「请求归属校验」。
+     * 进入时捕获 reqSeq（不传则自动 bump，代表「本次是最新一次加载」，供
+     * 同一 task 内主动刷新复用）与 requestTaskId；异步返回后只有 seq + taskId
+     * 仍一致才能 setState。过期响应（期间切了 task / 又发了一轮加载）一律
+     * 忽略（return），绝不把旧任务的 personalResult 写到新任务界面（泄漏他人报告）。
+     */
+    async loadPersonalResult(seq?: number, suppressWorkflow = false, taskIdOverride?: number) {
+        const requestTaskId = taskIdOverride ?? this.taskId;
+        if (requestTaskId == null) return;
+        const reqSeq = seq ?? this.nextScheduleSeq();
         this.setState({ personalLoading: true });
         try {
-            const result = await api.getPersonalResult(this.taskId);
-            this.setState({ personalResult: result, personalLoading: false });
+            const result = await api.getPersonalResult(requestTaskId);
+            // 迟到响应（期间切 task / 重新加载）：丢弃，不污染新 task。
+            // 字符串 taskNo 首次加载时 detail 的 setState 可能未提交，this.taskId 为 null；
+            // seq 已能盖住真切 task，故 taskId 只在「已提交且确实不同」时才丢弃，避免静默丢掉首载。
+            if (this.scheduleLoadSeq !== reqSeq || (this.taskId != null && this.taskId !== requestTaskId)) return;
+            const shouldGateWorkflow = !suppressWorkflow && this.shouldGateWorkflowForPersonalResult(result);
+            if (shouldGateWorkflow) {
+                this.setState({
+                    personalResult: result,
+                    personalLoading: false,
+                    workflowGateContent: true,
+                }, () => this.syncWorkflowProgress(result));
+            } else {
+                this.setState({
+                    personalResult: result,
+                    personalLoading: false,
+                    workflowGateContent: false,
+                    workflowRevealDone: true,
+                    workflowDisplayIndex: this.workflowStageIndex(result.workflow_stage),
+                });
+            }
             this.startPersonalPoll(result.worker_status);
+            if (result.current_version_id && result.content?.trim()) {
+                const markRead = api.markSummaryRead;
+                if (markRead) void markRead(requestTaskId, { personal_version_id: result.current_version_id }).then((attention) => {
+                    if (this.scheduleLoadSeq === reqSeq && (this.taskId == null || this.taskId === requestTaskId)) {
+                        window.dispatchEvent(new CustomEvent("summary-read", {
+                            detail: {
+                                taskId: requestTaskId,
+                                isUnread: attention.is_unread,
+                                needsAttention: attention.needs_attention,
+                            },
+                        }));
+                    }
+                }).catch(() => { /* keep unread on failure */ });
+            }
+            if (result.content?.trim()) {
+                this.loadPersonalVersions(requestTaskId);
+            } else if (this.taskId == null || this.taskId === requestTaskId) {
+                this.setState({ personalVersions: [], personalVersionsLoading: false });
+            }
         } catch {
+            if (this.scheduleLoadSeq !== reqSeq || (this.taskId != null && this.taskId !== requestTaskId)) return;
             this.setState({ personalLoading: false });
         }
     }
 
-    async loadMembers() {
-        if (this.taskId == null) return;
+    /**
+     * FE-1（切 task 竞态）：同 loadPersonalResult——迟到的 getMembers 响应不能
+     * 把旧 task 的成员名单 setState 到新 task（否则泄漏他人报告 / 污染 team
+     * citations、schedule participant 写入）。seq/taskId 不一致一律忽略。
+     */
+    async loadMembers(seq?: number, taskIdOverride?: number) {
+        const requestTaskId = taskIdOverride ?? this.taskId;
+        if (requestTaskId == null) return;
+        const reqSeq = seq ?? this.nextScheduleSeq();
         this.setState({ membersLoading: true });
         try {
-            const members = await api.getMembers(this.taskId);
+            const members = await api.getMembers(requestTaskId);
+            if (this.scheduleLoadSeq !== reqSeq || (this.taskId != null && this.taskId !== requestTaskId)) return;
             this.setState({ members, membersLoading: false });
         } catch {
+            if (this.scheduleLoadSeq !== reqSeq || (this.taskId != null && this.taskId !== requestTaskId)) return;
             this.setState({ membersLoading: false });
         }
     }
@@ -196,19 +894,36 @@ export default class SummaryDetailPage extends Component<SummaryDetailPageProps,
                 if (this.taskId == null) return;
                 if (this.isPersonalPolling) return;
                 this.isPersonalPolling = true;
+                // 续修2：捕获本 tick 发起时的 taskId。轮询是周期性的——不每 tick 抢 seq
+                // （会与其它同 task 加载互杀），只用 requestTaskId 守卫：切 task 后迟到响应
+                // 必丢弃，同 task 合法加载不误杀。
+                const requestTaskId = this.taskId;
                 try {
                     const result = await api.getPersonalResult(this.taskId);
-                    this.setState({ personalResult: result });
+                    // 切 task 后（clearInterval 停不住已在途请求）迟到响应：丢弃，不串台。
+                    if (this.taskId !== requestTaskId) return;
+                    this.setState({
+                        personalResult: result,
+                        workflowGateContent: true,
+                    }, () => this.syncWorkflowProgress(result));
                     if (result.worker_status !== 0 && result.worker_status !== 1) {
                         if (this.personalPollTimer) clearInterval(this.personalPollTimer);
-                        this.loadMembers();
+                        // When a participant report reaches a terminal worker state, the list
+                        // may need to switch from Processing to Waiting (pending submission).
+                        // task.status remains PROCESSING, so status polling cannot detect this;
+                        // explicitly reload the list when the terminal state first arrives.
+                        window.dispatchEvent(new CustomEvent("summary-task-regenerated", {
+                            detail: { taskIds: [requestTaskId] },
+                        }));
+                        // 终态一次性补拉 members：轮询已停，给它一个新 seq 即可。
+                        this.loadMembers(this.nextScheduleSeq());
                     }
                 } catch {
                     // ignore poll errors
                 } finally {
                     this.isPersonalPolling = false;
                 }
-            }, 5000);
+            }, PERSONAL_RESULT_POLL_INTERVAL_MS);
         }
     }
 
@@ -216,11 +931,20 @@ export default class SummaryDetailPage extends Component<SummaryDetailPageProps,
         if (this.taskId == null) return;
         try {
             await api.submitPersonalResult(this.taskId);
-            Toast.success("已提交");
-            this.loadPersonalResult();
-            this.loadMembers();
+            Toast.success(t("summary.detail.submitSuccess"));
+            // 续修1：成对 refresh 共用一个 seq，避免互相作废。
+            const seq = this.nextScheduleSeq();
+            this.loadPersonalResult(seq);
+            this.loadMembers(seq);
+            // F1：最后一人提交后团队总结/状态由 meta 聚合产生，team 区读 state.detail，
+            // 必须 loadDetail 才能刷出新团队总结与状态，否则显示旧数据。
+            this.loadDetail();
+            // Submission changes the list-only has_pending_submission flag while task.status
+            // may remain PROCESSING. Status polling cannot detect that change, so explicitly
+            // notify the list to reload.
+            window.dispatchEvent(new CustomEvent("summary-task-regenerated", { detail: { taskIds: [this.taskId] } }));
         } catch (err: any) {
-            Toast.error(err.message || "提交失败");
+            Toast.error(err.message || t("summary.detail.submitFailed"));
         }
     };
 
@@ -228,10 +952,71 @@ export default class SummaryDetailPage extends Component<SummaryDetailPageProps,
         if (this.taskId == null) return;
         try {
             await api.respondToTask(this.taskId, action);
-            Toast.success(action === "accept" ? "已同意" : "已拒绝");
+            Toast.success(action === "accept" ? t("summary.action.accepted") : t("summary.action.rejected"));
+            this.loadDetail();
+            // 问题2：accept/reject 成功后需通知左侧列表刷新状态（否则仍显“待确认”）。
+            // SummaryListPage 监听 "summary-task-regenerated" → loadData() 全量重拉，
+            // 是实际能刷新列表卡片状态的事件；同时保留 "summary-status-change"
+            // （携 taskIds，与现有广播机制一致）供详情页自身及其他潜在监听者。
+            window.dispatchEvent(new CustomEvent("summary-status-change", { detail: { taskIds: [this.taskId] } }));
+            window.dispatchEvent(new CustomEvent("summary-task-regenerated", { detail: { taskIds: [this.taskId] } }));
+        } catch (err: any) {
+            Toast.error(err.message || t("summary.common.operationFailed"));
+        }
+    };
+
+    // 问题3：creator 移除某成员。成功后重拉详情（后端已重算团队总结）。
+    handleRemoveMember = async (uid: string) => {
+        if (this.taskId == null) return;
+        const requestTaskId = this.taskId;
+        try {
+            await api.removeMember(this.taskId, uid);
+            // FE-1（切 task 竞态）：await 期间可能已切走，迟到响应不能在新 task 上弹提示/重拉。
+            if (this.taskId !== requestTaskId) return;
+            Toast.success(t("summary.detail.removeMemberSuccess"));
             this.loadDetail();
         } catch (err: any) {
-            Toast.error(err.message || "操作失败");
+            if (this.taskId !== requestTaskId) return;
+            Toast.error(err.message || t("summary.detail.removeMemberFailed"));
+        }
+    };
+
+    // 问题3：非 creator 参与者退出多人协作。成功后返回列表（popToRoot 回到根）。
+    handleLeaveTask = async () => {
+        if (this.taskId == null) return;
+        const requestTaskId = this.taskId;
+        try {
+            await api.leaveSummary(this.taskId);
+            if (this.taskId !== requestTaskId) return;
+            Toast.success(t("summary.detail.leaveSuccess"));
+            if (this.props.onAfterMutate) {
+                this.props.onAfterMutate();
+            } else {
+                WKApp.routeRight.popToRoot();
+            }
+            WKApp.mittBus.emit("summary-list-refresh-requested" as any);
+        } catch (err: any) {
+            if (this.taskId !== requestTaskId) return;
+            Toast.error(err.message || t("summary.detail.leaveFailed"));
+        }
+    };
+
+    handleDeleteTask = async () => {
+        if (this.taskId == null) return;
+        const requestTaskId = this.taskId;
+        try {
+            await api.deleteSummary(this.taskId);
+            if (this.taskId !== requestTaskId) return;
+            Toast.success(t("summary.list.deleteSuccess"));
+            if (this.props.onAfterMutate) {
+                this.props.onAfterMutate();
+            } else {
+                WKApp.routeRight.popToRoot();
+            }
+            WKApp.mittBus.emit("summary-list-refresh-requested" as any);
+        } catch (err: any) {
+            if (this.taskId !== requestTaskId) return;
+            Toast.error(err.message || t("summary.common.deleteFailed"));
         }
     };
 
@@ -257,20 +1042,35 @@ export default class SummaryDetailPage extends Component<SummaryDetailPageProps,
         this.stopFallbackPoll();
 
         try {
+            // 续修3：await 前捕获 requestTaskId。task A 状态事件触发后、await 未返回前切到
+            // task B，A 的 detail（含 result.team_citations）不得 setState 到 B 页面（A detail +
+            // B members/personal 混搭串台）。迟到直接 return，后续 prevStatus 判断 / 成对
+            // reload 都在这道守卫之后。
+            const requestTaskId = this.taskId;
+            const previousStatus = this.state.lastKnownStatus;
             const detail = await api.getSummaryDetail(this.taskId);
-            const prevStatus = this.state.lastKnownStatus;
+            if (this.taskId !== requestTaskId) return;
             const newStatus = detail.status;
+            this.notifyGroupsOnCompletion(previousStatus, detail);
             this.setState({ detail, lastKnownStatus: newStatus });
 
-            if (prevStatus !== undefined && prevStatus !== newStatus) {
+            if (previousStatus !== undefined && previousStatus !== newStatus) {
+                // 仅在「运行→完成」状态沿采集一次;原先误用 GET /summaries/:id,失败/进行中/导航等
+                // 一切 2xx 都会误报 completed。此处按 detail.status 状态转移判定,语义可靠。
+                // 单发/复位统一走 trackSummaryCompletedOnce(见三审 R3 单发、六审 P1b regenerate 复位)。
+                this.trackSummaryCompletedOnce(newStatus, requestTaskId);
                 if (
                     newStatus === TaskStatus.COMPLETED ||
                     newStatus === TaskStatus.FAILED ||
                     newStatus === TaskStatus.CANCELLED
                 ) {
                     if (detail.summary_mode === SummaryMode.BY_PERSON) {
-                        this.loadPersonalResult();
-                        this.loadMembers();
+                        // 续修1：一个刷新周期共用一个 seq，避免成对调用各自
+                        // nextScheduleSeq() 互相作废（第二个把第一个的 reqSeq 作废，
+                        // 导致第一个响应被守卫丢弃 / personalLoading 卡 true）。
+                        const seq = this.nextScheduleSeq();
+                        this.loadPersonalResult(seq);
+                        this.loadMembers(seq);
                     }
                 }
             }
@@ -313,9 +1113,14 @@ export default class SummaryDetailPage extends Component<SummaryDetailPageProps,
 
     private async doFallbackPollOnce() {
         if (this.taskId == null) return;
+        // 续修4：tick 开始处捕获 requestTaskId，整个 tick 内 batchStatus / getSummaryDetail
+        // 及 await 后所有 setState 都用这一个 requestTaskId 守卫：兑底轮询 await 期间切
+        // task，旧 task 的 team result/citations 不得写进新 task 页。
+        const requestTaskId = this.taskId;
         try {
             const updates = await api.batchStatus([this.taskId]);
-            const update = updates.find(u => u.id === this.taskId);
+            if (this.taskId !== requestTaskId) return;
+            const update = updates.find(u => u.id === requestTaskId);
             if (!update) return;
 
             const prevStatus = this.state.lastKnownStatus;
@@ -324,19 +1129,28 @@ export default class SummaryDetailPage extends Component<SummaryDetailPageProps,
             if (prevStatus !== undefined && prevStatus !== newStatus) {
                 try {
                     const detail = await api.getSummaryDetail(this.taskId);
-                    this.setState({ detail, lastKnownStatus: newStatus });
+                    if (this.taskId !== requestTaskId) return;
+                    this.notifyGroupsOnCompletion(prevStatus, detail);
+                    this.setState({ detail, lastKnownStatus: detail.status });
+                    // 与主状态订阅路径(:handleStatusChangeEvent)同一「运行→完成」沿采集一次。SSE 不可用时
+                    // 由本 fallback 轮询检出完成,若此处不发则 completed 漏计;单发/复位统一走
+                    // trackSummaryCompletedOnce(两路共用 completedTrackedTaskId 去重,见三审 R3、六审 P1b)。
+                    this.trackSummaryCompletedOnce(detail.status, requestTaskId);
                     if (
-                        newStatus === TaskStatus.COMPLETED ||
-                        newStatus === TaskStatus.FAILED ||
-                        newStatus === TaskStatus.CANCELLED
+                        detail.status === TaskStatus.COMPLETED ||
+                        detail.status === TaskStatus.FAILED ||
+                        detail.status === TaskStatus.CANCELLED
                     ) {
                         this.stopFallbackPoll();
+                        // 续修1：本轮刷新共用一个 seq，传给所有子加载（personal/members/schedule），
+                        // 避免多次 nextScheduleSeq() 互相作废。
+                        const seq = this.nextScheduleSeq();
                         if (detail.summary_mode === SummaryMode.BY_PERSON) {
-                            this.loadPersonalResult();
-                            this.loadMembers();
+                            this.loadPersonalResult(seq);
+                            this.loadMembers(seq);
                         }
                         if (detail.schedule_id && detail.schedule_id > 0) {
-                            this.loadSchedule(detail.schedule_id);
+                            this.loadSchedule(detail.schedule_id, seq);
                         }
                     }
                 } catch {
@@ -359,159 +1173,1361 @@ export default class SummaryDetailPage extends Component<SummaryDetailPageProps,
         }
     }
 
-    handleRegenerate = async () => {
-        if (this.taskId == null) return;
-        try {
-            await api.regenerateSummary(this.taskId);
-            Toast.success("已开始重新生成");
-            this.loadDetail();
-            window.dispatchEvent(new CustomEvent("summary-task-regenerated", { detail: { taskId: this.taskId } }));
-        } catch (err: any) {
-            Toast.error(err.message || "操作失败");
+    private notifyGroupsOnCompletion(previousStatus: number | undefined, detail: SummaryDetail) {
+        void sendGroupSummaryCompletionTips(
+            previousStatus,
+            detail,
+            WKApp.loginInfo.uid,
+            TaskStatus.COMPLETED,
+            ChannelTypeGroup,
+            {
+                sendToChannel: async (channel, currentUserId) => {
+                    const content = new SummaryNotifyContent();
+                    content.fromUID = currentUserId;
+                    content.fromName = WKApp.loginInfo.selfDisplayName?.()
+                        || WKApp.loginInfo.name
+                        || currentUserId;
+                    await WKSDK.shared().chatManager.send(content, channel);
+                },
+                isDisbanded: isConversationDisbanded,
+                warn: (message, context) => console.warn(message, context),
+            },
+        );
+    }
+
+
+    private startSummaryStream(taskId: number) {
+        if (this.streamClosedTaskId === taskId) return;
+        if (this.streamingTaskId === taskId && this.streamAbortController) return;
+        this.stopSummaryStream();
+        const controller = new AbortController();
+        this.streamAbortController = controller;
+        this.streamingTaskId = taskId;
+        this.setState({ streaming: true, streamError: null, streamingContent: "" });
+        let terminalReceived = false;
+        void api.streamSummary(taskId, {
+            scope: "personal",
+            signal: controller.signal,
+            onEvent: (event) => {
+                if (this.taskId !== taskId) return;
+                if (event.type === "start") {
+                    this.setState({ streamingContent: "", streamError: null });
+                    return;
+                }
+                if (event.type === "stage" && event.stage) {
+                    const idx = this.workflowStageIndex(event.stage);
+                    if (idx >= 0) this.setWorkflowStageDirectly(idx);
+                    return;
+                }
+                if (event.type === "delta") {
+                    if (event.content) {
+                        this.setState({ streamingContent: event.content });
+                    } else if (event.delta) {
+                        this.setState((prev) => ({ streamingContent: prev.streamingContent + event.delta }));
+                    }
+                    return;
+                }
+                if (event.type === "snapshot") {
+                    this.setState({ streamingContent: event.content || "" });
+                    return;
+                }
+                if (event.type === "done") {
+                    terminalReceived = true;
+                    this.streamAbortController = null;
+                    this.streamingTaskId = null;
+                    this.streamClosedTaskId = taskId;
+                    this.setState({ streaming: false });
+                    this.loadDetail();
+                    return;
+                }
+                if (event.type === "error") {
+                    terminalReceived = true;
+                    this.streamAbortController = null;
+                    this.streamingTaskId = null;
+                    this.streamClosedTaskId = taskId;
+                    this.setState({ streaming: false, streamError: event.message || null });
+                    this.loadDetail();
+                }
+            },
+        }).then(() => {
+            if (terminalReceived || controller.signal.aborted || this.taskId !== taskId) return;
+            this.streamAbortController = null;
+            this.streamingTaskId = null;
+            this.streamClosedTaskId = taskId;
+            this.setState({ streaming: false });
+            this.startFallbackPoll();
+        }).catch((err: any) => {
+            if (controller.signal.aborted || this.taskId !== taskId) return;
+            this.streamAbortController = null;
+            this.streamingTaskId = null;
+            this.streamClosedTaskId = taskId;
+            this.setState({ streaming: false, streamError: err?.message || null });
+            // Keep the existing polling path as the reliability fallback.
+            this.startFallbackPoll();
+        });
+    }
+
+    private stopSummaryStream(resetState = false) {
+        if (this.streamAbortController) {
+            this.streamAbortController.abort();
+            this.streamAbortController = null;
         }
+        this.streamingTaskId = null;
+        if (resetState && !this.unmounted) {
+            this.setState({ streaming: false, streamingContent: "", streamError: null });
+        }
+    }
+
+    private stopRefineStream() {
+        if (this.refineStreamAbortController) {
+            this.refineStreamAbortController.abort();
+            this.refineStreamAbortController = null;
+        }
+    }
+
+    private isRefineDonePayload(event: api.SummaryStreamEvent) {
+        return event.type === "done" && (
+            event.result_id != null ||
+            event.version != null ||
+            event.version_id != null ||
+            event.content != null ||
+            event.citations != null ||
+            event.team_citations != null ||
+            event.generated_at != null
+        );
+    }
+
+    private resetSummaryStreamForNewRun(taskId: number) {
+        this.stopSummaryStream();
+        this.streamClosedTaskId = null;
+        this.setState({ streaming: false, streamingContent: "", streamError: null });
+        if (this.taskId === taskId) {
+            this.startSummaryStream(taskId);
+        }
+    }
+
+    private startTeamSummaryStream(taskId: number) {
+        if (this.teamStreamClosedTaskId === taskId) return;
+        if (this.teamStreamingTaskId === taskId && this.teamStreamAbortController) return;
+        this.stopTeamSummaryStream();
+        const controller = new AbortController();
+        this.teamStreamAbortController = controller;
+        this.teamStreamingTaskId = taskId;
+        this.setState({ teamStreaming: true, teamStreamError: null, teamStreamingContent: "" });
+        let terminalReceived = false;
+        void api.streamSummary(taskId, {
+            scope: "team",
+            signal: controller.signal,
+            onEvent: (event) => {
+                if (this.taskId !== taskId) return;
+                if (event.type === "start") {
+                    this.setState({ teamStreamingContent: "", teamStreamError: null });
+                    return;
+                }
+                if (event.type === "delta") {
+                    if (event.content) {
+                        this.setState({ teamStreamingContent: event.content });
+                    } else if (event.delta) {
+                        this.setState((prev) => ({ teamStreamingContent: prev.teamStreamingContent + event.delta }));
+                    }
+                    return;
+                }
+                if (event.type === "snapshot") {
+                    this.setState({ teamStreamingContent: event.content || "" });
+                    return;
+                }
+                if (event.type === "done") {
+                    terminalReceived = true;
+                    this.teamStreamAbortController = null;
+                    this.teamStreamingTaskId = null;
+                    this.teamStreamClosedTaskId = taskId;
+                    this.setState({ teamStreaming: false });
+                    this.loadDetail();
+                    return;
+                }
+                if (event.type === "error") {
+                    terminalReceived = true;
+                    this.teamStreamAbortController = null;
+                    this.teamStreamingTaskId = null;
+                    this.teamStreamClosedTaskId = taskId;
+                    this.setState({ teamStreaming: false, teamStreamError: event.message || null });
+                    this.loadDetail();
+                }
+            },
+        }).then(() => {
+            if (terminalReceived || controller.signal.aborted || this.taskId !== taskId) return;
+            this.teamStreamAbortController = null;
+            this.teamStreamingTaskId = null;
+            this.teamStreamClosedTaskId = taskId;
+            this.setState({ teamStreaming: false });
+            this.startFallbackPoll();
+        }).catch((err: any) => {
+            if (controller.signal.aborted || this.taskId !== taskId) return;
+            this.teamStreamAbortController = null;
+            this.teamStreamingTaskId = null;
+            this.teamStreamClosedTaskId = taskId;
+            this.setState({ teamStreaming: false, teamStreamError: err?.message || null });
+            this.startFallbackPoll();
+        });
+    }
+
+    private stopTeamSummaryStream() {
+        if (this.teamStreamAbortController) {
+            this.teamStreamAbortController.abort();
+            this.teamStreamAbortController = null;
+        }
+        this.teamStreamingTaskId = null;
+    }
+
+    private resetTeamSummaryStreamForNewRun(taskId: number) {
+        this.stopTeamSummaryStream();
+        this.teamStreamClosedTaskId = null;
+        this.setState({ teamStreaming: false, teamStreamingContent: "", teamStreamError: null });
+        if (this.taskId === taskId) {
+            this.startTeamSummaryStream(taskId);
+        }
+    }
+
+    handleRegenerate = () => {
+        const { detail } = this.state;
+        if (this.taskId == null) return;
+        this.regenerateVoiceMode = null;
+        this.setState({
+            showRegenerateModal: true,
+            regenerateMode: "refine",
+            regenerateTopic: detail?.topic || detail?.title || "",
+            refineFeedback: "",
+        });
+    };
+
+    private hasRegenerateRefineBaseResult = () => {
+        const { detail, personalResult } = this.state;
+        return detail?.summary_mode === SummaryMode.BY_PERSON && !this.shouldOperateOnTeamSummary()
+            ? Boolean(personalResult?.id)
+            : Boolean(detail?.result_id);
+    };
+
+    private handleRegenerateModeChange = (regenerateMode: RegenerateMode) => {
+        this.setState({ regenerateMode });
+    };
+
+    handleRetry = async () => {
+        const { detail } = this.state;
+        if (!detail || this.taskId == null) return;
+        try {
+            this.setState({ regenerateSubmitting: true });
+            await api.regenerateSummary(this.taskId, { topic: detail.title || "" });
+            this.setState({ regenerateSubmitting: false });
+            this.loadDetail();
+        } catch (err: any) {
+            this.setState({ regenerateSubmitting: false });
+            Toast.error(err.message || t("summary.common.operationFailed"));
+        }
+    };
+
+    async loadVersions(taskId = this.taskId) {
+        if (taskId == null) return;
+        this.setState({ versionsLoading: true });
+        try {
+            const resp = await api.listSummaryVersions(taskId, 3);
+            if (this.taskId !== taskId) return;
+            this.setState({
+                versions: resp.versions || [],
+                versionsRetention: resp.keep_limit,
+                versionsLoading: false,
+            });
+        } catch {
+            if (this.taskId !== taskId) return;
+            this.setState({ versions: [], versionsRetention: null, versionsLoading: false });
+        }
+    }
+
+    async loadPersonalVersions(taskId = this.taskId) {
+        if (taskId == null) return;
+        this.setState({ personalVersionsLoading: true });
+        try {
+            const resp = await api.listPersonalSummaryVersions(taskId, 3);
+            if (this.taskId !== taskId) return;
+            this.setState({
+                personalVersions: resp.versions || [],
+                personalVersionsRetention: resp.keep_limit,
+                personalVersionsLoading: false,
+            });
+        } catch {
+            if (this.taskId !== taskId) return;
+            this.setState({ personalVersions: [], personalVersionsRetention: null, personalVersionsLoading: false });
+        }
+    }
+
+    handleRegenerateConfirm = async () => {
+        if (this.taskId == null || this.state.regenerateSubmitting) return;
+        const requestTaskId = this.taskId;
+        const { detail, regenerateMode } = this.state;
+        const trimmed = regenerateMode === "refine"
+            ? this.state.refineFeedback.trim()
+            : this.state.regenerateTopic.trim();
+        if (!trimmed) return;
+        this.stopRefineStream();
+        this.setState({ regenerateSubmitting: true });
+        let restoreRefineDraft: (() => void) | null = null;
+        let currentRefineController: AbortController | null = null;
+        try {
+            const operateOnTeamSummary = this.shouldOperateOnTeamSummary();
+            if (regenerateMode === "refine") {
+                if (detail?.summary_mode === SummaryMode.BY_PERSON && !operateOnTeamSummary) {
+                    const baseResultId = this.state.personalResult?.id;
+                    if (!baseResultId) return;
+                    const previousPersonalResult = this.state.personalResult;
+                    const previousMembers = this.state.members;
+                    restoreRefineDraft = () => {
+                        if (this.taskId === requestTaskId) this.setState({ personalResult: previousPersonalResult, members: previousMembers });
+                    };
+                    this.setState({ showRegenerateModal: false, refineLoadingTarget: "personal" });
+                    const refineController = new AbortController();
+                    currentRefineController = refineController;
+                    this.refineStreamAbortController = refineController;
+                    let draft = "";
+                    let refined: api.SummaryStreamEvent | null = null;
+                    await api.streamRefinePersonalSummary(requestTaskId, {
+                        feedback: trimmed,
+                        base_result_id: baseResultId,
+                        base_version: this.state.personalResult?.version,
+                    }, {
+                        signal: refineController.signal,
+                        onEvent: (event) => {
+                            if (this.taskId !== requestTaskId || refineController.signal.aborted) return;
+                            if (event.type === "delta") {
+                                draft = event.content || (draft + (event.delta || ""));
+                                const myUid = WKApp.loginInfo.uid;
+                                this.setState((prev) => ({
+                                    personalResult: prev.personalResult ? { ...prev.personalResult, content: draft } : prev.personalResult,
+                                    members: prev.members.map((m) => m.user_id === myUid ? { ...m, content: draft } : m),
+                                } as Pick<SummaryDetailPageState, "personalResult" | "members">));
+                                return;
+                            }
+                            if (event.type === "snapshot") {
+                                draft = event.content || "";
+                                const myUid = WKApp.loginInfo.uid;
+                                this.setState((prev) => ({
+                                    personalResult: prev.personalResult ? { ...prev.personalResult, content: draft } : prev.personalResult,
+                                    members: prev.members.map((m) => m.user_id === myUid ? { ...m, content: draft } : m),
+                                } as Pick<SummaryDetailPageState, "personalResult" | "members">));
+                                return;
+                            }
+                            if (event.type === "error") {
+                                throw new Error(event.message || t("summary.common.operationFailed"));
+                            }
+                            if (this.isRefineDonePayload(event)) {
+                                refined = event;
+                            }
+                        },
+                    });
+                    if (this.refineStreamAbortController === refineController) this.refineStreamAbortController = null;
+                    if (this.taskId !== requestTaskId || refineController.signal.aborted) return;
+                    if (!refined) throw new Error(t("summary.common.operationFailed"));
+                    restoreRefineDraft = null;
+                    Toast.success(t("summary.detail.refineSuccess", { values: { version: refined!.version ?? "" } }));
+                    this.appendLocalScheduleInstruction(trimmed);
+                    this.reloadScheduleAfterInstructionChange(requestTaskId);
+                    this.setState((prev) => {
+                        const nextPersonal = prev.personalResult ? {
+                            ...prev.personalResult,
+                            id: refined!.result_id || prev.personalResult.id,
+                            version: refined!.version || prev.personalResult.version,
+                            content: refined!.content || draft,
+                            citations: (refined!.citations as any) || prev.personalResult.citations,
+                            msg_count: refined!.msg_count ?? prev.personalResult.msg_count,
+                            generated_at: refined!.generated_at || prev.personalResult.generated_at,
+                        } : prev.personalResult;
+                        const myUid = WKApp.loginInfo.uid;
+                        return {
+                            showRegenerateModal: false,
+                            refineLoadingTarget: null,
+                            personalResult: nextPersonal,
+                            members: prev.members.map((m) => m.user_id === myUid ? {
+                                ...m,
+                                content: refined!.content || draft,
+                                citations: (refined!.citations as any) || m.citations,
+                            } : m),
+                        } as Pick<SummaryDetailPageState, "showRegenerateModal" | "refineLoadingTarget" | "personalResult" | "members">;
+                    });
+                    this.loadPersonalVersions(this.taskId);
+                } else {
+                    const baseResultId = detail?.result_id;
+                    if (!baseResultId) return;
+                    const previousDetail = this.state.detail;
+                    restoreRefineDraft = () => {
+                        if (this.taskId === requestTaskId) this.setState({ detail: previousDetail });
+                    };
+                    this.setState({
+                        showRegenerateModal: false,
+                        refineLoadingTarget: operateOnTeamSummary ? "team" : "summary",
+                    });
+                    const refineController = new AbortController();
+                    currentRefineController = refineController;
+                    this.refineStreamAbortController = refineController;
+                    let draft = "";
+                    let refined: api.SummaryStreamEvent | null = null;
+                    await api.streamRefineSummary(requestTaskId, { feedback: trimmed, base_result_id: baseResultId }, {
+                        signal: refineController.signal,
+                        onEvent: (event) => {
+                            if (this.taskId !== requestTaskId || refineController.signal.aborted) return;
+                            if (event.type === "delta") {
+                                draft = event.content || (draft + (event.delta || ""));
+                                this.setState((prev) => {
+                                    if (!prev.detail?.result) return null;
+                                    return {
+                                        detail: {
+                                            ...prev.detail,
+                                            result: { ...prev.detail.result, content: draft },
+                                        },
+                                    } as Pick<SummaryDetailPageState, "detail">;
+                                });
+                                return;
+                            }
+                            if (event.type === "snapshot") {
+                                draft = event.content || "";
+                                this.setState((prev) => {
+                                    if (!prev.detail?.result) return null;
+                                    return {
+                                        detail: {
+                                            ...prev.detail,
+                                            result: { ...prev.detail.result, content: draft },
+                                        },
+                                    } as Pick<SummaryDetailPageState, "detail">;
+                                });
+                                return;
+                            }
+                            if (event.type === "error") {
+                                throw new Error(event.message || t("summary.common.operationFailed"));
+                            }
+                            if (this.isRefineDonePayload(event)) {
+                                refined = event;
+                            }
+                        },
+                    });
+                    if (this.refineStreamAbortController === refineController) this.refineStreamAbortController = null;
+                    if (this.taskId !== requestTaskId || refineController.signal.aborted) return;
+                    if (!refined) throw new Error(t("summary.common.operationFailed"));
+                    restoreRefineDraft = null;
+                    Toast.success(t("summary.detail.refineSuccess", { values: { version: refined!.version ?? "" } }));
+                    this.appendLocalScheduleInstruction(trimmed);
+                    this.reloadScheduleAfterInstructionChange(requestTaskId);
+                    this.setState((prev) => {
+                        if (!prev.detail?.result) return { showRegenerateModal: false, refineLoadingTarget: null } as Pick<SummaryDetailPageState, "showRegenerateModal" | "refineLoadingTarget">;
+                        return {
+                            showRegenerateModal: false,
+                            refineLoadingTarget: null,
+                            detail: {
+                                ...prev.detail,
+                                result_id: refined!.result_id || prev.detail.result_id,
+                                result: {
+                                    ...prev.detail.result,
+                                    content: refined!.content || draft,
+                                    version: refined!.version || prev.detail.result.version,
+                                    citations: (refined!.citations as any) || prev.detail.result.citations,
+                                    team_citations: (refined!.team_citations as any) || prev.detail.result.team_citations,
+                                    total_msg_count: refined!.total_msg_count ?? prev.detail.result.total_msg_count,
+                                    total_token_used: refined!.total_token_used ?? prev.detail.result.total_token_used,
+                                    model_version: refined!.model_version || prev.detail.result.model_version,
+                                    operation_type: refined!.operation_type,
+                                    operation_note: refined!.operation_note,
+                                    parent_result_id: refined!.parent_result_id,
+                                    generated_at: refined!.generated_at || prev.detail.result.generated_at,
+                                },
+                            },
+                        } as Pick<SummaryDetailPageState, "showRegenerateModal" | "refineLoadingTarget" | "detail">;
+                    });
+                    this.loadVersions(this.taskId);
+                }
+            } else {
+                if (operateOnTeamSummary) {
+                    await api.regenerateSummary(requestTaskId, { topic: trimmed });
+                    if (this.taskId !== requestTaskId) return;
+                    Toast.success(t("summary.detail.regenerateStarted"));
+                    this.resetTeamSummaryStreamForNewRun(requestTaskId);
+                    this.resetLocalScheduleInstruction(trimmed);
+                    this.setState((prev) => prev.detail ? {
+                        showRegenerateModal: false,
+                        detail: {
+                            ...prev.detail,
+                            title: trimmed || prev.detail.title,
+                            topic: trimmed || prev.detail.topic,
+                            status: TaskStatus.PENDING,
+                        },
+                    } as Pick<SummaryDetailPageState, "showRegenerateModal" | "detail"> : { showRegenerateModal: false } as Pick<SummaryDetailPageState, "showRegenerateModal">);
+                    this.loadDetail();
+                } else if (detail?.summary_mode === SummaryMode.BY_PERSON && this.isMultiCollab()) {
+                    await api.regeneratePersonalSummary(requestTaskId, { topic: trimmed });
+                    if (this.taskId !== requestTaskId) return;
+                    Toast.success(t("summary.detail.regenerateStarted"));
+                    this.resetSummaryStreamForNewRun(requestTaskId);
+                    this.resetLocalScheduleInstruction(trimmed);
+                    this.setState((prev) => ({
+                        showRegenerateModal: false,
+                        detail: prev.detail ? {
+                            ...prev.detail,
+                            title: trimmed || prev.detail.title,
+                            topic: trimmed || prev.detail.topic,
+                        } : prev.detail,
+                        personalResult: prev.personalResult ? {
+                            ...prev.personalResult,
+                            worker_status: 0,
+                            workflow_stage: "",
+                            content: "",
+                            citations: [],
+                            submitted_at: null,
+                            generated_at: null,
+                            msg_count: 0,
+                        } : prev.personalResult,
+                        personalVersions: [],
+                        personalVersionsLoading: false,
+                        workflowDisplayIndex: 0,
+                        workflowGateContent: true,
+                        workflowRevealDone: false,
+                    } as Pick<SummaryDetailPageState, "showRegenerateModal" | "detail" | "personalResult" | "personalVersions" | "personalVersionsLoading" | "workflowDisplayIndex" | "workflowGateContent" | "workflowRevealDone">));
+                    const seq = this.nextScheduleSeq();
+                    this.loadPersonalResult(seq);
+                    this.loadMembers(seq);
+                } else {
+                    await api.regenerateSummary(requestTaskId, { topic: trimmed });
+                    if (this.taskId !== requestTaskId) return;
+                    Toast.success(t("summary.detail.regenerateStarted"));
+                    if (detail?.summary_mode === SummaryMode.BY_PERSON) {
+                        this.resetSummaryStreamForNewRun(requestTaskId);
+                    }
+                    this.resetLocalScheduleInstruction(trimmed);
+                    this.setState({ showRegenerateModal: false });
+                    this.loadDetail();
+                }
+            }
+            if (this.taskId !== requestTaskId) return;
+            window.dispatchEvent(new CustomEvent("summary-task-regenerated", { detail: { taskId: requestTaskId } }));
+        } catch (err: any) {
+            if (err?.name === "AbortError" || this.taskId !== requestTaskId || this.unmounted) return;
+            restoreRefineDraft?.();
+            this.setState({ refineLoadingTarget: null });
+            Toast.error(err.message || t("summary.common.operationFailed"));
+        } finally {
+            if (currentRefineController && this.refineStreamAbortController === currentRefineController) {
+                this.refineStreamAbortController.abort();
+                this.refineStreamAbortController = null;
+            }
+            if (this.taskId === requestTaskId && !this.unmounted) {
+                this.setState({ regenerateSubmitting: false });
+            }
+        }
+    };
+
+    handleRestoreVersion = async (version: SummaryVersionItem): Promise<boolean> => {
+        const { isEditing, editingTeamSummary, editingMyDraft, editingPersonalReport } = this.state;
+        if (
+            this.taskId == null ||
+            this.state.restoringVersionId != null ||
+            isEditing ||
+            editingTeamSummary ||
+            editingMyDraft ||
+            editingPersonalReport
+        ) return false;
+        const requestTaskId = this.taskId;
+        this.setState({ restoringVersionId: version.result_id });
+        try {
+            await api.restoreSummaryVersion(requestTaskId, version.result_id);
+            if (this.taskId !== requestTaskId) return false;
+            // The entry-gate at the four handleStartEdit* handlers already
+            // refuses to open an editor while a restore is in flight, so
+            // this branch is defence in depth: if it does trigger (racing
+            // events / imperative callers), the mutation has committed on
+            // the server, so we still tell the user and refresh — silent
+            // stale UI would be worse than tearing down whichever editor
+            // opened despite the entry-gate. Info-level toast rather than
+            // success because the caller-driven refresh below is what makes
+            // the change visible.
+            const post = this.state;
+            if (post.isEditing || post.editingTeamSummary || post.editingMyDraft || post.editingPersonalReport) {
+                Toast.info(t("summary.detail.versionRestored"));
+                this.loadDetail();
+                return false;
+            }
+            Toast.success(t("summary.detail.versionRestored"));
+            this.loadDetail();
+            return true;
+        } catch (err: any) {
+            if (this.taskId !== requestTaskId) return false;
+            Toast.error(err.message || t("summary.common.operationFailed"));
+            return false;
+        } finally {
+            this.setState({ restoringVersionId: null });
+        }
+    };
+
+
+    handleRestorePersonalVersion = async (version: SummaryVersionItem): Promise<boolean> => {
+        const { isEditing, editingTeamSummary, editingMyDraft, editingPersonalReport } = this.state;
+        if (
+            this.taskId == null ||
+            this.state.restoringPersonalVersionId != null ||
+            isEditing ||
+            editingTeamSummary ||
+            editingMyDraft ||
+            editingPersonalReport
+        ) return false;
+        const requestTaskId = this.taskId;
+        this.setState({
+            restoringPersonalVersionId: version.result_id,
+            workflowGateContent: false,
+            workflowRevealDone: true,
+            workflowDisplayIndex: -1,
+        });
+        try {
+            await api.restorePersonalSummaryVersion(requestTaskId, version.result_id);
+            if (this.taskId !== requestTaskId) return false;
+            // Defence in depth (see the team-restore twin above); the
+            // entry-gate at handleStartEdit* already refuses to open an
+            // editor while a restore is in flight, so this branch should
+            // only be reachable in racing/imperative paths. If it does
+            // trigger, the mutation has already committed on the server,
+            // so still tell the user and refresh.
+            const post = this.state;
+            const refreshPersonal = () => {
+                const seq = this.nextScheduleSeq();
+                this.loadPersonalResult(seq, true);
+                this.loadMembers(seq);
+                this.loadPersonalVersions(this.taskId!);
+            };
+            if (post.isEditing || post.editingTeamSummary || post.editingMyDraft || post.editingPersonalReport) {
+                Toast.info(t("summary.detail.versionRestored"));
+                refreshPersonal();
+                return false;
+            }
+            Toast.success(t("summary.detail.versionRestored"));
+            refreshPersonal();
+            return true;
+        } catch (err: any) {
+            if (this.taskId !== requestTaskId) return false;
+            Toast.error(err.message || t("summary.common.operationFailed"));
+            return false;
+        } finally {
+            this.setState({ restoringPersonalVersionId: null });
+        }
+    };
+
+    /** Monotonic sequence for handleViewVersion so a late-arriving response
+     * from an older request cannot clobber a newer selection. Compared
+     * after the `await` (same shape as nextScheduleSeq). */
+    private viewVersionSeq = 0;
+
+    handleViewVersion = async (version: SummaryVersionItem, isPersonal: boolean) => {
+        if (this.taskId == null || this.state.versionDetailLoading) return;
+        const requestTaskId = this.taskId;
+        const requestResultId = version.result_id;
+        const seq = ++this.viewVersionSeq;
+        this.setState({
+            showVersionDetailModal: true,
+            versionDetailLoading: true,
+            versionDetail: null,
+            versionDetailIsPersonal: isPersonal,
+        });
+        try {
+            const detail = isPersonal
+                ? await api.getPersonalSummaryVersion(requestTaskId, requestResultId)
+                : await api.getSummaryVersion(requestTaskId, requestResultId);
+            if (this.taskId !== requestTaskId) return;
+            // Drop the response if a newer selection has since been made
+            // (viewVersionSeq bumped) or the user closed the panel while we
+            // were fetching (handleCloseVersionDetail/Panel cleared the
+            // modal flag). Either way we let the newer request or the
+            // explicit close win, rather than reviving state we just cleared.
+            if (seq !== this.viewVersionSeq) return;
+            if (!this.state.showVersionDetailModal) return;
+            if (detail.result_id !== requestResultId) {
+                this.setState({ showVersionDetailModal: false, versionDetail: null });
+                return;
+            }
+            this.setState({ versionDetail: detail });
+        } catch (err: any) {
+            if (this.taskId !== requestTaskId) return;
+            if (seq !== this.viewVersionSeq) return;
+            Toast.error(err.message || t("summary.common.operationFailed"));
+            this.setState({ showVersionDetailModal: false, versionDetail: null });
+        } finally {
+            // Guarantee versionDetailLoading is cleared even on early
+            // returns (panel closed, seq stale, request superseded). Any
+            // future early-return above will keep the invariant that a
+            // stranded loading flag cannot silently disable subsequent
+            // previews — handleViewVersion would otherwise itself be gated
+            // by the flag it just leaked (see the guard at the top).
+            // Skip the write when this request has been superseded by a
+            // newer one: the newer request owns the flag.
+            if (seq === this.viewVersionSeq) {
+                this.setState({ versionDetailLoading: false });
+            }
+        }
+    };
+
+    handleCloseVersionDetail = () => {
+        // Close unconditionally — never trap the user behind an in-flight
+        // fetch. handleViewVersion's completion handler drops the response
+        // if showVersionDetailModal was cleared while awaiting.
+        this.setState({ showVersionDetailModal: false, versionDetail: null, versionDetailLoading: false });
+    };
+
+    /** Close the version records side panel: also exit the read-only preview
+     * in the centre column, returning to the editable current content.
+     *
+     * Do NOT early-return on versionDetailLoading. A slow version-detail
+     * request otherwise traps the user in the panel until the fetch
+     * resolves, with no visible cancel. Instead, close the panel
+     * unconditionally — the load-completion handler writes into
+     * `versionDetail` but the panel is already closed, so the stale
+     * result is never surfaced. Hard-cancelling the in-flight fetch
+     * itself would need an AbortController; that is a broader change and
+     * not required to unblock the close action.
+     */
+    handleCloseVersionPanel = () => {
+        this.setState({ versionPanelOpen: false, showVersionDetailModal: false, versionDetail: null, versionDetailLoading: false });
+    };
+
+    handleRegenerateCancel = () => {
+        this.regenerateVoiceMode = null;
+        this.setState({ showRegenerateModal: false });
     };
 
     handleCancel = async () => {
         if (this.taskId == null) return;
         try {
             await api.cancelSummary(this.taskId);
-            Toast.success("任务已取消");
+            Toast.success(t("summary.detail.cancelSuccess"));
             this.loadDetail();
         } catch (err: any) {
-            Toast.error(err.message || "操作失败");
+            Toast.error(err.message || t("summary.common.operationFailed"));
         }
     };
 
     openScheduleModal = () => {
+        // 埋点 308:打开定时总结配置弹窗（隐私 props 恒空）。
+        Dap.shared.track("smart_summary_timer_dialog_opened", {});
         const { scheduleItem } = this.state;
+        // Blocking 1：is_active=false 的记录在交互上视为「无活动定时」，但仍回填
+        // 原有周期/时刻，方便用户「重新启用」时不用从零填。保存逻辑（handleScheduleSave）
+        // 会检测原记录是否 inactive 并走重新启用路径。
         if (scheduleItem) {
+            const scheduleConfig = scheduleItemToConfig(scheduleItem);
             this.setState({
-                scheduleConfig: cronToScheduleConfig(scheduleItem.cron_expr),
+                scheduleConfig: {
+                    ...scheduleConfig,
+                    generationInstruction: this.scheduleInstructionForConfig(scheduleItem.generation_instruction),
+                },
                 showScheduleConfig: true,
             });
         } else {
             this.setState({
-                scheduleConfig: { period: "daily", time: "09:00" },
+                scheduleConfig: {
+                    unit: "week",
+                    every: 1,
+                    time: "09:00",
+                    generationInstruction: this.defaultScheduleInstruction(),
+                },
                 showScheduleConfig: true,
             });
         }
     };
 
+    /**
+     * V5/§4.2/§6.1：本任务是否「多人」。
+     *
+     * 竞态修复（第3轮）：members 来自 loadDetail 之后的二次异步 getMembers，到达
+     * 时间不确定。若以 members.length 作主判据，members 未回填的窗口里多人任务会被
+     * 误判为单人 → handleScheduleSave 漏传 confirm_policy=1。
+     *
+     * 因此判定的「可靠数据源」改为 detail.participants —— 它随 loadDetail 的
+     * getSummaryDetail 一并同步返回（不依赖二次异步），且语义即本任务全体参与者
+     *（含 creator + 协作成员）。只有当 detail 里就没有 participants 信息时，才退回
+     * 用已加载的 members 兜底。
+     *
+     * 注意：这里只回答「是否多人」。members 是否「已加载完成」由 handleScheduleSave
+     * 的保存前 guard（isMembersReadyForSave）单独把关，避免把「members 加载中」误
+     * 当「确实单人」。
+     */
+    private isMultiPerson(): boolean {
+        const { detail, members } = this.state;
+        // 主判据：detail.participants（同步随 detail 返回，不受二次异步竞态影响）。
+        if (detail && Array.isArray(detail.participants) && detail.participants.length > 0) {
+            return detail.participants.length > 1;
+        }
+        // 兜底：detail 没带 participants 时，用已加载的 members。
+        return members.length > 1;
+    }
+
+    /**
+     * 需求1/5/7：是否「多人协作」= 多人（participants>1）且 BY_PERSON。
+     * 多人协作页：不单独显示「我的总结」区（need1）；定时按钮入团队框（need5）；
+     * 成员状态区可加成员（need7）。单人 BY_PERSON / BY_GROUP 不算多人协作。
+     */
+    private isMultiCollab(): boolean {
+        const { detail } = this.state;
+        return detail?.summary_mode === SummaryMode.BY_PERSON && this.isMultiPerson();
+    }
+
+    /**
+     * 竞态修复（第3轮）：保存定时前判断「多人判定所依赖的数据是否已可靠就绪」。
+     *
+     * - 若 isMultiPerson 能从 detail.participants 得出结论（detail 已加载且带
+     *   participants），则判定不依赖二次异步 members，任何时刻都可靠 → 直接就绪。
+     * - 否则（只能退回 members 兜底）必须等 members 加载完成才允许保存；membersLoading
+     *   为 true 时表示「members 加载中」，此时不能保存（不能把加载中误当单人）。
+     *
+     * 用 membersLoading 标志严格区分「加载中」(true) 与「已加载且确实单人」(false 且
+     * members.length<=1)。
+     */
+    private isMembersReadyForSave(): boolean {
+        const { detail, membersLoading } = this.state;
+        // detail 带 participants → 多人判定不依赖 members，始终就绪。
+        if (detail && Array.isArray(detail.participants) && detail.participants.length > 0) {
+            return true;
+        }
+        // 退回 members 兜底的情形：members 仍在加载中则未就绪。
+        return !membersLoading;
+    }
+
+    /**
+     * 构造「手动转定时/改定时」要显式带给后端的协作名单 [{user_id,user_name}]。
+     * 数据源与 isMultiPerson 的可靠判据一致：优先 detail.participants（随 detail
+     * 同步返回，不受二次异步 members 竞态影响），否则退回已加载的 members。
+     * 单人（仅 creator）时返回单元素或空，由后端按真实 task participants 兜底，
+     * 不会被误判为多人。
+     */
+    private buildScheduleParticipants(): { user_id: string; user_name?: string }[] {
+        const { detail, members } = this.state;
+        const seen = new Set<string>();
+        const out: { user_id: string; user_name?: string }[] = [];
+        const push = (userId?: string, userName?: string) => {
+            if (!userId || seen.has(userId)) return;
+            seen.add(userId);
+            out.push(userName ? { user_id: userId, user_name: userName } : { user_id: userId });
+        };
+        if (detail && Array.isArray(detail.participants) && detail.participants.length > 0) {
+            detail.participants.forEach((p) => push(p.user_id, p.user_name));
+            return out;
+        }
+        members.forEach((m) => push(m.user_id, m.user_name));
+        return out;
+    }
+
     handleScheduleSave = async (config: ScheduleConfig) => {
+        // 续修5：入口捕获发起时的 requestTaskId。用户保存定时后、网络往返期间
+        // 切到别的 task，不能把 A 的 schedule 回显到 B（loadSchedule 只能守「调用后才切」，
+        // 守不住「调用前已切」）。await 后、调 loadSchedule / 动新 task UI 前均校验。
+        const requestTaskId = this.taskId;
         const { detail, scheduleItem } = this.state;
         if (!detail) return;
 
-        const cronExpr = scheduleToCron(config);
-
-        try {
-            if (scheduleItem) {
-                await api.updateSchedule(scheduleItem.schedule_id, { cron_expr: cronExpr });
-                Toast.success("定时更新已保存");
-                this.loadSchedule(scheduleItem.schedule_id);
-            } else {
-                const newSchedule = await api.createSchedule({
-                    title: detail.title,
-                    summary_mode: detail.summary_mode,
-                    cron_expr: cronExpr,
-                    time_range_type: 2,
-                    sources: detail.sources,
-                });
-                Toast.success("定时更新已创建");
-                this.setState({ scheduleItem: newSchedule });
-            }
-            this.setState({ showScheduleConfig: false });
-        } catch (err: any) {
-            Toast.error(err.message || "保存失败");
-        }
-    };
-
-    handleForwardToChat = () => {
-        const { detail } = this.state;
-        if (!detail?.result?.content?.trim()) return;
-        WKApp.shared.baseContext.showConversationSelect(async (channels: Channel[]) => {
-            const cleanContent = (detail?.result?.content ?? '').replace(/\[\d+\]/g, '').replace(/  +/g, ' ').trim();
-            const chunks = splitSummaryText(cleanContent);
-            const errors: string[] = [];
-
-            for (const ch of channels) {
-                try {
-                    for (let i = 0; i < chunks.length; i++) {
-                        const msg = new MessageText(chunks[i]);
-
-                        // Inject space_id for person channels (matching ConversationVM.sendMessage pattern)
-                        const spaceId = WKApp.shared.currentSpaceId;
-                        if (spaceId && ch.channelType === ChannelTypePerson) {
-                            const originalEncodeJSON = msg.encodeJSON.bind(msg);
-                            msg.encodeJSON = () => {
-                                const obj = originalEncodeJSON();
-                                obj.space_id = spaceId;
-                                return obj;
-                            };
-                            msg.contentObj = { ...(msg.contentObj || {}), space_id: spaceId };
-                        }
-
-                        await WKSDK.shared().chatManager.send(msg, ch);
-                        if (i < chunks.length - 1) {
-                            await new Promise((r) => setTimeout(r, INTER_MESSAGE_DELAY_MS));
-                        }
-                    }
-                } catch {
-                    errors.push(ch.channelID);
-                }
-            }
-
-            if (errors.length > 0) {
-                if (errors.length === channels.length) {
-                    Toast.error('转发失败');
-                } else {
-                    Toast.error(`部分频道转发失败 (${errors.length}/${channels.length})`);
-                }
-            } else {
-                Toast.success('已转发');
-            }
-        }, '转发到聊天');
-    };
-
-    handleForwardToMatter = () => {
-        const { detail } = this.state;
-        if (!detail || detail.status !== TaskStatus.COMPLETED) return;
-
-        const content = detail.result?.content;
-        if (!content?.trim()) {
-            Toast.warning('暂无可转发的内容');
+        // 竞态修复（第3轮）finding 1：多人判定只能退回 members 兜底且 members 尚未
+        // 加载完成时，不能保存——否则 isMultiPerson() 会把「members 加载中」误判为
+        // 单人，漏传 confirm_policy=1（手动转定时未触发后端一次性确认重置）。
+        // 阻止保存并提示，等 members 就绪后用户重试。
+        if (!this.isMembersReadyForSave()) {
+            Toast.warning(t("summary.detail.membersLoadingRetry"));
             return;
         }
 
-        this.setState({ showMatterPicker: true });
-    };
+        // V5：多人定时（手动转定时/改定时）写路径必须带 confirm_policy=1，
+        // 触发后端一次性确认（create 全员置 confirmed=false；update 重置确认）。
+        // 单人不传 confirm_policy，走后端兜底。复用 scheduleToParams 的条件透传。
+        const confirmPolicy = this.isMultiPerson() ? 1 : undefined;
+        // 显式契约：手动转定时/改定时时把当前协作名单一并带给后端，
+        // 不依赖后端从 task participants 兜底也能保住全部协作成员（修复
+        // 多人手动转定时丢成员、定时轮退化成单人总结的根因之配套）。
+        // 数据源优先 detail.participants（随 detail 同步返回），否则退回
+        // 已加载的 members；二者就绪由 isMembersReadyForSave 上方 guard 把关。
+        const scheduleParticipants = this.buildScheduleParticipants();
+        const participantsParam =
+            scheduleParticipants.length > 0 ? { participants: scheduleParticipants } : {};
+        const { cron_expr, interval_days, interval_months, day_of_week, day_of_month, run_time, confirm_policy } =
+            scheduleToParams({ ...config, confirm_policy: confirmPolicy });
+        const generation_instruction = (config.generationInstruction || "").trim();
 
-    handleMatterSelected = async (matterId: string, matterTitle: string) => {
-        const { detail } = this.state;
-        if (!detail) return;
-
-        const content = detail.result?.content;
-        if (!content?.trim()) return;
-
-        this.setState({ forwardingToMatter: true, showMatterPicker: false });
         try {
-            await matterBridge.addComment(matterId, content);
-            Toast.success(`已转发到「${matterTitle}」`);
+            if (scheduleItem) {
+                // Blocking 1：原记录被停用（is_active=false）时，仅 update 不会把 is_active
+                // 切回 true，定时仍不生效。所以：先 update 应用新配置，再 toggle(id,true)
+                // 重新启用。toggle 在 re-enable 时会按 NextRunWithInterval 重算 next_run_at 到
+                // 未来，保证「停用→再设置保存→定时真正重新生效」。
+                const wasInactive = shouldReactivateOnSave(scheduleItem);
+
+                // Plan A1: detail-page edit is scoped to THIS summary. The backend
+                // clones a new schedule (and rebinds this task) when the schedule
+                // is shared by multiple summaries, so other summaries are not
+                // affected. The response carries the effective schedule_id (the
+                // clone's id when cloned, or the original id otherwise).
+                const updated = await api.updateSchedule(scheduleItem.schedule_id, {
+                    cron_expr,
+                    interval_days,
+                    interval_months,
+                    day_of_week,
+                    day_of_month,
+                    run_time,
+                    generation_instruction,
+                    scope: 'task',
+                    task_id: detail.task_id,
+                    ...participantsParam,
+                    // V5：多人「改/转定时」带 confirm_policy=1 触发后端一次性确认重置。
+                    ...(confirm_policy !== undefined ? { confirm_policy } : {}),
+                });
+                const effectiveScheduleId = updated?.schedule_id ?? scheduleItem.schedule_id;
+
+                if (wasInactive) {
+                    // 重新启用：对生效的 schedule_id（可能是 clone）调 toggle(true)，
+                    // 把 is_active 置回 1 并把 next_run 推到未来。
+                    await api.toggleSchedule(effectiveScheduleId, true);
+                }
+
+                Toast.success(t("summary.detail.scheduleSaved"));
+                // 续修5：切了 task 就别回显 / 别动新 task 的 UI。
+                if (this.taskId !== requestTaskId) return;
+                this.loadSchedule(effectiveScheduleId);
+            } else {
+                // 为「无定时」总结新建定时：一步式 create，带 scope='task' + task_id。
+                // 后端在一个事务里原子完成：校验 task 归属 → 建定时 → Update
+                // summary_task.schedule_id 绑定（一对一约束）。不再需要第二步 update
+                // 绑定，也不会产生游离定时，所以去掉 B2 回滚。失败时后端返回
+                // 中文错误（一对一约束 / 40004 无权限 / scope=task 必传 task_id 等），
+                // 由下方 catch 的 Toast.error 透出 err.message。
+                const newSchedule = await api.createSchedule({
+                    title: detail.title,
+                    generation_instruction,
+                    summary_mode: detail.summary_mode,
+                    cron_expr,
+                    interval_days,
+                    interval_months,
+                    day_of_week,
+                    day_of_month,
+                    run_time,
+                    time_range_type: 2,
+                    // 强剥 source_name：与即时总结/ScheduleForm 一致，提交时只带
+                    // {source_type, source_id}，让后端按 source_id 现查 IM 库权威群名
+                    // （带类型后缀）。避免详情页把 detail.sources 里的客户端名
+                    // （未命名来源会退化成原始 group_no/thread id）写进定时配置。
+                    sources: detail.sources.map(({ source_type, source_id }) => ({
+                        source_type,
+                        source_id,
+                    })),
+                    scope: 'task',
+                    task_id: detail.task_id,
+                    ...participantsParam,
+                    // V5：多人「手动转定时」关键路径带 confirm_policy=1，
+                    // 后端创建 participant_config 时全员（含 creator）置 confirmed=false。
+                    ...(confirm_policy !== undefined ? { confirm_policy } : {}),
+                });
+                Toast.success(t("summary.detail.scheduleCreated"));
+                // 拉取刚建并已绑定的定时回显。
+                // 续修5：切了 task 就别回显 / 别动新 task 的 UI。
+                if (this.taskId !== requestTaskId) return;
+                this.loadSchedule(newSchedule.schedule_id);
+            }
+            // 续修5：迟到则不关闭新 task 的弹框。
+            if (this.taskId !== requestTaskId) return;
+            this.setState({ showScheduleConfig: false });
         } catch (err: any) {
-            Toast.error(err.message || '转发失败');
-        } finally {
-            this.setState({ forwardingToMatter: false });
+            Toast.error(err.message || t("summary.common.saveFailed"));
         }
     };
 
+    private scheduleInstructionVersionSource() {
+        const { versions, personalVersions } = this.state;
+        return [...versions, ...personalVersions];
+    }
+
+    private defaultScheduleInstruction() {
+        const pending = this.state.pendingScheduleInstruction.trim();
+        if (pending) return pending;
+
+        const { detail } = this.state;
+        const versionSource = this.scheduleInstructionVersionSource();
+        let base = detail?.title || "";
+        const refinements: string[] = [];
+        versionSource
+            .slice()
+            .sort((a, b) => a.version - b.version)
+            .forEach((version) => {
+                const note = (version.operation_note || "").trim();
+                if (["generate", "regenerate", "scheduled_generate"].includes(version.operation_type)) {
+                    base = note || base;
+                    refinements.length = 0;
+                    return;
+                }
+                if (version.operation_type === "refine" && note) {
+                    refinements.push(note);
+                }
+            });
+        return [base.trim(), ...refinements].filter(Boolean).join("\n");
+    }
+
+    private scheduleInstructionForConfig(existingInstruction?: string) {
+        const existing = (existingInstruction || "").trim();
+        if (!existing) return this.defaultScheduleInstruction();
+
+        const missingRefinements = this.refinementNotesSinceLastReset()
+            .filter((note) => !existing.includes(note));
+        if (missingRefinements.length === 0) return existing;
+        return [existing, ...missingRefinements].filter(Boolean).join("\n");
+    }
+
+    private refinementNotesSinceLastReset() {
+        const versionSource = this.scheduleInstructionVersionSource();
+        const refinements: string[] = [];
+        versionSource
+            .slice()
+            .sort((a, b) => a.version - b.version)
+            .forEach((version) => {
+                if (["generate", "regenerate", "scheduled_generate"].includes(version.operation_type || "generate")) {
+                    refinements.length = 0;
+                    return;
+                }
+                const note = (version.operation_note || "").trim();
+                if (version.operation_type === "refine" && note) {
+                    refinements.push(note);
+                }
+            });
+        return refinements;
+    }
+
+    private appendLocalScheduleInstruction(feedback: string) {
+        const addition = feedback.trim();
+        if (!addition) return;
+        this.setState((prev) => {
+            const current = prev.scheduleItem
+                ? (prev.scheduleItem.generation_instruction || "").trim()
+                : (prev.pendingScheduleInstruction || prev.detail?.title || "").trim();
+            const nextInstruction = current ? `${current}\n${addition}` : addition;
+            return {
+                pendingScheduleInstruction: nextInstruction,
+                scheduleItem: prev.scheduleItem ? {
+                    ...prev.scheduleItem,
+                    generation_instruction: nextInstruction,
+                } : prev.scheduleItem,
+                scheduleConfig: prev.scheduleConfig ? {
+                    ...prev.scheduleConfig,
+                    generationInstruction: nextInstruction,
+                } : prev.scheduleConfig,
+            } as Pick<SummaryDetailPageState, "pendingScheduleInstruction" | "scheduleItem" | "scheduleConfig">;
+        });
+    }
+
+    private resetLocalScheduleInstruction(instruction: string) {
+        const next = instruction.trim();
+        if (!next) return;
+        this.setState((prev) => ({
+            pendingScheduleInstruction: next,
+            scheduleItem: prev.scheduleItem ? {
+                ...prev.scheduleItem,
+                title: next,
+                generation_instruction: next,
+            } : prev.scheduleItem,
+            scheduleConfig: prev.scheduleConfig ? {
+                ...prev.scheduleConfig,
+                generationInstruction: next,
+            } : prev.scheduleConfig,
+        } as Pick<SummaryDetailPageState, "pendingScheduleInstruction" | "scheduleItem" | "scheduleConfig">));
+    }
+
+    private reloadScheduleAfterInstructionChange(requestTaskId: number | null) {
+        const scheduleId = this.state.scheduleItem?.schedule_id;
+        if (!scheduleId || this.taskId !== requestTaskId) return;
+        this.loadSchedule(scheduleId);
+    }
+
+    // 任务1：「关闭定时」——停用（可恢复），不走 delete。
+    // 调 toggleSchedule(..., false) 把 is_active 置 0，成功后刷新详情页定时状态。
+    //
+    // Blocking 4（降级）：这里 toggleSchedule(schedule_id, false) 是「全局」停用（未带
+    // scope='task'）。之所以不改为 task-scoped disable：后端已上一对一约束（一个定时
+    // 只绑一个总结），所以全局 disable 与本 task 级 disable 等价、实际无害。
+    // ⚠若未来放开定时共享（一个定时绑多个总结），需改为 task-scoped disable，
+    // 否则会误停其他总结的定时。
+    handleScheduleDisable = async () => {
+        // 续修6：入口捕获 requestTaskId。await toggleSchedule 期间切 task，不得把 A 的
+        // schedule 回显到 B 的 scheduleItem。迟到则放弃回显，但必须复位 scheduleDisabling
+        //（当前无 finally，在 return 前安全复位），别让 loading 卡住。
+        const requestTaskId = this.taskId;
+        const { scheduleItem } = this.state;
+        if (!scheduleItem) return;
+        this.setState({ scheduleDisabling: true });
+        try {
+            const updated = await api.toggleSchedule(scheduleItem.schedule_id, false);
+            // 迟到（已切 task）：不回显新 task，仅复位本地 loading 标志。
+            if (this.taskId !== requestTaskId) {
+                this.setState({ scheduleDisabling: false });
+                return;
+            }
+            Toast.success(t("summary.detail.scheduleDisabled"));
+            // 任务3：回显一致——停用后本地把 is_active 置 false，
+            // 使 hasSchedule / 描述行不再把它当作“有效定时”。
+            this.setState({
+                scheduleItem: { ...scheduleItem, ...(updated || {}), is_active: false },
+                showScheduleConfig: false,
+                scheduleDisabling: false,
+            });
+        } catch (err: any) {
+            this.setState({ scheduleDisabling: false });
+            Toast.error(err.message || t("summary.common.operationFailed"));
+        }
+    };
+
+    /**
+     * 当前后端是否支持「继续优化」：兼容 referenceable 字段缺失的 legacy 路径。
+     * 抽取自原内联表达式（handleContinueRefine + render 按钮），统一调用点。
+     */
+    private canRefineCurrentDetail = (): boolean => {
+        const { detail } = this.state;
+        if (!detail) return false;
+        return isReferenceable(detail);
+    };
+
+    /**
+     * 「继续优化」按钮 — 打开一个新的智能总结 chat session,预置引用当前总结。
+     * 见 CHAT-REFERENCE-BASED-DESIGN-v1: 详情页入口和顶栏「新总结」入口的语义
+     * 完全等价 — 都是新起一次 chat 生产工作台,唯一差别是这里预填了引用。
+     *
+     * 实现:通过 window 事件解耦(避免 SummaryCreatePage↔SummaryDetailPage 循环导入)。
+     * module.tsx 里注册顶栏「新总结」入口的 handler 监听此事件,收到后打开
+     * 一个新的 SummaryCreatePage 实例,并把 derivedFromTask 作为 prop 塞入。
+     *
+     * 用户在新 chat 里聊完保存后:①出现的是全新总结(和当前总结平级) ②当前
+     * 总结不变 ③新总结的 SummaryTask.referenced_task_ids 记录来源。
+     */
+    handleContinueRefine = () => {
+        const { detail } = this.state;
+        if (!detail) return;
+        if (!this.canRefineCurrentDetail()) return;
+        const event = new CustomEvent('summary-open-chat-with-reference', {
+            detail: {
+                task_id: detail.task_id,
+                title: detail.title,
+                trigger_type: detail.trigger_type,
+                status: detail.status,
+                creator_id: detail.creator_id,
+                summary_mode: detail.summary_mode,
+                time_range_start: detail.time_range_start,
+                time_range_end: detail.time_range_end,
+                sources: detail.sources || [],
+                total_msg_count: 0,
+                created_at: '',
+                updated_at: '',
+            },
+        });
+        window.dispatchEvent(event);
+    };
+
+    handleForwardToChat = () => {
+        const { detail, personalResult } = this.state;
+        // #158/#161 agent 总结 fallback:agent workflow 只写 personal_result 表,
+        // 不写 summary_result 表(agent_summary.go: creatorPR 是 deliverable,没有
+        // 单独的 SummaryResult 行)。所以 GET /summaries/:id 返 detail.result=null,
+        // 但 detail.personal_result 有 content(前端渲染正文也是走这个 fallback)。
+        // 传统 workflow 优先走 detail.result;agent workflow 走 personalResult。
+        // 两者的 content 语义都是"给用户看的最终交付文本",转发到聊天的姿势一致。
+        const sourceContent = detail?.result?.content ?? personalResult?.content ?? '';
+        if (!sourceContent.trim()) return;
+        // 埋点 310:打开「转发到聊天」的会话选择面板（有正文可转发时才算打开）。
+        Dap.shared.track("smart_summary_forward_panel_opened", {});
+        WKApp.shared.baseContext.showConversationSelect(async (channels: Channel[]) => {
+            const cleanContent = sourceContent.replace(/\[\d+\]/g, '').replace(/  +/g, ' ').trim();
+            const chunks = splitSummaryText(cleanContent);
+
+            // 长文分块 → 同 channel 内 serial 保序 + interMessageDelayMs 节流；
+            // 跨 channel 也走 serial（保持与原实现一致的顺序体验）。
+            // 原先手写的 space_id monkey-patch 由 ForwardService 内部
+            // wrapSendContentForInjection + opts.spaceId 代替。
+            const result = await ForwardService.send(
+                channels,
+                () => chunks.map((c) => new MessageText(c)),
+                {
+                    channelMode: "serial",
+                    messageMode: "serial",
+                    interMessageDelayMs: INTER_MESSAGE_DELAY_MS,
+                    spaceId: WKApp.shared.currentSpaceId,
+                },
+            );
+
+            // 分母保持 channels 数（scope='targets'），不改动用户可见的 Toast 语义。
+            const state = interpretForwardResult(result, "targets");
+            if (state.kind === "all-failed") {
+                Toast.error(t("summary.detail.forwardFailed"));
+            } else if (state.kind === "partial") {
+                Toast.error(t("summary.detail.partialForwardFailed", { values: { failed: state.failed, total: state.total } }));
+            } else {
+                Toast.success(t("summary.detail.forwarded"));
+            }
+            // 埋点 311:总结已转发（只要不是全部失败即算一次成功转发；隐私 props 恒空）。
+            if (state.kind !== "all-failed") Dap.shared.track("smart_summary_forwarded", {});
+        }, t("summary.detail.forwardToChat"));
+    };
+
+    /**
+     * Whether the personal summary content is already visible in BY_PERSON mode.
+     * Mirrors the content-display predicate in renderPersonalSummary (shows when content is non-empty),
+     * so the global "generating" card and the personal summary are guaranteed to be mutually exclusive
+     * regardless of worker_status value/type/timing.
+     */
+    private canRevealPersonalContent(): boolean {
+        return !this.state.workflowGateContent || this.state.workflowRevealDone;
+    }
+
+    private get personalReady(): boolean {
+        const { detail, personalResult } = this.state;
+        return (
+            detail?.summary_mode === SummaryMode.BY_PERSON &&
+            !!personalResult?.content?.trim() &&
+            this.canRevealPersonalContent()
+        );
+    }
+
+    private shouldShowWorkflowCard(): boolean {
+        const { detail, personalResult } = this.state;
+        if (detail?.summary_mode !== SummaryMode.BY_PERSON) return false;
+
+        const personalRunning = personalResult?.worker_status === 0 || personalResult?.worker_status === 1;
+        const personalFailed = personalResult?.worker_status === 3;
+        const replayingCompletedWorkflow = this.state.workflowGateContent && !this.state.workflowRevealDone;
+
+        return personalRunning || personalFailed || replayingCompletedWorkflow;
+    }
+
+    private shouldShowProcessingCard(): boolean {
+        const { detail } = this.state;
+        if (!detail) return false;
+
+        const genericProcessing =
+            detail.summary_mode !== SummaryMode.BY_PERSON &&
+            (detail.status === TaskStatus.PENDING || detail.status === TaskStatus.PROCESSING);
+
+        return this.shouldShowWorkflowCard() || genericProcessing;
+    }
+
+    renderWorkflowProgress() {
+        const { detail, personalResult } = this.state;
+        const { t } = this.context;
+        if (detail?.summary_mode !== SummaryMode.BY_PERSON) return null;
+
+        const activeIndex = this.state.workflowDisplayIndex >= 0
+            ? this.state.workflowDisplayIndex
+            : (detail?.status === TaskStatus.PENDING || detail?.status === TaskStatus.PROCESSING ? 0 : -1);
+        const personalDone = personalResult?.worker_status === 2;
+        const personalFailed = personalResult?.worker_status === 3;
+        const allDone = (detail?.status === TaskStatus.COMPLETED || personalDone) && this.state.workflowRevealDone;
+
+        return (
+            <div className="summary-progress-stages">
+                {SUMMARY_WORKFLOW_STAGES.map((item, index) => {
+                    let className = "summary-progress-stage summary-progress-stage-pending";
+                    let mark: React.ReactNode = <span style={{ width: 16, height: 16, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>○</span>;
+                    if (allDone || (activeIndex >= 0 && index < activeIndex)) {
+                        className = "summary-progress-stage summary-progress-stage-done";
+                        mark = <Check size={16} color="rgba(0,0,0,0.4)" />;
+                    } else if (activeIndex === index) {
+                        className = personalFailed
+                            ? "summary-progress-stage summary-progress-stage-failed"
+                            : "summary-progress-stage summary-progress-stage-active";
+                        mark = personalFailed ? "×" : <span className="summary-progress-stage-spinner" />;
+                    }
+                    return (
+                        <div className={className} key={item.key}>
+                            <span style={{ width: 16, height: 16, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>{mark}</span>
+                            <span>{t(item.labelKey)}</span>
+                        </div>
+                    );
+                })}
+            </div>
+        );
+    }
+
     renderProcessing() {
+        const { t } = this.context;
+        const { personalResult } = this.state;
+        const isTeamRegenerating = this.isMultiCollabRegenerating();
+        const myPersonalDone = isTeamRegenerating && personalResult?.worker_status === 2 && this.state.workflowRevealDone;
+        const titleKey = myPersonalDone
+            ? "summary.detail.teamRegeneratingWaitingTitle"
+            : (isTeamRegenerating ? "summary.detail.teamRegeneratingWorkflowTitle" : "summary.detail.processingTitle");
+        const descKey = myPersonalDone
+            ? "summary.detail.teamRegeneratingWaitingDesc"
+            : (isTeamRegenerating ? "summary.detail.teamRegeneratingWorkflowDesc" : "summary.detail.processingDesc");
         return (
             <div className="summary-detail-processing">
-                <Spin size="large" />
-                <h3 style={{ marginTop: 16 }}>
-                    正在生成总结...
-                </h3>
-                <div style={{ fontSize: 14, color: "var(--semi-color-text-2)", marginTop: 8 }}>
-                    这可能需要一些时间，请耐心等待
+                <div className="summary-progress-copy">
+                    <div className="summary-progress-title">
+                        {t(titleKey)}
+                    </div>
+                    <div className="summary-progress-desc">
+                        {t(descKey)}
+                    </div>
+                </div>
+                {this.renderWorkflowProgress()}
+            </div>
+        );
+    }
+
+    renderTeamGeneratingStatus() {
+        const { t } = this.context;
+        return (
+            <div className="summary-detail-team summary-detail-team-generating-card">
+                <div className="summary-detail-section-header">
+                    <span>{t("summary.detail.teamSummary")}</span>
+                </div>
+                <div className="summary-detail-team-generating">
+                    <Spin size="small" />
+                    <span>{t("summary.detail.teamGenerating")}</span>
+                </div>
+            </div>
+        );
+    }
+
+    renderRefineLoadingStatus() {
+        const { t } = this.context;
+        const target = this.state.refineLoadingTarget;
+        if (!target) return null;
+        const titleKey = target === "personal"
+            ? "summary.detail.mySummary"
+            : (target === "team" ? "summary.detail.teamSummary" : "summary.detail.contentTitle");
+        const descKey = target === "personal"
+            ? "summary.detail.refiningPersonal"
+            : (target === "team" ? "summary.detail.refiningTeam" : "summary.detail.refiningSummary");
+        return (
+            <div className="summary-detail-team summary-detail-team-generating-card">
+                <div className="summary-detail-section-header">
+                    <span>{t(titleKey)}</span>
+                </div>
+                <div className="summary-detail-team-generating">
+                    <Spin size="small" />
+                    <span>{t(descKey)}</span>
+                </div>
+            </div>
+        );
+    }
+
+    renderStreamingContent() {
+        const content = this.state.streamingContent.trim();
+        if (!this.state.streaming || !content) return null;
+        return (
+            <div className="summary-detail-personal summary-detail-streaming">
+                <div className="summary-detail-content-box">
+                    <CitationText content={this.state.streamingContent} citations={[]} />
+                </div>
+            </div>
+        );
+    }
+
+    renderTeamStreamingContent() {
+        const content = this.state.teamStreamingContent.trim();
+        if (!this.state.teamStreaming || !content) return null;
+        return (
+            <div className="summary-detail-team summary-detail-streaming">
+                <div className="summary-detail-section-header">
+                    <span>{this.context.t("summary.detail.teamSummary")}</span>
+                </div>
+                <div className="summary-detail-content-box">
+                    <CitationText content={this.state.teamStreamingContent} citations={[]} members={this.state.members} />
                 </div>
             </div>
         );
@@ -519,138 +2535,783 @@ export default class SummaryDetailPage extends Component<SummaryDetailPageProps,
 
     renderFailed() {
         const { detail } = this.state;
+        const { t } = this.context;
         if (!detail) return null;
         return (
-            <div className="summary-detail-failed">
-                <div className="summary-detail-failed-icon">⚠️</div>
-                <h3>总结生成失败</h3>
-                {detail.error_message && (
-                    <div className="summary-detail-failed-reason">
-                        {detail.error_message}
+            <div className="summary-detail-personal">
+                <div className="summary-detail-meta">
+                    <div className="summary-detail-meta-time">
+                        {t("summary.detail.createdAt", { values: { time: formatDate(detail.created_at) } })}
                     </div>
-                )}
-                <div className="summary-detail-failed-meta">
-                    <div>任务编号：{detail.task_no}</div>
-                    <div>创建时间：{formatDate(detail.created_at)}</div>
+                    {detail.sources && detail.sources.length > 0 && (
+                        <div className="summary-detail-source-chips">
+                            {detail.sources.map((src, i) => (
+                                <span key={`${src.source_id}-${i}`} className="summary-detail-source-chip">
+                                    {src.source_name || src.source_id}
+                                </span>
+                            ))}
+                        </div>
+                    )}
                 </div>
-            </div>
-        );
-    }
-
-    renderCompleted() {
-        const { detail } = this.state;
-        if (!detail || !detail.result) return null;
-        return (
-            <div className="summary-detail-result">
-                <div className="summary-detail-result-header">
-                    <h3>📝 总结内容</h3>
-                    <div className="summary-detail-result-badges">
-                        <Tag color="blue" size="small" prefixIcon={<IconHistory />}>
-                            版本 {detail.result.version}
-                        </Tag>
-                        <Tag color="green" size="small">
-                            {detail.result.total_msg_count} 条消息
-                        </Tag>
-                        {detail.result_is_edited && detail.result_edited_at && (
-                            <Tag color="orange" size="small">
-                                已编辑
-                            </Tag>
-                        )}
+                <hr className="summary-detail-meta-divider" />
+                <div className="summary-detail-failed">
+                    <div className="summary-detail-failed-icon">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#F54A45" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                            <line x1="12" y1="9" x2="12" y2="13" />
+                            <line x1="12" y1="17" x2="12.01" y2="17" />
+                        </svg>
                     </div>
-                </div>
-                <div className="summary-detail-result-content">
-                    <CitationText content={detail.result.content} citations={detail.result.citations || []} />
-                </div>
-                <div className="summary-detail-result-footer">
-                    <span className="summary-detail-result-time">
-                        生成于 {formatDate(detail.result.generated_at)}
-                    </span>
-                    {detail.result_is_edited && detail.result_edited_at && (
-                        <span className="summary-detail-result-time">
-                            最后编辑 {formatDate(detail.result_edited_at)}
-                        </span>
+                    <h3>{t("summary.detail.failedTitle")}</h3>
+                    {detail.error_message && (
+                        <div className="summary-detail-failed-reason">
+                            {detail.error_message}
+                        </div>
                     )}
                 </div>
             </div>
         );
     }
 
+
+    private formatVersionOperation(version: SummaryVersionItem): string {
+        const { t } = this.context;
+        if ((version.operation_type || "generate") === "generate") {
+            return t("summary.detail.versionInitialGenerate");
+        }
+        const key = `summary.detail.versionOperation.${version.operation_type || "generate"}`;
+        const label = t(key);
+        return label === key ? t("summary.detail.versionOperation.generate") : label;
+    }
+
+    /**
+     * 决定当前详情页「版本记录」应作用于哪一组版本。
+     *
+     * - agent 总结：无版本记录（传统 workflow 专属）→ null。
+     * - 多人协作：使用团队汇总版本，避免把个人版本误解为团队结果。
+     * - BY_GROUP（团队）：团队汇总版本 `versions`。
+     * - 单人 BY_PERSON：个人报告版本 `personalVersions`。
+     *
+     * 版本数 ≤ 1 时同样返回 null（没有可回溯的历史）。
+     */
+    private getActiveVersionContext(): {
+        versions: SummaryVersionItem[];
+        isPersonal: boolean;
+        currentVersion: number;
+        canRestore: boolean;
+        restoringId: number | null;
+        retention: number | null;
+    } | null {
+        const {
+            detail,
+            versions,
+            versionsLoading,
+            personalVersions,
+            personalVersionsLoading,
+            personalVersionsRetention,
+            personalResult,
+            restoringVersionId,
+            restoringPersonalVersionId,
+            versionsRetention,
+            isEditing,
+            editingTeamSummary,
+            editingMyDraft,
+            editingPersonalReport,
+        } = this.state;
+        if (
+            !detail ||
+            detail.trigger_type === TriggerType.AGENT ||
+            isEditing ||
+            editingTeamSummary ||
+            editingMyDraft ||
+            editingPersonalReport
+        ) return null;
+        if (detail.summary_mode === SummaryMode.BY_PERSON && !this.isMultiCollab()) {
+            if (!personalResult?.content || personalVersionsLoading || personalVersions.length <= 1) return null;
+            return {
+                versions: personalVersions,
+                isPersonal: true,
+                currentVersion: personalResult.version || personalVersions[0]?.version || 0,
+                canRestore: !!detail.permissions?.can_edit_personal,
+                restoringId: restoringPersonalVersionId,
+                retention: personalVersionsRetention,
+            };
+        }
+
+        if (!detail.result || versionsLoading || versions.length <= 1) return null;
+        return {
+            versions,
+            isPersonal: false,
+            currentVersion: detail.result.version,
+            canRestore: !!(detail.permissions?.can_edit_team || detail.permissions?.can_edit),
+            restoringId: restoringVersionId,
+            retention: versionsRetention,
+        };
+    }
+
+    private resolveMemberName = (uid?: string): string => {
+        if (!uid) return "";
+        const m = this.state.members.find((x) => x.user_id === uid);
+        return m?.user_name || uid;
+    };
+
+    // ============ 本文目录（TOC）：从正文标题提取大纲 + 滚动高亮 ============
+
+    /** 渲染后扫描主正文的 h1/h2，构建目录并挂载滚动监听。 */
+    private rebuildToc = () => {
+        const root = this.contentScrollRef.current;
+        if (!root) return;
+        // 只取主阅读区第一个 markdown 块（避免个人报告/预览里的多份内容互相干扰）。
+        const md = root.querySelector<HTMLElement>(".summary-content-markdown");
+        if (!md) {
+            if (this.state.tocItems.length) this.setState({ tocItems: [], activeTocId: "" });
+            this.teardownTocObserver();
+            this.tocSignature = "";
+            this.tocHeadingNodes = [];
+            return;
+        }
+        // 目录只列 h2 分节，编号与正文 CSS counter（md-section，仅 h2 递增）一致。
+        const heads = Array.from(md.querySelectorAll<HTMLElement>("h2"));
+        const items = heads.map((el, i) => {
+            if (!el.id) el.id = `toc-h-${i}`;
+            return { id: el.id, text: (el.textContent || "").trim(), level: 2 };
+        }).filter((it) => it.text);
+        const sig = items.map((it) => `${it.id}:${it.text}`).join("|");
+        const sameNodes = heads.length === this.tocHeadingNodes.length
+            && heads.every((head, i) => head === this.tocHeadingNodes[i]);
+        if (sig === this.tocSignature && sameNodes) return;
+        this.tocSignature = sig;
+        this.tocHeadingNodes = heads;
+        this.setState({ tocItems: items });
+        this.setupTocObserver(root, heads);
+    };
+
+    private setupTocObserver(root: HTMLElement, heads: HTMLElement[]) {
+        this.teardownTocObserver();
+        if (!heads.length || typeof IntersectionObserver === "undefined") return;
+        this.tocObserver = new IntersectionObserver(
+            (entries) => {
+                const visible = entries
+                    .filter((e) => e.isIntersecting)
+                    .map((e) => e.target as HTMLElement);
+                if (!visible.length) return;
+                visible.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+                const id = visible[0].id;
+                if (id && id !== this.state.activeTocId) this.setState({ activeTocId: id });
+            },
+            { root, rootMargin: "0px 0px -68% 0px", threshold: 0 }
+        );
+        heads.forEach((h) => this.tocObserver!.observe(h));
+    }
+
+    private teardownTocObserver() {
+        if (this.tocObserver) {
+            this.tocObserver.disconnect();
+            this.tocObserver = null;
+        }
+    }
+
+    private handleTocClick = (id: string) => {
+        const root = this.contentScrollRef.current;
+        const el = root?.querySelector<HTMLElement>(`#${(window.CSS && CSS.escape) ? CSS.escape(id) : id}`);
+        if (el) {
+            el.scrollIntoView({ behavior: "smooth", block: "start" });
+            this.setState({ activeTocId: id });
+        }
+    };
+
+    // Single authoritative predicate for whether the TOC should be visible.
+    // Used by both render() (to add `.has-toc` and shift the content column)
+    // and renderToc() (to actually mount the <aside>) so the two can never
+    // disagree. Threshold derived from the CSS geometry: the <aside> is
+    // position:absolute at left: calc(50% + 444px) with width 192px inside
+    // an overflow:hidden layout, so its right edge lands at L/2 + 636 and
+    // it only fits when L >= 1272px (984px reading column + 192px TOC +
+    // 2×48px gutter). Fail-closed: layoutWidth null before the first
+    // observer callback means we do NOT mount the TOC — better a missing
+    // TOC on first paint than a clipped one on every laptop 1441–1627px.
+    private static readonly TOC_MIN_LAYOUT_WIDTH = 1272;
+
+    /** True iff the version panel is both flagged open AND has a valid
+     * active context to render. Guards against `versionPanelOpen` being
+     * stuck true when getActiveVersionContext() has since returned null
+     * (list reload, load error, versions dropping to <= 1) — leaving
+     * `.has-version-panel` on with nothing on screen to toggle would
+     * suppress the TOC via shouldShowToc with no way for the user to
+     * recover. */
+    private isVersionPanelActuallyOpen(): boolean {
+        return this.state.versionPanelOpen && this.getActiveVersionContext() != null;
+    }
+
+    private shouldShowToc(): boolean {
+        const { isEditing, editingTeamSummary, editingMyDraft, editingPersonalReport, tocItems, layoutWidth } = this.state;
+        if (this.isVersionPanelActuallyOpen()) return false;
+        if (isEditing || editingTeamSummary || editingMyDraft || editingPersonalReport) return false;
+        if (!tocItems || tocItems.length < 2) return false;
+        return layoutWidth != null && layoutWidth >= SummaryDetailPage.TOC_MIN_LAYOUT_WIDTH;
+    }
+
+    renderToc() {
+        // Single predicate for both mount and layout-shift gates so they
+        // cannot fall out of sync — see shouldShowToc().
+        if (!this.shouldShowToc()) return null;
+        const { tocItems, activeTocId } = this.state;
+        const { t } = this.context;
+        return (
+            <aside className="summary-detail-toc" aria-label={t("summary.detail.tocTitle")}>
+                <div className="summary-detail-toc-title">{t("summary.detail.tocTitle")}</div>
+                <nav className="summary-detail-toc-list">
+                    {tocItems.map((it, i) => (
+                        <button
+                            key={it.id}
+                            type="button"
+                            className={`summary-detail-toc-item${activeTocId === it.id ? " is-active" : ""}${it.level === 1 ? " is-h1" : ""}`}
+                            onClick={() => this.handleTocClick(it.id)}
+                            title={it.text}
+                        >
+                            <span className="summary-detail-toc-index">{String(i + 1).padStart(2, "0")}</span>
+                            <span className="summary-detail-toc-text">{it.text}</span>
+                        </button>
+                    ))}
+                </nav>
+            </aside>
+        );
+    }
+
+    renderVersionPanel() {
+        const ctx = this.getActiveVersionContext();
+        if (!ctx) return null;
+        return (
+            <SummaryVersionPanel
+                open={this.state.versionPanelOpen}
+                versions={ctx.versions}
+                currentVersion={ctx.currentVersion}
+                selectedResultId={this.state.showVersionDetailModal ? (this.state.versionDetail?.result_id ?? null) : null}
+                restoringResultId={ctx.restoringId}
+                retention={ctx.retention ?? undefined}
+                canRestore={ctx.canRestore}
+                resolveAuthor={this.resolveMemberName}
+                onClose={this.handleCloseVersionPanel}
+                onSelect={(version: SummaryVersionItem) => {
+                    if (version.version === ctx.currentVersion) {
+                        this.handleCloseVersionDetail();
+                    } else {
+                        this.handleViewVersion(version, ctx.isPersonal);
+                    }
+                }}
+                onRestore={async (version: SummaryVersionItem) => {
+                    const restored = ctx.isPersonal
+                        ? await this.handleRestorePersonalVersion(version)
+                        : await this.handleRestoreVersion(version);
+                    if (restored) {
+                        this.setState({ showVersionDetailModal: false, versionDetail: null });
+                    }
+                }}
+            />
+        );
+    }
+
+
+    renderVersionPreview(hidePlainCitations = true) {
+        const { t } = this.context;
+        const { versionDetail, versionDetailLoading } = this.state;
+        if (!this.state.showVersionDetailModal) return null;
+        // Read-only preview of a historical version, shown in the center while the
+        // version panel stays open on the right. Restore lives in the panel footer.
+        return (
+            <div className="summary-detail-content-box summary-version-preview">
+                <div className="summary-version-preview-banner">
+                    <IconHistory className="summary-version-preview-banner-icon" />
+                    <div className="summary-version-preview-banner-copy">
+                        <div className="summary-version-preview-banner-title">
+                            {t("summary.detail.versionPreviewTitle", { values: { version: versionDetail?.version ?? "" } })}
+                        </div>
+                        <div className="summary-version-preview-banner-desc">{t("summary.detail.versionPreviewDesc")}</div>
+                    </div>
+                    <Button theme="borderless" size="small" onClick={this.handleCloseVersionDetail}>
+                        {t("summary.detail.versionPreviewBack")}
+                    </Button>
+                </div>
+                {versionDetailLoading ? (
+                    <div className="summary-version-detail-loading"><Spin /></div>
+                ) : versionDetail ? (
+                    <div className="summary-detail-result-content">
+                        <CitationText
+                            content={versionDetail.content}
+                            citations={versionDetail.citations || []}
+                            teamCitations={versionDetail.team_citations || []}
+                            members={this.state.members}
+                            disableTeamMemberPreview
+                            hidePlainCitations={hidePlainCitations}
+                        />
+                    </div>
+                ) : null}
+            </div>
+        );
+    }
+
+    renderCompleted() {
+        const { detail, isEditing } = this.state;
+        const { t } = this.context;
+        if (!detail || !detail.result) return null;
+        const canEdit = detail.status === TaskStatus.COMPLETED
+            && !!detail.permissions?.can_edit
+            && detail.trigger_type !== TriggerType.AGENT
+            && !isEditing
+            && !this.state.showVersionDetailModal;
+        return (
+            <div className="summary-detail-result">
+                {this.renderTeamSummaryHeader(canEdit)}
+                {/* BY_GROUP 完成模式下,renderCompleted 是唯一显示团队/最终
+                    总结的路径 —— 内容不能被"我的总结"header 折叠掉,否则
+                    用户在多人 BY_GROUP 单人视角下点一下 header 就再也看不
+                    到内容了。 */}
+                <>
+                    {/* Meta info: creation time + source chips */}
+                    <div className="summary-detail-meta">
+                        <div className="summary-detail-meta-time">
+                            {t("summary.detail.createdAt", { values: { time: formatDate(detail.created_at) } })}
+                        </div>
+                        {detail.sources && detail.sources.length > 0 && (
+                            <div className="summary-detail-source-chips">
+                                {detail.sources.map((src, i) => (
+                                    <span key={`${src.source_id}-${i}`} className="summary-detail-source-chip">
+                                        {src.source_name || src.source_id}
+                                    </span>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                    <hr className="summary-detail-meta-divider" />
+                    <div className="summary-detail-result-header">
+                        <h3>{t("summary.detail.contentTitle")}</h3>
+                        <div className="summary-detail-result-badges">
+                            <Tag color="blue" size="small" prefixIcon={<IconHistory />}>
+                                {t("summary.common.version", { values: { version: detail.result.version } })}
+                            </Tag>
+                            <Tag color="green" size="small">
+                                {t("summary.common.messagesCount", { values: { count: detail.result.total_msg_count } })}
+                            </Tag>
+                            {detail.result_is_edited && detail.result_edited_at && (
+                                <Tag color="orange" size="small">{t("summary.detail.edited")}</Tag>
+                            )}
+                        </div>
+                    </div>
+                    {isEditing ? (
+                        <div className="summary-detail-content-box">
+                            <SummaryEditor
+                                taskId={detail.task_id}
+                                baseResultId={detail.result_id || 0}
+                                initialContent={detail.result.content || ""}
+                                onSave={this.handleEditSave}
+                                onCancel={this.handleEditCancel}
+                                exposeSave={(fn) => { this.editorSaveFn = fn; }}
+                            />
+                        </div>
+                    ) : this.state.showVersionDetailModal ? this.renderVersionPreview(false) : (
+                        <div className="summary-detail-result-content">
+                            <AbstractCallout
+                                // renderCompleted is a team view, so prefer
+                                // the team-level detail.result.abstract; fall
+                                // back to personalResult.abstract only when
+                                // the team one is missing.
+                                abstract={detail.result.abstract || this.state.personalResult?.abstract}
+                                title={this.context.t("summary.detail.abstractTitle")}
+                            />
+                            <CitationText content={detail.result.content} citations={detail.result.citations || []} />
+                        </div>
+                    )}
+                    <div className="summary-detail-result-footer">
+                        <span className="summary-detail-result-time">
+                            {t("summary.detail.generatedAt", { values: { time: formatDate(detail.result.generated_at) } })}
+                        </span>
+                        {detail.result_is_edited && detail.result_edited_at && (
+                            <span className="summary-detail-result-time">
+                                {t("summary.detail.lastEditedAt", { values: { time: formatDate(detail.result_edited_at) } })}
+                            </span>
+                        )}
+                    </div>
+                </>
+            </div>
+        );
+    }
+
+    private renderTeamSummaryHeader(canEdit: boolean) {
+        const { t } = this.context;
+        return (
+            <div className="summary-detail-section-header summary-detail-my-summary-header">
+                <div className="summary-detail-section-toggle">
+                    <span>{t("summary.detail.teamSummary")}</span>
+                </div>
+                {canEdit && (
+                    <Button
+                        data-testid={summaryTestIds.detailEditBtn}
+                        className="summary-detail-inline-edit"
+                        size="small"
+                        theme="borderless"
+                        icon={<IconEdit />}
+                        onClick={this.handleStartEdit}
+                    >
+                        {t("summary.common.edit")}
+                    </Button>
+                )}
+            </div>
+        );
+    }
+
+    private renderMySummaryHeader(canEdit: boolean) {
+        const { detail, personalExpanded } = this.state;
+        const { t } = this.context;
+        const isAgent = detail?.trigger_type === TriggerType.AGENT;
+        return (
+            <div className="summary-detail-section-header summary-detail-my-summary-header">
+                <button
+                    type="button"
+                    className="summary-detail-section-toggle"
+                    onClick={this.togglePersonalExpanded}
+                    aria-expanded={personalExpanded}
+                >
+                    <ChevronDown size={14} className={`summary-detail-chevron${personalExpanded ? " summary-detail-chevron--expanded" : ""}`} />
+                    <span>{t("summary.detail.mySummary")}</span>
+                    {isAgent && (
+                        <span className="summary-detail-agent-tag">
+                            <Bot size={12} aria-hidden />
+                            {t("summary.summaryCard.agentType")}
+                        </span>
+                    )}
+                </button>
+                {canEdit && (
+                    <Button
+                        className="summary-detail-inline-edit"
+                        size="small"
+                        theme="borderless"
+                        icon={<IconEdit />}
+                        onClick={this.handleStartEdit}
+                    >
+                        {t("summary.common.edit")}
+                    </Button>
+                )}
+            </div>
+        );
+    }
+
     renderPersonalSummary() {
-        const { personalResult, personalLoading, detail } = this.state;
+        const { personalResult, personalLoading, detail, personalExpanded } = this.state;
+        const { t } = this.context;
+        // Failed 状态由 renderFailed() 统一处理，不在这里渲染
+        if (detail && detail.status === TaskStatus.FAILED) return null;
         if (personalLoading) {
             return (
                 <div className="summary-detail-personal">
-                    <div className="summary-detail-section-header">
-                        <span>👤 我的总结</span>
-                    </div>
-                    <Spin size="small" />
+                    {this.renderMySummaryHeader(false)}
+                    {personalExpanded && <Spin size="small" />}
                 </div>
             );
         }
         if (!personalResult) return null;
+        if (personalResult.content?.trim() && !this.canRevealPersonalContent()) return null;
+        const { isEditing, detail: stateDetail } = this.state;
+        const isProcessing = stateDetail && (stateDetail.status === TaskStatus.PENDING || stateDetail.status === TaskStatus.PROCESSING) && !personalResult?.content;
+        const canEdit = !!detail
+            && detail.status === TaskStatus.COMPLETED
+            && !!detail.permissions?.can_edit
+            && detail.trigger_type !== TriggerType.AGENT
+            && !isEditing
+            && !this.state.showVersionDetailModal;
         return (
             <div className="summary-detail-personal">
-                <div className="summary-detail-section-header">
-                    <span>👤 我的总结</span>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        {detail && detail.status === TaskStatus.COMPLETED && detail.permissions?.can_edit && !this.state.isEditing && (
-                            <Button
-                                size="small"
-                                theme="borderless"
-                                icon={<IconEdit />}
-                                onClick={this.handleStartEdit}
-                            >
-                                编辑
-                            </Button>
-                        )}
-                        {personalResult.worker_status === 2 && !personalResult.submitted_at && this.state.members.length > 1 && (
-                            <Button size="small" theme="solid" onClick={this.handleSubmitPersonal}>
-                                提交给所有人
-                            </Button>
+                {this.renderMySummaryHeader(canEdit)}
+                {personalExpanded && (<>
+                {/* Meta info: creation time + source chips */}
+                {detail && (
+                    <div className="summary-detail-meta">
+                        <div className="summary-detail-meta-time">
+                            {t("summary.detail.createdAt", { values: { time: formatDate(detail.created_at) } })}
+                        </div>
+                        {detail.sources && detail.sources.length > 0 && (
+                            <div className="summary-detail-source-chips">
+                                {detail.sources.map((src, i) => (
+                                    <span key={`${src.source_id}-${i}`} className="summary-detail-source-chip">
+                                        {src.source_name || src.source_id}
+                                    </span>
+                                ))}
+                            </div>
                         )}
                     </div>
-                </div>
-                {personalResult.content && (
+                )}
+                <hr className="summary-detail-meta-divider" />
+                {isProcessing ? (
+                    <div className="summary-detail-processing">
+                        <div className="summary-progress-header">
+                            <span className="summary-progress-header-text">{t("summary.detail.aiThinking")}</span>
+                        </div>
+                        {this.renderWorkflowProgress()}
+                    </div>
+                ) : this.state.showVersionDetailModal ? (
+                    this.renderVersionPreview(false)
+                ) : (
+                    <>
+                        {!isEditing && personalResult.worker_status === 2 && !personalResult.submitted_at && this.state.members.length > 1 && (
+                            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                                <Button size="small" theme="solid" onClick={this.handleSubmitPersonal}>
+                                    {t("summary.detail.submitToAll")}
+                                </Button>
+                            </div>
+                        )}
+                        {isEditing ? (
+                            <div className="summary-detail-content-box">
+                                <SummaryEditor
+                                    taskId={this.state.detail?.task_id || 0}
+                                    baseResultId={this.state.detail?.result_id || 0}
+                                    initialContent={personalResult.content || ""}
+                                    onSave={this.handleEditSave}
+                                    onCancel={this.handleEditCancel}
+                                    exposeSave={(fn) => { this.editorSaveFn = fn; }}
+                                />
+                            </div>
+                        ) : personalResult.content && (
+                            <div className="summary-detail-content-box">
+                                <AbstractCallout
+                                    abstract={personalResult.abstract}
+                                    title={t("summary.detail.abstractTitle")}
+                                />
+                                <CitationText content={personalResult.content} citations={personalResult.citations || []} />
+                            </div>
+                        )}
+                    </>
+                )}
+                </>)}
+            </div>
+        );
+    }
+
+    /**
+     * 回归修复：多人协作页(isMultiCollab)给「我自己」补回「提交给全部」入口。
+     *
+     * need1 把多人页的 renderPersonalSummary()（我的总结正文区）整体隐藏了，
+     * 连带把原在其中的「提交给全部」按钮也一起藏掉 → 个人总结完成后无提交入口
+     * → submitted_at 永远 NULL → meta 完成判定永不满足 → 任务卡 Processing。
+     *
+     * 这里只渲染「一句提示 + 提交按钮」的轻量 bar，不展开我的总结全文，
+     * 因此不违反 need1。条件：多人协作 + 我的个人总结已完成(worker_status===2)
+     * + 尚未提交(!submitted_at) + 多人(members>1)。
+     * 提交成功后 handleSubmitPersonal 会刷新 personalResult/members，
+     * submitted_at 有值后本 bar 自动消失，我那条也会作为 submitted 出现在参与者报告区。
+     *
+     * 方案甲（老板新要求）：顶部提醒美化成「带框卡片」（圆角/浅背景/左色条/icon），
+     * 不再光秃秃一行；同时把提交入口也下放到【参与者报告区】我那条
+     * （renderMyPendingSubmitRow），两处都能提交，主入口随报告上下文更合理。
+     * 二者共用同一门控（shouldShowMySubmit）+ handleSubmitPersonal。
+     */
+    // 共享门控：是否应展示「我的提交」入口（顶部卡片 + 参与者报告区行 复用）。
+    shouldShowMySubmit(): boolean {
+        const { personalResult, members, isEditing, editingPersonalReport, editingTeamSummary, editingMyDraft } = this.state;
+        if (!this.isMultiCollab()) return false;
+        if (!this.canRevealPersonalContent()) return false;
+        // F2：任一编辑态下隐藏提交入口，避免与编辑器并存、提交触发团队聚合与编辑冲突。
+        // OCT-21：草稿编辑态（editingMyDraft）也走同款互斥，整行（含「提交给全部」按钮）让位给草稿编辑器分支。
+        if (isEditing || editingPersonalReport || editingTeamSummary || editingMyDraft) return false;
+        if (personalResult?.worker_status !== 2) return false;
+        if (personalResult.submitted_at) return false;
+        if (members.length <= 1) return false;
+        return true;
+    }
+
+    renderMySubmitBar() {
+        const { t } = this.context;
+        if (!this.shouldShowMySubmit()) return null;
+        // 美化：带框卡片（圆角 + 浅背景 + 左色条 + IconInfoCircle 提示 icon），
+        // 样式见 .summary-detail-my-submit-bar（index.css）。
+        return (
+            <div className="summary-detail-my-submit-bar">
+                <IconInfoCircle className="summary-detail-my-submit-icon" />
+                <span className="summary-detail-my-submit-hint">{t("summary.detail.mySubmitHint")}</span>
+                <Button size="small" theme="solid" onClick={this.handleSubmitPersonal}>
+                    {t("summary.detail.submitToAll")}
+                </Button>
+            </div>
+        );
+    }
+
+    renderTeamSummary() {
+        const { detail, members, editingTeamSummary } = this.state;
+        const { t } = this.context;
+        if (!detail) return null;
+        // 多人协作重新生成中不再展示邀请流程；主区域展示个人 workflow，
+        // 团队旧结果降级为“上一版团队汇总”，避免用户误解为新结果未变化。
+        if (this.isMultiCollabRegenerating()) {
+            if (!detail.result) return null;
+            return (
+                <div className="summary-detail-team summary-detail-team-previous">
+                    <div className="summary-detail-section-header">
+                        <span>{t("summary.detail.previousTeamSummary")}</span>
+                        <div className="summary-detail-section-badges">
+                            <Tag color="blue" size="small" prefixIcon={<IconHistory />}>
+                                {t("summary.common.version", { values: { version: detail.result.version } })}
+                            </Tag>
+                            <Tag color="grey" size="small" prefixIcon={<IconClock />} className="summary-detail-team-generated-time">
+                                {t("summary.detail.generatedAt", { values: { time: formatDate(detail.result.generated_at) } })}
+                            </Tag>
+                        </div>
+                    </div>
+                    <div className="summary-detail-previous-desc">
+                        {t("summary.detail.previousTeamSummaryDesc")}
+                    </div>
                     <div className="summary-detail-content-box">
-                        <CitationText content={personalResult.content} citations={personalResult.citations || []} />
+                        <CitationText
+                            content={detail.result.content}
+                            citations={detail.result.citations || []}
+                            teamCitations={detail.result.team_citations || []}
+                            members={members}
+                            hidePlainCitations
+                        />
+                    </div>
+                </div>
+            );
+        }
+        if (!detail.result) return null;
+        if (members.length <= 1) return null;
+        const submittedCount = members.filter((m) => m.submitted_at && m.content).length;
+        if (submittedCount === 0) return null;
+        // need4：团队总结编辑按钮仅 creator（can_edit_team）。
+        const canEditTeam = !!detail.permissions?.can_edit_team;
+        // need4：行内编辑团队总结（走既有 PUT /summaries/:id/edit，后端已放开多人 creator）。
+        // F1（纵深防御）：加 canEditTeam 双校验——即使 editingTeamSummary 残留，非 creator 也不进编辑器。
+        if (editingTeamSummary && canEditTeam && detail.result_id) {
+            return (
+                <div className="summary-detail-team">
+                    <div className="summary-detail-meta">
+                        <div className="summary-detail-meta-time">
+                            {t("summary.detail.createdAt", { values: { time: formatDate(detail.created_at) } })}
+                        </div>
+                        {detail.sources && detail.sources.length > 0 && (
+                            <div className="summary-detail-source-chips">
+                                {detail.sources.map((src, i) => (
+                                    <span key={`${src.source_id}-${i}`} className="summary-detail-source-chip">
+                                        {src.source_name || src.source_id}
+                                    </span>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                    <hr className="summary-detail-meta-divider" />
+                    <div className="summary-detail-content-box">
+                        <SummaryEditor
+                            taskId={detail.task_id}
+                            baseResultId={detail.result_id}
+                            initialContent={detail.result.content || ""}
+                            onSave={this.handleEditTeamSave}
+                            onCancel={this.handleEditTeamCancel}
+                            exposeSave={(fn) => { this.editorSaveFn = fn; }}
+                        />
+                    </div>
+                </div>
+            );
+        }
+        return (
+            <div className="summary-detail-team">
+                {/* Meta info: creation time + source chips */}
+                <div className="summary-detail-meta">
+                    <div className="summary-detail-meta-time">
+                        {t("summary.detail.createdAt", { values: { time: formatDate(detail.created_at) } })}
+                    </div>
+                    {detail.sources && detail.sources.length > 0 && (
+                        <div className="summary-detail-source-chips">
+                            {detail.sources.map((src, i) => (
+                                <span key={`${src.source_id}-${i}`} className="summary-detail-source-chip">
+                                    {src.source_name || src.source_id}
+                                </span>
+                            ))}
+                        </div>
+                    )}
+                </div>
+                <hr className="summary-detail-meta-divider" />
+                <div className="summary-detail-section-header">
+                    <span>{t("summary.detail.teamSummary")}</span>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <div className="summary-detail-section-badges">
+                            <Tag color="cyan" size="small" prefixIcon={<IconUser />}>
+                                {t("summary.detail.submittedPeople", { values: { count: submittedCount } })}
+                            </Tag>
+                            <Tag color="blue" size="small" prefixIcon={<IconHistory />}>
+                                {t("summary.common.version", { values: { version: detail.result.version } })}
+                            </Tag>
+                            {/* 团队总结当前版本的生成时间：与「版本」Tag 语义相邻，与 single 视图（985行）保持一致的容错（formatDate 对 null 返回 "-"）。 */}
+                            <Tag color="grey" size="small" prefixIcon={<IconClock />} className="summary-detail-team-generated-time">
+                                {t("summary.detail.generatedAt", { values: { time: formatDate(detail.result.generated_at) } })}
+                            </Tag>
+                        </div>
+                        {/* need4：团队编辑按钮移到 more dropdown，不再在卡片内独立渲染。 */}
+                    </div>
+                </div>
+                {this.state.showVersionDetailModal ? this.renderVersionPreview(true) : (
+                    <div className="summary-detail-content-box">
+                        <AbstractCallout abstract={detail.result.abstract} title={this.context.t("summary.detail.abstractTitle")} />
+                        <CitationText
+                            content={detail.result.content}
+                            citations={detail.result.citations || []}
+                            teamCitations={detail.result.team_citations || []}
+                            members={members}
+                            hidePlainCitations
+                        />
                     </div>
                 )}
             </div>
         );
     }
 
-    renderTeamSummary() {
-        const { detail, members } = this.state;
-        if (!detail || !detail.result) return null;
-        if (members.length <= 1) return null;
-        const submittedCount = members.filter((m) => m.status === "submitted").length;
-        if (submittedCount === 0) return null;
+    // need7：成员状态区顶部标题行；标题右侧「添加成员」按钮仅 creator（can_add_member）。
+    renderMemberStatusHeader() {
+        const { detail } = this.state;
+        const { t } = this.context;
+        const canAddMember = !!detail?.permissions?.can_add_member;
+        // 问题3：非 creator 且是参与者 -> 显示“退出多人协作”。
+        const myUid = WKApp.loginInfo.uid;
+        const isCreator = detail?.creator_id != null && detail.creator_id === myUid;
+        const isParticipant = !!detail?.participants?.some((p) => p.user_id === myUid);
+        const canLeave = !isCreator && isParticipant && detail?.creator_id != null;
         return (
-            <div className="summary-detail-team">
-                <div className="summary-detail-section-header">
-                    <span>👥 团队汇总</span>
-                    <div className="summary-detail-section-badges">
-                        <Tag color="cyan" size="small" prefixIcon={<IconUser />}>
-                            {submittedCount} 人提交
-                        </Tag>
-                        <Tag color="blue" size="small" prefixIcon={<IconHistory />}>
-                            版本 {detail.result.version}
-                        </Tag>
-                    </div>
-                </div>
-                <div className="summary-detail-content-box">
-                    <SummaryContent content={detail.result.content} />
-                </div>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                <h3 style={{ margin: 0 }}>{t("summary.detail.memberStatus")}</h3>
+                <span style={{ display: "inline-flex", gap: 8 }}>
+                    {canAddMember && (
+                        <Button
+                            size="small"
+                            theme="borderless"
+                            icon={<IconPlus />}
+                            onClick={this.handleOpenAddMember}
+                        >
+                            {t("summary.detail.addMember")}
+                        </Button>
+                    )}
+                    {canLeave && (
+                        <Popconfirm
+                            title={t("summary.detail.leaveTask")}
+                            content={t("summary.detail.leaveConfirm")}
+                            onConfirm={this.handleLeaveTask}
+                        >
+                            <Button
+                                size="small"
+                                theme="borderless"
+                                type="danger"
+                                icon={<IconExit />}
+                            >
+                                {t("summary.detail.leaveTask")}
+                            </Button>
+                        </Popconfirm>
+                    )}
+                </span>
             </div>
         );
     }
 
     renderMemberStatus() {
-        const { members, membersLoading } = this.state;
+        const { members, membersLoading, detail } = this.state;
+        const { t } = this.context;
         if (membersLoading) {
             return (
-                <div className="summary-detail-members">
-                    <h3>成员状态</h3>
+                <div data-testid={summaryTestIds.detailMembersSection} className="summary-detail-members">
+                    {this.renderMemberStatusHeader()}
                     <Spin size="small" />
                 </div>
             );
@@ -659,37 +3320,57 @@ export default class SummaryDetailPage extends Component<SummaryDetailPageProps,
         if (members.length <= 1) return null;
 
         const statusConfig: Record<string, { icon: React.ReactNode; label: string; type: "success" | "warning" | "danger" | "default" }> = {
-            pending: { icon: <IconClock />, label: "待响应", type: "warning" },
-            accepted: { icon: <IconTick />, label: "已同意", type: "success" },
-            declined: { icon: <IconClose />, label: "已拒绝", type: "danger" },
-            processing: { icon: <IconInfoCircle />, label: "生成中", type: "default" },
-            completed: { icon: <IconTick />, label: "已完成", type: "success" },
-            submitted: { icon: <IconTick />, label: "已提交", type: "success" },
+            pending: { icon: <IconClock />, label: t("summary.memberStatus.pending"), type: "warning" },
+            accepted: { icon: <IconTick />, label: t("summary.memberStatus.accepted"), type: "success" },
+            declined: { icon: <IconClose />, label: t("summary.memberStatus.declined"), type: "danger" },
+            processing: { icon: <IconInfoCircle />, label: t("summary.memberStatus.processing"), type: "default" },
+            completed: { icon: <IconTick />, label: t("summary.memberStatus.completed"), type: "success" },
+            submitted: { icon: <IconTick />, label: t("summary.memberStatus.submitted"), type: "success" },
         };
 
         return (
-            <div className="summary-detail-members">
-                <h3>成员状态</h3>
+            <div data-testid={summaryTestIds.detailMembersSection} className="summary-detail-members">
+                {this.renderMemberStatusHeader()}
                 <div className="summary-detail-members-list">
                     {members.map((m) => {
                         const st = statusConfig[m.status] || statusConfig["pending"];
                         const isMe = m.user_id === WKApp.loginInfo.uid;
+                        // 问题3：creator 视角（can_remove_member）可移除非自己、非 creator 的成员。
+                        const canRemove =
+                            !!detail?.permissions?.can_remove_member &&
+                            !isMe &&
+                            m.user_id !== detail?.creator_id;
                         return (
-                            <div key={m.user_id} className="summary-detail-member-item">
+                            <div key={m.user_id} data-testid={summaryTestIds.detailMemberRow(m.user_id)} className="summary-detail-member-item">
                                 <span className="summary-detail-member-name">{m.user_name}</span>
                                 <Tag color={st.type} prefixIcon={st.icon} size="small">
                                     {st.label}
                                 </Tag>
                                 {isMe && m.status === "pending" && (
                                     <span style={{ display: "inline-flex", gap: 4, marginLeft: 8 }}>
-                                        <Button size="small" theme="solid" onClick={() => this.handleRespondToTask("accept")}>同意</Button>
-                                        <Button size="small" onClick={() => this.handleRespondToTask("reject")}>拒绝</Button>
+                                        <Button size="small" theme="solid" onClick={() => this.handleRespondToTask("accept")}>{t("summary.action.accept")}</Button>
+                                        <Button size="small" onClick={() => this.handleRespondToTask("reject")}>{t("summary.action.reject")}</Button>
                                     </span>
                                 )}
                                 {m.submitted_at && (
                                     <span className="summary-detail-member-time">
                                         {formatDate(m.submitted_at)}
                                     </span>
+                                )}
+                                {canRemove && (
+                                    <Popconfirm
+                                        title={t("summary.detail.removeMember")}
+                                        content={t("summary.detail.removeMemberConfirm")}
+                                        onConfirm={() => this.handleRemoveMember(m.user_id)}
+                                    >
+                                        <Button
+                                            size="small"
+                                            theme="borderless"
+                                            type="danger"
+                                            icon={<IconMinusCircle />}
+                                            style={{ marginLeft: "auto" }}
+                                        />
+                                    </Popconfirm>
                                 )}
                             </div>
                         );
@@ -706,61 +3387,283 @@ export default class SummaryDetailPage extends Component<SummaryDetailPageProps,
     };
 
     renderParticipantReports() {
-        const { members, membersLoading, expandedReports } = this.state;
+        const { members, membersLoading, expandedReports, editingPersonalReport, detail, personalResult, editingMyDraft } = this.state;
+        const { t } = this.context;
         // 如果只有 1 个人（creator 自己），不显示参与者报告区块
         if (membersLoading || members.length <= 1) return null;
+        // OCT-15 / upstream #495：成员按三类语义切分，pending 显式把 declined 排除掉，
+        // 否则被拒绝的成员会一直在「等待提交」里悬挂。declined 单独成集合，下面单独渲染。
         const submitted = members.filter((m) => m.submitted_at && m.content);
-        const pending = members.filter((m) => !m.submitted_at || !m.content);
-        if (submitted.length === 0 && pending.length === 0) return null;
+        const declined = members.filter((m) => m.status === "declined");
+        const pending = members.filter(
+            (m) => m.status !== "declined" && (!m.submitted_at || !m.content)
+        );
+        if (submitted.length === 0 && pending.length === 0 && declined.length === 0) return null;
+        const myUid = WKApp.loginInfo.uid;
+        // need2（排序）：把「我」那条置顶，其余保持原相对顺序（stable）。
+        const submittedSorted = [
+            ...submitted.filter((m) => m.user_id === myUid),
+            ...submitted.filter((m) => m.user_id !== myUid),
+        ];
+        // 方案甲：“我自己个人总结已完成但未提交”既不在 submitted（submitted_at 为空）
+        // 也不该以“等待提交”的被动 pending 行呈现。这里显式渲染“我（未提交）+ 提交按钮”的主入口行（renderMyPendingSubmitRow），
+        // 并从 generic pending 里排掉我那条，避免重复。不展开我的总结正文 → 不违反 need1。
+        const showMyPending = this.shouldShowMySubmit();
+        // OCT-21 / GLM-F3：草稿编辑态独立守卫（与 shouldShowMySubmit 的前置条件等价，
+        // 但不再依赖「无任何编辑态」——本身就是编辑态）。补 isMultiCollab() 纵深防御。
+        const showMyDraftEditing =
+            editingMyDraft &&
+            this.isMultiCollab() &&
+            personalResult?.worker_status === 2 &&
+            !personalResult?.submitted_at &&
+            members.length > 1;
+        // v2 F2：只要 renderMyPendingSubmitRow 会渲染「我」（无论草稿编辑态或常规态），
+        // 都必须从 pendingOthers 里排掉「我」，避免双份渲染。
+        const pendingOthers = (showMyPending || showMyDraftEditing)
+            ? pending.filter((m) => m.user_id !== myUid)
+            : pending;
+        // need3：自己那条的「编辑」按钮 gate=can_edit_personal。
+        const canEditPersonal = !!detail?.permissions?.can_edit_personal;
         return (
             <div className="summary-detail-participant-reports">
-                <h3>参与者报告</h3>
-                {submitted.map((m) => {
+                <h3>{t("summary.detail.participantReports")}</h3>
+                {submittedSorted.map((m) => {
                     const expanded = !!expandedReports[m.user_id];
                     const content = m.content!;
-                    const needsTruncate = content.length > 100;
+                    const isMe = m.user_id === myUid;
+                    // need3：自己那条进入行内编辑（initialContent=自己的 content），保存调 personal-edit。
+                    // F1（纵深防御）：加 canEditPersonal 双校验，权限不足即使状态残留也不进 editor。
+                    if (isMe && editingPersonalReport && canEditPersonal) {
+                        return (
+                            <div key={m.user_id} className="summary-detail-participant-report-item">
+                                <div className="summary-detail-participant-report-header">
+                                    <span>{m.user_name}</span>
+                                </div>
+                                <SummaryEditor
+                                    mode="personal"
+                                    taskId={detail!.task_id}
+                                    baseResultId={detail?.result_id ?? 0}
+                                    initialContent={content}
+                                    onSave={this.handleEditPersonalReportSave}
+                                    onCancel={this.handleEditPersonalReportCancel}
+                                    exposeSave={(fn) => { this.editorSaveFn = fn; }}
+                                />
+                            </div>
+                        );
+                    }
+                    // need3：他人那条隐私收口（citations=[] 、清 [n]）不变；自己那条不被清洗，可正常显示引用。
+                    const displayContent = isMe ? content : content.replace(/\[\d+\]/g, '');
+                    const displayCitations = isMe ? (m.citations || []) : [];
+                    const needsTruncate = displayContent.length > 100;
                     return (
                         <div
                             key={m.user_id}
-                            className={`summary-detail-participant-report-item${needsTruncate ? " clickable" : ""}`}
-                            onClick={() => needsTruncate && this.toggleReport(m.user_id)}
+                            className="summary-detail-participant-report-item"
                         >
-                            <div className="summary-detail-participant-report-header">
+                            {/* 问题3：收起触发点收窄为 header 行与底部 toggle 行，正文区不再绑点击，
+                                避免展开后选文字/点 [n] 引用误触收起。仅 needsTruncate 时可点、带手型光标。 */}
+                            <div
+                                className={`summary-detail-participant-report-header${needsTruncate ? " clickable" : ""}`}
+                                onClick={() => needsTruncate && this.toggleReport(m.user_id)}
+                            >
                                 <span>{m.user_name}</span>
                                 <span style={{ color: "var(--semi-color-text-3)", fontWeight: 400 }}>·</span>
                                 <span style={{ fontSize: 13, color: "var(--semi-color-text-2)", fontWeight: 400 }}>
                                     {formatDate(m.submitted_at!)}
                                 </span>
+                                {/* need3：仅自己那条加「编辑」按钮（gate=can_edit_personal）；他人无按钮。 */}
+                                {isMe && canEditPersonal && detail?.status === TaskStatus.COMPLETED && (
+                                    <Button
+                                        size="small"
+                                        theme="borderless"
+                                        icon={<IconEdit />}
+                                        style={{ marginLeft: "auto" }}
+                                        onClick={(e: React.MouseEvent) => { e.stopPropagation(); this.handleStartEditPersonalReport(); }}
+                                    >
+                                        {t("summary.detail.editMyReport")}
+                                    </Button>
+                                )}
                             </div>
                             <div className="summary-detail-participant-report-content">
-                                {expanded ? (
-                                    <CitationText content={content} citations={m.citations || []} />
+                                {/* 问题2：「我」那条也参与 expanded/needsTruncate 收起逻辑。
+                                    isMe 始终用 CitationText 渲染（保留引用可点）；
+                                    collapsed 时传截断后的 content（截断后编号可能丢失，
+                                    可接受），展开时传完整 content。他人那条逻辑不变。 */}
+                                {isMe ? (
+                                    <CitationText
+                                        content={expanded || !needsTruncate ? displayContent : displayContent.slice(0, 100) + "..."}
+                                        citations={displayCitations}
+                                    />
+                                ) : expanded ? (
+                                    <CitationText
+                                        content={displayContent}
+                                        citations={displayCitations}
+                                    />
                                 ) : (
                                     <div>
-                                        {needsTruncate ? content.slice(0, 100) + "..." : content}
+                                        {needsTruncate ? displayContent.slice(0, 100) + "..." : displayContent}
                                     </div>
                                 )}
                             </div>
                             {needsTruncate && (
-                                <div className="summary-detail-participant-report-toggle">
-                                    {expanded ? "收起 ▲" : "展开全部 ▼"}
+                                <div
+                                    className="summary-detail-participant-report-toggle clickable"
+                                    onClick={() => this.toggleReport(m.user_id)}
+                                >
+                                    {expanded ? t("summary.detail.collapse") : t("summary.detail.expandAll")}
                                 </div>
                             )}
                         </div>
                     );
                 })}
-                {pending.map((m) => (
+                {showMyPending && this.renderMyPendingSubmitRow()}
+                {showMyDraftEditing && this.renderMyPendingSubmitRow()}
+                {pendingOthers.map((m) => (
                     <div key={m.user_id} className="summary-detail-participant-report-pending">
                         <IconClock style={{ fontSize: 14 }} />
-                        <span>{m.user_name} · 等待提交...</span>
+                        <span>{t("summary.detail.waitingSubmit", { values: { name: m.user_name } })}</span>
+                    </div>
+                ))}
+                {/* OCT-15 / upstream #495：declined 成员单独成行，复用 confirmPage.declined（“已拒绝参与” / “Participation declined”）。
+                    沿用 pending 行的容器类名 + 一个 --declined modifier 以便将来定制样式；本次不动 SCSS。 */}
+                {declined.map((m) => (
+                    <div
+                        key={m.user_id}
+                        className="summary-detail-participant-report-pending summary-detail-participant-report-pending--declined"
+                    >
+                        <IconClose style={{ fontSize: 14 }} />
+                        <span>
+                            {m.user_name}
+                            <span style={{ color: "var(--semi-color-text-3)", fontWeight: 400 }}> · </span>
+                            <span style={{ fontSize: 13, color: "var(--semi-color-text-2)", fontWeight: 400 }}>
+                                {t("summary.confirmPage.declined")}
+                            </span>
+                        </span>
                     </div>
                 ))}
             </div>
         );
     }
 
+    /**
+     * 方案甲：参与者报告区里「我（未提交）」的主提交入口行。
+     * need1（修正）：提交前自己的总结也要在参与者报告里能看到正文，并可在此处提交。
+     * 正文/引用取 this.state.personalResult（members 接口对未提交的人不下发 content），
+     * 用 CitationText 渲染（引用可点）。提交按钮走 handleSubmitPersonal 不变。
+     */
+    renderMyPendingSubmitRow() {
+        const { t } = this.context;
+        const { personalResult, editingMyDraft, detail } = this.state;
+        const myContent = personalResult?.content || "";
+        const myCitations = personalResult?.citations || [];
+        // OCT-21：草稿编辑态——整行让位给 SummaryEditor (mode=personal_draft)，
+        // 「提交给全部」按钮在编辑态下不可见（与既有「team / personal 编辑」体验一致）。
+        if (editingMyDraft && detail) {
+            return (
+                <div
+                    key="__my_pending_submit_editing__"
+                    data-testid={summaryTestIds.detailMyPendingRow}
+                    className="summary-detail-participant-report-item summary-detail-my-pending-row"
+                >
+                    <div className="summary-detail-participant-report-header">
+                        <span>{t("summary.detail.mySubmitRowName")}</span>
+                    </div>
+                    <SummaryEditor
+                        mode="personal_draft"
+                        taskId={detail.task_id}
+                        baseResultId={detail.result_id ?? 0}
+                        initialContent={myContent}
+                        onSave={this.handleEditMyDraftSave}
+                        onCancel={this.handleEditMyDraftCancel}
+                        exposeSave={(fn) => { this.editorSaveFn = fn; }}
+                    />
+                </div>
+            );
+        }
+        return (
+            <div
+                key="__my_pending_submit__"
+                data-testid={summaryTestIds.detailMyPendingRow}
+                className="summary-detail-participant-report-item summary-detail-my-pending-row"
+            >
+                <div className="summary-detail-participant-report-header">
+                    <span>{t("summary.detail.mySubmitRowName")}</span>
+                    {/* OCT-21：提交前编辑入口。文案复用 summary.common.edit；按钮放在「提交给全部」左侧。 */}
+                    <Button
+                        data-testid={summaryTestIds.detailMyDraftEditBtn}
+                        size="small"
+                        theme="borderless"
+                        icon={<IconEdit />}
+                        style={{ marginLeft: "auto" }}
+                        onClick={this.handleStartEditMyDraft}
+                    >
+                        {t("summary.common.edit")}
+                    </Button>
+                    <Button
+                        data-testid={summaryTestIds.detailSubmitMyBtn}
+                        size="small"
+                        theme="solid"
+                        style={{ marginLeft: 8 }}
+                        onClick={this.handleSubmitPersonal}
+                    >
+                        {t("summary.detail.submitToAll")}
+                    </Button>
+                </div>
+                {myContent && this.canRevealPersonalContent() && (
+                    <div className="summary-detail-participant-report-content">
+                        <CitationText content={myContent} citations={myCitations} />
+                    </div>
+                )}
+            </div>
+        );
+    }
+
+    /** True while a version restore request is in flight (either scope).
+     * The four `handleStartEdit*` entry points refuse to open an editor
+     * while this is true: opening one otherwise races the restore's
+     * post-`await` cleanup, and the post-`await` guard on the restore
+     * would then silently discard a mutation the server already committed.
+     * Refusing at the edit entry rather than absorbing at the restore end
+     * makes the failure mode a no-op click (predictable) instead of a
+     * silent stale UI. */
+    private isRestoreInFlight(): boolean {
+        return this.state.restoringVersionId != null || this.state.restoringPersonalVersionId != null;
+    }
+
     handleStartEdit = () => {
-        this.setState({ isEditing: true });
+        // Mutually-exclusive with the other editors; entering ensures the
+        // personal section is expanded so the editor mounts (otherwise the
+        // save bar appears without the editor and saves can hit a stale
+        // closure). Also clear any stale version panel / preview state so
+        // the read-only historical body cannot render underneath the
+        // editor and the scroll lock cannot get stuck; `versionDetailLoading`
+        // is cleared so a request in flight when the user starts editing
+        // does not strand the flag and silently disable future previews.
+        // Refuse while a version restore is in flight — see isRestoreInFlight.
+        if (this.isRestoreInFlight()) return;
+        this.setState({
+            isEditing: true,
+            editingTeamSummary: false,
+            editingPersonalReport: false,
+            editingMyDraft: false,
+            personalExpanded: true,
+            versionPanelOpen: false,
+            showVersionDetailModal: false,
+            versionDetail: null,
+            versionDetailLoading: false,
+        });
+    };
+
+    togglePersonalExpanded = () => {
+        this.setState((prev) => {
+            // Editors depend on personalExpanded being true to mount; refuse
+            // to collapse while any inline editor is open so we do not hide
+            // the editor while leaving its save bar visible.
+            if (prev.personalExpanded && (prev.isEditing || prev.editingMyDraft || prev.editingPersonalReport)) {
+                return null;
+            }
+            return { personalExpanded: !prev.personalExpanded };
+        });
     };
 
     handleEditSave = () => {
@@ -772,81 +3675,548 @@ export default class SummaryDetailPage extends Component<SummaryDetailPageProps,
         this.setState({ isEditing: false });
     };
 
-    renderHeader() {
-        const { detail } = this.state;
+    // Enter/exit inline edit for "my personal report" (multi-collab). Save
+    // goes through personal-edit, which recomputes the team result server-side.
+    handleStartEditPersonalReport = () => {
+        // Mutually-exclusive with the other three editors. Clear stale
+        // version panel/preview state (including the loading flag; see the
+        // handleStartEdit note above). Refuse while a restore is in flight.
+        if (this.isRestoreInFlight()) return;
+        this.setState({
+            editingPersonalReport: true,
+            editingTeamSummary: false,
+            isEditing: false,
+            editingMyDraft: false,
+            versionPanelOpen: false,
+            showVersionDetailModal: false,
+            versionDetail: null,
+            versionDetailLoading: false,
+        });
+    };
+    handleEditPersonalReportSave = () => {
+        this.setState({ editingPersonalReport: false });
+        // Save triggers team recompute server-side; reload the whole detail
+        // so members and personal state stay consistent.
+        this.loadDetail();
+    };
+    handleEditPersonalReportCancel = () => {
+        this.setState({ editingPersonalReport: false });
+    };
 
-        // Build "..." menu items
-        const menuItems: { node: string; key: string; onClick: () => void; danger?: boolean }[] = [];
-        if (detail && canRegenerate(detail.status)) {
-            menuItems.push({ node: "重新生成", key: "regenerate", onClick: this.handleRegenerate });
-        }
-        if (detail && canCancel(detail.status)) {
-            menuItems.push({ node: "取消任务", key: "cancel", onClick: this.handleCancel, danger: true });
-        }
+    // Enter/exit inline edit for the team result (creator only). Save uses
+    // the existing PUT /summaries/:id/edit endpoint.
+    handleStartEditTeam = () => {
+        // Mutually-exclusive with the other three editors. Clear stale
+        // version panel/preview state (including the loading flag).
+        // Refuse while a restore is in flight.
+        if (this.isRestoreInFlight()) return;
+        this.setState({
+            editingTeamSummary: true,
+            editingPersonalReport: false,
+            isEditing: false,
+            editingMyDraft: false,
+            versionPanelOpen: false,
+            showVersionDetailModal: false,
+            versionDetail: null,
+            versionDetailLoading: false,
+        });
+    };
+    handleEditTeamSave = () => {
+        this.setState({ editingTeamSummary: false });
+        this.loadDetail();
+    };
+    handleEditTeamCancel = () => {
+        this.setState({ editingTeamSummary: false });
+    };
+
+    // Pre-submit edit of "my own" personal-report draft. Symmetrical with
+    // handleStartEditPersonalReport (Enter / Save / Cancel).
+    handleStartEditMyDraft = () => {
+        // Mutually-exclusive with the other three editors. Clear stale
+        // version panel/preview state (including the loading flag).
+        // Refuse while a restore is in flight.
+        if (this.isRestoreInFlight()) return;
+        this.setState({
+            editingMyDraft: true,
+            isEditing: false,
+            editingPersonalReport: false,
+            editingTeamSummary: false,
+            versionPanelOpen: false,
+            showVersionDetailModal: false,
+            versionDetail: null,
+            versionDetailLoading: false,
+        });
+    };
+    handleEditMyDraftSave = () => {
+        // v2 F3：保存后统一走 loadDetail()——不是 loadPersonalResult。
+        // 理由：草稿保存遇 409（已被并发 submit 抢先）会让 personalResult.submitted_at 变非空，
+        // 但 members 中的「我」仍是 pending，只刷 personalResult 会让分桶视图错乱。
+        // loadDetail 一把全刷（task/members/personal/schedule），保证分桶绝对一致；
+        // 草稿成功路径不重算团队，loadDetail 也不会触发新的 LLM 调用，开销可接受。
+        this.setState({ editingMyDraft: false });
+        this.loadDetail();
+    };
+    handleEditMyDraftCancel = () => {
+        this.setState({ editingMyDraft: false });
+    };
+
+    // need7：creator 添加新成员。选定后调 POST /members，成功 loadDetail 刷新（新成员 Pending）。
+    handleOpenAddMember = () => {
+        if (this.taskId == null) return;
+        const detail = this.state.detail;
+        if (!detail) return;
+        // 推断频道：origin_channel_id + origin_channel_type
+        const channelId = detail.origin_channel_id;
+        const channelType = detail.origin_channel_type === 1 ? 2 : detail.origin_channel_type === 3 ? 1 : 2;
+        const channel = channelId ? new WkChannel(channelId, channelType) : new WkChannel(this.taskId.toString(), 2);
+        const excluded = (detail.participants || []).map((p) => p.user_id);
+        let selectedItems: any[] = [];
+        WKApp.routeRight.push(
+            <RoutePage
+                title={t("summary.detail.addMember")}
+                onClose={() => WKApp.routeRight.pop()}
+                render={(context: any) => (
+                    <>
+                        <SubscriberList
+                            channel={channel}
+                            canSelect
+                            humansOnly
+                            disableSelectList={excluded}
+                            onSelect={(items) => { selectedItems = items; }}
+                        />
+                        <div style={{ padding: "12px 16px", borderTop: "1px solid var(--semi-color-border)" }}>
+                            <Button
+                                theme="solid"
+                                block
+                                loading={this.state.addingMember}
+                                onClick={async () => {
+                                    const userIds = selectedItems.map((s: any) => s.uid).filter(Boolean);
+                                    if (userIds.length === 0) return;
+                                    try {
+                                        await api.addMembers(this.taskId!, userIds);
+                                        Toast.success(t("summary.detail.addMemberSuccess"));
+                                        WKApp.routeRight.pop();
+                                        this.loadDetail();
+                                    } catch (err: any) {
+                                        Toast.error(err.message || t("summary.detail.addMemberFailed"));
+                                    }
+                                }}
+                            >
+                                {t("summary.common.confirm")}
+                            </Button>
+                        </div>
+                    </>
+                )}
+            />
+        );
+    };
+
+    renderScheduleButton() {
+        const { detail, scheduleItem, scheduleLoading, isEditing, editingTeamSummary, editingPersonalReport, editingMyDraft } = this.state;
+        const { t } = this.context;
+        // OCT-21 / GPT-S1：草稿编辑态也隐藏 schedule 按钮，与其它编辑态保持一致约束。
+        if (!detail?.permissions?.can_schedule || isEditing || editingTeamSummary || editingPersonalReport || editingMyDraft) return null;
+        // Agent 总结不支持定时更新：schedule 到点会 trigger 传统 map-reduce pipeline，
+        // 但 agent 总结产出是 chat 交互生成，无 replayable sources/participants。
+        if (detail?.trigger_type === TriggerType.AGENT) return null;
+
+        // 任务3：hasSchedule 仅在存在且 is_active 时为 true。
+        // 停用后文案回到「设置定时更新」。
+        const hasActiveSchedule = !!scheduleItem && scheduleItem.is_active !== false;
+        const hasSchedule =
+            hasActiveSchedule ||
+            (!scheduleItem && !!(detail.schedule_id && detail.schedule_id > 0));
 
         return (
-            <div className="summary-detail-header">
-                <div className="summary-detail-header-inner">
-                    <OverflowTooltip as="h2" className="summary-detail-title">
-                        {detail?.title || "总结详情"}
+            <Button
+                size="small"
+                theme="borderless"
+                type="tertiary"
+                icon={<IconClock />}
+                onClick={this.openScheduleModal}
+                disabled={scheduleLoading}
+                loading={scheduleLoading}
+            >
+                {t(hasSchedule ? "summary.detail.editSchedule" : "summary.detail.setSchedule")}
+            </Button>
+        );
+    }
+
+    /**
+     * V5/§4.2：本任务是否为 V5 schedule 级 CONFIRM 任务。
+     * 以 scheduleItem.confirm_policy===1 区分两条确认路：
+     *  - true：WAITING_CONFIRM 入口走 schedule 级确认 banner（不导向旧页）。
+     *  - false：旧 task 级 manual 确认流，保留导向 SummaryConfirmPage。
+     * 无 scheduleItem 或 confirm_policy≠1 均视为旧路径（false）。
+     */
+    private isV5ScheduleConfirm(): boolean {
+        const { scheduleItem } = this.state;
+        return !!scheduleItem && scheduleItem.confirm_policy === 1;
+    }
+
+    /**
+     * 竞态修复（第3轮）finding 2：WAITING_CONFIRM 多人分支的渲染分路决策。
+     *
+     * scheduleItem 由 loadDetail 之后的二次异步 loadSchedule 回填，到达时间不确定。
+     * 若直接用 isV5ScheduleConfirm()（只看 confirm_policy===1）分路，scheduleItem 未到
+     * 的瞬间窗口会返回 false → V5 CONFIRM 任务 fallback 到旧 SummaryConfirmPage。
+     *
+     * 因此把旧分支的条件从「!isV5」收紧为「已加载完成 && 确认不是 V5」：
+     *  - 'loading'：scheduleLoading 期间（scheduleItem 尚未到）只显示加载态，不暴露
+     *    任何确认入口，绝不 fallback 旧页。
+     *  - 'v5'：加载完成且 confirm_policy===1 → schedule 级确认 banner。
+     *  - 'legacy'：加载完成且确认非 V5（confirm_policy≠1）或确无 schedule
+     *    （scheduleItem 为 null 且 scheduleLoading=false）→ 保留旧 SummaryConfirmPage 路径。
+     */
+    private waitingConfirmMode(): 'loading' | 'v5' | 'legacy' {
+        if (this.state.scheduleLoading) return 'loading';
+        return this.isV5ScheduleConfirm() ? 'v5' : 'legacy';
+    }
+
+    /**
+     * V5/§4.5：当前登录用户是否尚需对本定时任务完成一次性确认。
+     * 条件：confirm_policy=1（CONFIRM）且该用户在 participant_config 名单里 confirmed=false
+     *（含 creator——creator 也要确认）。确认后永久免确认，按钮消失。
+     * 兼容：participant_config 为旧纯数组时无 confirmed 态，视为需确认。
+     */
+    needsScheduleConfirm(): boolean {
+        const { scheduleItem } = this.state;
+        if (!scheduleItem) return false;
+        if (scheduleItem.is_active === false) return false;
+        if (scheduleItem.confirm_policy !== 1) return false;
+        const uid = WKApp.loginInfo.uid;
+        const pc = scheduleItem.participant_config;
+        if (!pc || !uid) return false;
+        // 旧纯数组（string[]）：无确认态 → 只要在名单里就视为需确认。
+        if (Array.isArray(pc)) {
+            return pc.includes(uid);
+        }
+        const me = (pc.participants || []).find((p) => p.user_id === uid);
+        if (!me) return false;
+        return me.confirmed !== true;
+    }
+
+    handleConfirmSchedule = async () => {
+        // 续修7：入口捕获 requestTaskId。await confirmSchedule 期间切 task，不得把 A 的
+        // schedule 回显到 B（finally 的 confirmingSchedule 复位保留）。
+        const requestTaskId = this.taskId;
+        const { scheduleItem } = this.state;
+        if (!scheduleItem) return;
+        this.setState({ confirmingSchedule: true });
+        try {
+            await api.confirmSchedule(scheduleItem.schedule_id);
+            // schedule 邀请也是 pending_invitation_count 的组成部分；确认成功后
+            // 立即按当前 Space 重算，即使等待期间用户已切到另一条总结。
+            refreshPendingInvitationBadge();
+            // 迟到（已切 task）：不回显新 task（confirmingSchedule 由 finally 复位）。
+            if (this.taskId !== requestTaskId) return;
+            Toast.success(t("summary.detail.scheduleConfirmed"));
+            // 复用现有加载路径刷新（不新增任何出站推送）：重拉 schedule 让按钮消失。
+            this.loadSchedule(scheduleItem.schedule_id);
+        } catch (err: any) {
+            Toast.error(err.message || t("summary.common.operationFailed"));
+        } finally {
+            this.setState({ confirmingSchedule: false });
+        }
+    };
+
+    // V5/§4.5：schedule 级一次性确认入口。常驻直到该成员确认成功；
+    // 确认后后续所有轮不再出现。点击调 POST /summary-schedules/:id/confirm。
+    renderScheduleConfirm() {
+        const { t } = this.context;
+        if (!this.needsScheduleConfirm()) return null;
+        return (
+            <Banner
+                type="info"
+                closeIcon={null}
+                fullMode={false}
+                style={{ marginTop: 12 }}
+                description={
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+                        <span>{t("summary.detail.scheduleConfirmHint")}</span>
+                        <Button
+                            theme="solid"
+                            size="small"
+                            loading={this.state.confirmingSchedule}
+                            onClick={this.handleConfirmSchedule}
+                        >
+                            {t("summary.detail.scheduleConfirmButton")}
+                        </Button>
+                    </div>
+                }
+            />
+        );
+    }
+
+    // 任务2：详情页直观展示当前定时（人类可读）。
+    renderScheduleSummary() {
+        const { detail, scheduleItem } = this.state;
+        const { t } = this.context;
+        // need2：定时**信息**只读展示对所有参与者可见（can_view_schedule），不再限 creator。
+        // 位置不变（header）。定时**设置**按钮仍仅 creator（renderScheduleButton, need5），两者拆开。
+        if (!detail?.permissions?.can_view_schedule) return null;
+        if (!scheduleItem) return null;
+
+        const inactive = scheduleItem.is_active === false;
+        if (inactive) {
+            // 已停用：灰色提示，不当作有效定时
+            return (
+                <div
+                    className="summary-detail-schedule-summary summary-detail-schedule-summary--inactive"
+                    style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 4,
+                        fontSize: 12,
+                        color: "var(--semi-color-text-2)",
+                    }}
+                >
+                    <IconClock size="small" />
+                    <span>{t("summary.detail.scheduleDisabledHint")}</span>
+                </div>
+            );
+        }
+
+        const text = formatScheduleSummary(scheduleItem);
+        if (!text) return null;
+        return (
+            <div
+                className="summary-detail-schedule-summary"
+                style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 4,
+                    fontSize: 12,
+                    color: "var(--semi-color-text-1)",
+                }}
+            >
+                <IconClock size="small" style={{ color: "var(--semi-color-primary)" }} />
+                <span>{text}</span>
+            </div>
+        );
+    }
+
+    renderHeader() {
+        const { detail, scheduleLoading } = this.state;
+        const { t } = this.context;
+        const myUid = WKApp.loginInfo.uid;
+        const isCreator = detail?.creator_id != null && detail.creator_id === myUid;
+        const isParticipant = !!detail?.participants?.some((p) => p.user_id === myUid);
+        const displayTitle = deriveSummaryDisplayContent(detail?.topic || detail?.title || "") || t("summary.detail.defaultTitle");
+
+        // #907 review (yujiawei P2-1): agent summary forward sources fall through to
+        // personalResult.content, which is fetched async by loadPersonalResult. During
+        // that load window a click would silently no-op. Disable until the fallback
+        // content is in. Traditional workflow has detail.result inline, so it is never
+        // gated here.
+        const isAgent = detail?.trigger_type === TriggerType.AGENT;
+        const agentContentReady = !!this.state.personalResult?.content?.trim();
+        const waitingForFallback = !!detail && isAgent && !detail.result?.content?.trim() && !agentContentReady;
+
+        const showForwardToChat = !!detail && detail.status === TaskStatus.COMPLETED;
+        const showRegenerate = !!detail && canRegenerate(detail.status) && !isAgent;
+        const showRetry = !!detail && detail.status === TaskStatus.FAILED;
+        const showCancel = !!detail && canCancel(detail.status);
+        const showDelete = !!detail && isCreator;
+        const showLeave = !!detail && isParticipant && !isCreator;
+        const canSchedule = !!detail?.permissions?.can_schedule && detail?.trigger_type !== TriggerType.AGENT && !this.state.isEditing && !this.state.editingTeamSummary;
+        const scheduleItem = this.state.scheduleItem;
+        const hasActiveSchedule = !!scheduleItem && scheduleItem.is_active !== false;
+        const showSchedule = canSchedule;
+
+        return (
+            <>
+            <div className="summary-detail-title-row">
+                <div className="summary-detail-header-title-wrap">
+                    <OverflowTooltip as="h2" data-testid={summaryTestIds.detailTitle} className="summary-detail-title" title={displayTitle}>
+                        {displayTitle}
                     </OverflowTooltip>
-                    <div className="summary-detail-header-actions">
-                        {detail && detail.status === TaskStatus.COMPLETED && (
+                    {this.renderScheduleSummary()}
+                    {/* Only render the "由 <bot> 代 <owner> 创建" subtitle once both
+                        names are present (backend fields from octo-smart-summary#188).
+                        Gating on trigger_type alone would show "由 未知 代 未知 创建"
+                        for bot summaries until that backend ships — the two services
+                        deploy independently, so we must not depend on their order. */}
+                    {detail && !!detail.creator_bot_name && !!detail.creator_name && (
+                        <div className="summary-detail-bot-created">
+                            {t("summary.detail.botCreatedByFor", {
+                                values: {
+                                    bot: detail.creator_bot_name,
+                                    owner: detail.creator_name,
+                                },
+                            })}
+                        </div>
+                    )}
+                </div>
+                <div className="summary-detail-header-actions">
+                    {detail && detail.status === TaskStatus.COMPLETED && this.canRefineCurrentDetail() && (
+                        <Button
+                            data-testid={summaryTestIds.detailContinueRefineBtn}
+                            theme="solid"
+                            type="primary"
+                            onClick={this.handleContinueRefine}
+                        >
+                            {t("summary.detail.continueRefine")}
+                        </Button>
+                    )}
+                    {(() => {
+                        const vctx = this.getActiveVersionContext();
+                        if (!vctx) return null;
+                        const versionPanelActive = this.state.versionPanelOpen;
+                        return (
                             <Button
+                                data-testid={summaryTestIds.detailVersionTrigger}
+                                className={`summary-version-trigger${versionPanelActive ? " is-active" : ""}`}
                                 theme="borderless"
-                                icon={<IconSend />}
-                                onClick={this.handleForwardToChat}
+                                type="tertiary"
+                                icon={<IconHistory />}
+                                style={{
+                                    color: versionPanelActive ? "#fff" : "var(--wk-color-accent)",
+                                    background: versionPanelActive ? "var(--wk-color-accent)" : "var(--wk-bg-selected)",
+                                    borderColor: versionPanelActive ? "var(--wk-color-accent)" : "var(--wk-ai-border)",
+                                }}
+                                onClick={() => {
+                                    // Route the close half of the toggle
+                                    // through handleCloseVersionPanel so it
+                                    // also clears showVersionDetailModal /
+                                    // versionDetail / versionDetailLoading.
+                                    // Otherwise closing the panel from this
+                                    // trigger while a preview is open leaves
+                                    // the centre column on the read-only
+                                    // historical body with editing silently
+                                    // disabled (canEdit tests
+                                    // !showVersionDetailModal).
+                                    if (this.state.versionPanelOpen) {
+                                        this.handleCloseVersionPanel();
+                                    } else {
+                                        this.setState({ versionPanelOpen: true });
+                                    }
+                                }}
+                                aria-expanded={this.state.versionPanelOpen}
                             >
-                                转发到聊天
+                                {t("summary.detail.versionRecords")}
+                                <span className="summary-version-trigger-count">{vctx.versions.length}</span>
                             </Button>
-                        )}
-                        {detail && detail.status === TaskStatus.COMPLETED && (
-                            <Button
-                                theme="borderless"
-                                icon={<IconSend />}
-                                onClick={this.handleForwardToMatter}
-                                loading={this.state.forwardingToMatter}
-                                disabled={this.state.forwardingToMatter}
-                            >
-                                转发到 Matters
-                            </Button>
-                        )}
-                        {menuItems.length > 0 && (
-                            <Dropdown
-                                trigger="click"
-                                position="bottomRight"
-                                render={
+                        );
+                    })()}
+                    {/* 主操作常驻顶部（对齐版本管理原型）：转发到聊天 / 重新生成 / 删除 */}
+                    {showForwardToChat && (
+                        <Button
+                            className="summary-detail-header-btn"
+                            theme="borderless"
+                            type="tertiary"
+                            icon={<IconSend />}
+                            onClick={this.handleForwardToChat}
+                            disabled={waitingForFallback}
+                        >
+                            {t("summary.detail.forwardToChat")}
+                        </Button>
+                    )}
+                    {showRegenerate && !showRetry && (
+                        <Button
+                            data-testid={summaryTestIds.detailRegenerateBtn}
+                            className="summary-detail-header-btn"
+                            theme="borderless"
+                            type="tertiary"
+                            icon={<IconRefresh />}
+                            onClick={this.handleRegenerate}
+                        >
+                            {t("summary.detail.regenerate")}
+                        </Button>
+                    )}
+                    {showRetry && (
+                        <Button
+                            data-testid={summaryTestIds.detailRetryBtn}
+                            className="summary-detail-header-btn"
+                            theme="borderless"
+                            type="tertiary"
+                            icon={<IconRefresh />}
+                            onClick={this.handleRetry}
+                        >
+                            {t("summary.summaryCard.retry")}
+                        </Button>
+                    )}
+                    {showDelete && (
+                        <Button
+                            data-testid={summaryTestIds.detailDeleteBtn}
+                            className="summary-detail-header-btn summary-detail-header-btn--danger"
+                            theme="borderless"
+                            type="danger"
+                            icon={<IconDelete />}
+                            aria-label={t("summary.common.delete")}
+                            onClick={() => Modal.confirm({
+                                title: t("summary.summaryCard.deleteTitle"),
+                                content: t("summary.summaryCard.deleteContent", { values: { title: detail?.title || detail?.task_no || "" } }),
+                                onOk: this.handleDeleteTask,
+                                okButtonProps: { 'data-testid': summaryTestIds.deleteConfirmOkBtn } as any,
+                            })}
+                        />
+                    )}
+                    {/* 其余次要操作收进 ⋯：定时 / 取消 / 离开；编辑位于正文标题行。 */}
+                    {(showSchedule || showCancel || showLeave) && (
+                        <Dropdown
+                            trigger="click"
+                            position="bottomRight"
+                            render={
                                     <Dropdown.Menu>
-                                        {menuItems.map((item) => (
+                                        {showSchedule && (
                                             <Dropdown.Item
-                                                key={item.key}
-                                                onClick={item.onClick}
-                                                style={item.danger ? { color: "var(--semi-color-danger)" } : undefined}
+                                                icon={<IconClock />}
+                                                onClick={this.openScheduleModal}
+                                                disabled={scheduleLoading}
                                             >
-                                                {item.node}
+                                                {t(hasActiveSchedule ? "summary.detail.editSchedule" : "summary.detail.setSchedule")}
                                             </Dropdown.Item>
-                                        ))}
+                                        )}
+                                        {showCancel && (
+                                            <Dropdown.Item
+                                                icon={<IconClose />}
+                                                onClick={this.handleCancel}
+                                            >
+                                                {t("summary.detail.cancelTask")}
+                                            </Dropdown.Item>
+                                        )}
+                                        {showLeave && (
+                                            <Dropdown.Item
+                                                type="danger"
+                                                icon={<IconMinusCircle />}
+                                                onClick={() => Modal.confirm({
+                                                    title: t("summary.detail.leaveTask"),
+                                                    content: t("summary.detail.leaveConfirm"),
+                                                    onOk: this.handleLeaveTask,
+                                                })}
+                                            >
+                                                {t("summary.detail.leaveTask")}
+                                            </Dropdown.Item>
+                                        )}
                                     </Dropdown.Menu>
                                 }
                             >
-                                <Button theme="borderless" icon={<IconMore />} />
+                                <Button size="small" theme="borderless" type="tertiary" icon={<IconMore />} />
                             </Dropdown>
                         )}
                     </div>
                 </div>
-            </div>
+                {this.renderScheduleConfirm()}
+            </>
         );
     }
 
     render() {
         const { detail, loading, error, showScheduleConfig, scheduleConfig } = this.state;
+        const { t } = this.context;
+        const hasToc = this.shouldShowToc();
 
         return (
-            <div className="summary-detail-page">
-                {this.renderHeader()}
-
-                <div className="summary-detail-content-wrapper">
-                    <div className="summary-detail-content-inner">
+            <div data-testid={summaryTestIds.detailPage} className="summary-detail-page">
+                <div
+                    ref={this.layoutRef}
+                    className={`summary-detail-layout${this.isVersionPanelActuallyOpen() ? " has-version-panel" : ""}${hasToc ? " has-toc" : ""}`}
+                >
+                    <div className="summary-detail-content-wrapper">
+                    {detail && !loading && this.renderHeader()}
+                    <div className="summary-detail-content-scroll" ref={this.contentScrollRef}>
+                        <div className="summary-detail-content-inner">
                         {loading && (
                             <div className="summary-detail-loading">
                                 <Spin size="large" />
@@ -856,21 +4226,22 @@ export default class SummaryDetailPage extends Component<SummaryDetailPageProps,
                         {error && (
                             <Banner
                                 type="warning"
-                                description="可能由网络波动或服务异常导致"
+                                description={t("summary.detail.errorCause")}
                                 closeIcon={null}
                                 style={{ marginBottom: 16 }}
                                 fullMode={false}
                             >
                                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                                     <span>{error}</span>
-                                    <Button size="small" onClick={() => this.loadDetail()}>重试</Button>
+                                    <Button size="small" onClick={() => this.loadDetail()}>{t("summary.common.retry")}</Button>
                                 </div>
                             </Banner>
                         )}
 
                         {detail && !loading && (() => {
                             const myP = detail.participants?.find((p) => p.user_id === WKApp.loginInfo.uid);
-                            const isPendingInvite = myP != null && myP.status === ParticipantStatus.PENDING;
+                            const isMultiParticipant = (detail.participants?.length ?? 0) > 1;
+                            const isPendingInvite = isMultiParticipant && myP != null && myP.status === ParticipantStatus.PENDING;
                             return isPendingInvite ? (
                                 <div
                                     className="summary-detail-respond-banner"
@@ -884,68 +4255,107 @@ export default class SummaryDetailPage extends Component<SummaryDetailPageProps,
                                         borderRadius: 8,
                                     }}
                                 >
-                                    <span style={{ flex: 1, color: "var(--semi-color-text-0)" }}>你被邀请参与此总结任务，是否同意？</span>
-                                    <Button size="small" theme="solid" onClick={() => this.handleRespondToTask("accept")}>同意</Button>
-                                    <Button size="small" onClick={() => this.handleRespondToTask("reject")}>拒绝</Button>
+                                    <span style={{ flex: 1, color: "var(--semi-color-text-0)" }}>{t("summary.detail.inviteQuestion")}</span>
+                                    <Button size="small" theme="solid" onClick={() => this.handleRespondToTask("accept")}>{t("summary.action.accept")}</Button>
+                                    <Button size="small" onClick={() => this.handleRespondToTask("reject")}>{t("summary.action.reject")}</Button>
                                 </div>
                             ) : null;
                         })()}
 
                         {detail && !loading && (
                             <>
+                                {this.renderRefineLoadingStatus()}
                                 {detail.summary_mode === SummaryMode.BY_PERSON && (
                                     <>
-                                        {this.state.isEditing && this.state.personalResult && detail.result_id ? (
-                                            <div className="summary-detail-personal">
-                                                <h3>我的总结</h3>
-                                                <SummaryEditor
-                                                    taskId={detail.task_id}
-                                                    baseResultId={detail.result_id}
-                                                    initialContent={this.state.personalResult.content || ""}
-                                                    onSave={this.handleEditSave}
-                                                    onCancel={this.handleEditCancel}
-                                                />
-                                            </div>
-                                        ) : (
-                                            this.renderPersonalSummary()
+                                        {/* need1：多人协作不再单独显示「我的总结」区块（自己内容改到参与者报告
+                                            里我那条，need3）；单人 BY_PERSON 维持显示「我的总结」及其行内编辑。 */}
+                                        {!this.isMultiCollab() && (
+                                            <>
+                                                {this.renderPersonalSummary()}
+                                            </>
                                         )}
-                                        {this.renderTeamSummary()}
+                                        {/* 回归修复：多人协作页给「我自己」补回「提交给全部」轻量入口。
+                                            不违反 need1（不恢复我的总结正文区），仅一句提示 + 提交按钮。
+                                            isMultiCollab 内部门控；单人/BY_GROUP 返回 null。 */}
+                                        {this.isMultiCollabRegenerating() && this.shouldShowWorkflowCard() && this.renderProcessing()}
+                                        {this.isMultiCollabRegenerating() && !this.shouldShowWorkflowCard() && this.renderTeamGeneratingStatus()}
+                                        {this.renderMySubmitBar()}
+                                        {this.state.teamStreaming && this.state.teamStreamingContent.trim() ? (
+                                            <>
+                                                {this.renderTeamStreamingContent()}
+                                                {this.renderStreamingContent()}
+                                            </>
+                                        ) : (
+                                            <>
+                                                {this.renderStreamingContent()}
+                                                {this.renderTeamSummary()}
+                                            </>
+                                        )}
                                         {this.renderMemberStatus()}
                                         {this.renderParticipantReports()}
                                     </>
                                 )}
 
-                                {(detail.status === TaskStatus.PENDING || detail.status === TaskStatus.PROCESSING) &&
+                                {detail.summary_mode !== SummaryMode.BY_PERSON &&
+                                    this.shouldShowProcessingCard() &&
+                                    !this.personalReady &&
                                     this.renderProcessing()
                                 }
+                                {detail.summary_mode !== SummaryMode.BY_PERSON && this.renderStreamingContent()}
 
                                 {detail.status === TaskStatus.FAILED && this.renderFailed()}
 
                                 {detail.status === TaskStatus.CANCELLED && (
                                     <div className="summary-detail-cancelled">
                                         <div style={{ fontSize: 48, marginBottom: 12 }}>🚫</div>
-                                        <p style={{ fontSize: 16, fontWeight: 500 }}>任务已取消</p>
+                                        <p style={{ fontSize: 16, fontWeight: 500 }}>{t("summary.detail.cancelledTitle")}</p>
                                         <p style={{ fontSize: 14, color: "var(--semi-color-text-2)", marginTop: 8 }}>
-                                            此总结任务已被取消，不会继续执行
+                                            {t("summary.detail.cancelledDesc")}
                                         </p>
                                     </div>
                                 )}
 
                                 {/* 单人时不显示"等待参与者确认"，因为creator自动接受 */}
-                                {detail.status === TaskStatus.WAITING_CONFIRM && this.state.members.length > 1 && (
-                                    <div className="summary-detail-waiting">
-                                        <div style={{ fontSize: 48, marginBottom: 12 }}>⏳</div>
-                                        <p style={{ fontSize: 16, fontWeight: 500 }}>等待参与者确认中</p>
-                                        <p style={{ fontSize: 14, color: "var(--semi-color-text-2)", marginTop: 8, marginBottom: 16 }}>
-                                            需要所有参与者确认后才能开始生成
-                                        </p>
-                                        <Button onClick={() => WKApp.routeLeft.push(<SummaryConfirmPage taskId={this.taskId} />)}>
-                                            查看确认状态
-                                        </Button>
-                                    </div>
-                                )}
-                                {/* 单人 WaitingConfirm 状态显示生成中 */}
-                                {detail.status === TaskStatus.WAITING_CONFIRM && this.state.members.length <= 1 && (
+                                {detail.status === TaskStatus.WAITING_CONFIRM && this.state.members.length > 1 && (() => {
+                                    const mode = this.waitingConfirmMode();
+                                    return mode === 'loading' ? (
+                                        // 竞态修复（第3轮）finding 2：scheduleItem 由 loadDetail 之后的二次
+                                        // 异步 loadSchedule 回填，未到达时 isV5ScheduleConfirm() 会返回 false。
+                                        // 若此时直接 fallback 到旧 SummaryConfirmPage，V5 CONFIRM 任务会在
+                                        // scheduleItem 未到的瞬间窗口落到旧 task 级确认流。因此定时加载
+                                        // 未完成期间只显示加载态，不暴露任何确认入口；等 scheduleItem 到了
+                                        // （scheduleLoading=false）再按 isV5ScheduleConfirm 分路。
+                                        this.renderProcessing()
+                                    ) : mode === 'v5' ? (
+                                        // V5/§4.2：schedule 级 CONFIRM 任务（confirm_policy===1）。
+                                        // 不再导向旧 task 级 SummaryConfirmPage（POST /summaries/:id/confirm
+                                        // 选 sources，与「确认一次长期生效」语义冲突）。改为引导到
+                                        // header 中常驻的 schedule 级确认 banner（renderScheduleConfirm →
+                                        // POST /summary-schedules/:id/confirm）。进入本详情页即可触达该 banner。
+                                        <div className="summary-detail-waiting">
+                                            <div style={{ fontSize: 48, marginBottom: 12 }}>⏳</div>
+                                            <p style={{ fontSize: 16, fontWeight: 500 }}>{t("summary.detail.waitingConfirmTitle")}</p>
+                                            <p style={{ fontSize: 14, color: "var(--semi-color-text-2)", marginTop: 8, marginBottom: 16 }}>
+                                                {t("summary.detail.scheduleConfirmHint")}
+                                            </p>
+                                        </div>
+                                    ) : (
+                                        // 旧的非 V5 / task 级 manual 确认流（confirm_policy 非 1 或无 schedule）
+                                        // 保留走 SummaryConfirmPage，不破坏旧路径。
+                                        <div className="summary-detail-waiting">
+                                            <div style={{ fontSize: 48, marginBottom: 12 }}>⏳</div>
+                                            <p style={{ fontSize: 16, fontWeight: 500 }}>{t("summary.detail.waitingConfirmTitle")}</p>
+                                            <p style={{ fontSize: 14, color: "var(--semi-color-text-2)", marginTop: 8, marginBottom: 16 }}>
+                                                {t("summary.detail.waitingConfirmDesc")}
+                                            </p>
+                                            <Button onClick={() => WKApp.routeLeft.push(<SummaryConfirmPage taskId={this.taskId} />)}>
+                                                {t("summary.detail.viewConfirmStatus")}
+                                            </Button>
+                                        </div>
+                                    );
+                                })()}
+                                {/* 单人 WaitingConfirm 状态显示生成中（个人总结已出则不再显示 loading） */}
+                                {detail.status === TaskStatus.WAITING_CONFIRM && this.state.members.length <= 1 && !this.personalReady && (
                                     this.renderProcessing()
                                 )}
 
@@ -953,23 +4363,190 @@ export default class SummaryDetailPage extends Component<SummaryDetailPageProps,
                                     this.renderCompleted()
                                 )}
 
-                                <SelectedSourcesPanel sources={detail.sources} />
+                                {/* RefineSection removed — 反馈修改改为在智能总结 chat 里引用总结迭代
+                                    (见 CHAT-REFERENCE-BASED-DESIGN-v1) */}
                             </>
                         )}
                     </div>
+                    </div>
+                    </div>
+
+                    {/* 本文目录：右侧浮动大纲（宽屏显示，编辑/版本面板时隐藏） */}
+                    {this.renderToc()}
+
+                    {/* 桌面端与正文并排；窄屏退化为带遮罩的覆盖面板。 */}
+                    {this.renderVersionPanel()}
                 </div>
+
+                {/* Edit mode footer */}
+                {(this.state.isEditing || this.state.editingTeamSummary || this.state.editingMyDraft || this.state.editingPersonalReport) && (
+                    <div className="summary-detail-footer">
+                        <button
+                            type="button"
+                            data-testid={summaryTestIds.editorCancelBtn}
+                            className="summary-detail-footer-btn summary-detail-footer-btn--cancel"
+                            onClick={() => {
+                                if (this.state.editingTeamSummary) {
+                                    this.handleEditTeamCancel();
+                                } else if (this.state.editingMyDraft) {
+                                    this.handleEditMyDraftCancel();
+                                } else if (this.state.editingPersonalReport) {
+                                    this.handleEditPersonalReportCancel();
+                                } else {
+                                    this.handleEditCancel();
+                                }
+                            }}
+                        >
+                            {t("summary.common.cancel")}
+                        </button>
+                        <button
+                            type="button"
+                            data-testid={summaryTestIds.editorSaveBtn}
+                            className="summary-detail-footer-btn summary-detail-footer-btn--save"
+                            onClick={() => {
+                                if (this.editorSaveFn) {
+                                    this.editorSaveFn();
+                                } else if (this.state.editingTeamSummary) {
+                                    this.handleEditTeamSave();
+                                } else if (this.state.editingMyDraft) {
+                                    this.handleEditMyDraftSave();
+                                } else if (this.state.editingPersonalReport) {
+                                    this.handleEditPersonalReportSave();
+                                } else {
+                                    this.handleEditSave();
+                                }
+                            }}
+                        >
+                            {t("summary.common.save")}
+                        </button>
+                    </div>
+                )}
 
                 <ScheduleConfigModal
                     visible={showScheduleConfig}
-                    value={scheduleConfig || { period: "daily", time: "09:00" }}
+                    value={scheduleConfig || { unit: "week", every: 1, time: "09:00" }}
                     onConfirm={this.handleScheduleSave}
                     onCancel={() => this.setState({ showScheduleConfig: false })}
+                    hasExisting={!!this.state.scheduleItem && this.state.scheduleItem.is_active !== false}
+                    onDisable={this.handleScheduleDisable}
+                    disabling={this.state.scheduleDisabling}
                 />
-                <MatterPickerModal
-                    visible={this.state.showMatterPicker}
-                    onSelect={this.handleMatterSelected}
-                    onCancel={() => this.setState({ showMatterPicker: false })}
-                />
+                {/* need7：添加成员复用 SubscriberList 路由页面，见 handleOpenAddMember */}
+                <Modal
+                    header={null}
+                    footer={null}
+                    visible={this.state.showRegenerateModal}
+                    width={480}
+                    className="summary-confirm"
+                    centered
+                    maskClosable
+                    onCancel={this.handleRegenerateCancel}
+                    modalRender={(node) => (
+                        <div data-testid={summaryTestIds.regenerateModal}>{node}</div>
+                    )}
+                >
+                    <div className="summary-confirm-body">
+                        <div className="summary-confirm-main">
+                            <div className="summary-confirm-caption">
+                                <div className="summary-confirm-title">{t("summary.detail.adjustSummaryTitle")}</div>
+                            </div>
+                        </div>
+                        <button type="button" className="summary-confirm-close" onClick={this.handleRegenerateCancel}>
+                            <X size={20} />
+                        </button>
+                    </div>
+                    <div className="summary-regenerate-content">
+                        <div className="summary-regenerate-mode-list" role="radiogroup">
+                            {(["refine", "full"] as const).map((mode) => {
+                                const selected = this.state.regenerateMode === mode;
+                                const titleKey = mode === "refine"
+                                    ? "summary.detail.refineModeTitle"
+                                    : "summary.detail.fullRegenerateModeTitle";
+                                const descKey = mode === "refine"
+                                    ? "summary.detail.refineModeDesc"
+                                    : "summary.detail.fullRegenerateModeDesc";
+                                return (
+                                    <label
+                                        key={mode}
+                                        className={`summary-regenerate-mode${selected ? " summary-regenerate-mode--selected" : ""}`}
+                                    >
+                                        <input
+                                            type="radio"
+                                            name="summary-regenerate-mode"
+                                            value={mode}
+                                            checked={selected}
+                                            onChange={() => this.handleRegenerateModeChange(mode)}
+                                            className="summary-regenerate-mode__input"
+                                        />
+                                        <span className="summary-regenerate-mode__indicator" aria-hidden="true" />
+                                        <span>
+                                            <span className="summary-regenerate-mode__title">{t(titleKey)}</span>
+                                            <span className="summary-regenerate-mode__desc">{t(descKey)}</span>
+                                        </span>
+                                    </label>
+                                );
+                            })}
+                        </div>
+                        <label className="summary-regenerate-input-label" htmlFor="summary-regenerate-input">
+                            {t(this.state.regenerateMode === "refine"
+                                ? "summary.detail.refineFeedbackLabel"
+                                : "summary.detail.regenerateTopicLabel")}
+                        </label>
+                        <div className="summary-regenerate-textarea-wrap">
+                            <textarea
+                                id="summary-regenerate-input"
+                                data-testid={summaryTestIds.regenerateInput}
+                                ref={this.regenerateTopicRef}
+                                className="summary-regenerate-textarea"
+                                rows={3}
+                                maxLength={SUMMARY_INPUT_MAX_LENGTH}
+                                placeholder={t(this.state.regenerateMode === "refine"
+                                    ? "summary.detail.refineFeedbackPlaceholder"
+                                    : "summary.detail.regenerateTopicPlaceholder")}
+                                value={this.state.regenerateMode === "refine"
+                                    ? this.state.refineFeedback
+                                    : this.state.regenerateTopic}
+                                onChange={(e) => this.setState(this.state.regenerateMode === "refine"
+                                    ? { refineFeedback: e.target.value.slice(0, SUMMARY_INPUT_MAX_LENGTH) }
+                                    : { regenerateTopic: e.target.value.slice(0, SUMMARY_INPUT_MAX_LENGTH) })}
+                            />
+                            <VoiceInputButton
+                                inputRef={this.regenerateTopicRef}
+                                onTranscribed={this.handleRegenerateInputVoice}
+                                onRecordingStart={this.handleRegenerateVoiceRecordingStart}
+                                getCurrentText={() => (this.regenerateVoiceMode ?? this.state.regenerateMode) === "refine"
+                                    ? this.state.refineFeedback
+                                    : this.state.regenerateTopic}
+                                showModeMenu
+                                size="sm"
+                                className="wk-vib--textarea-corner"
+                            />
+                            <span className="summary-regenerate-char-count">
+                                {(this.state.regenerateMode === "refine"
+                                    ? this.state.refineFeedback
+                                    : this.state.regenerateTopic).length}/{SUMMARY_INPUT_MAX_LENGTH}
+                            </span>
+                        </div>
+                    </div>
+                    <div className="summary-confirm-footer">
+                        <button data-testid={summaryTestIds.regenerateCancelBtn} type="button" className="summary-confirm-btn summary-confirm-btn--cancel" onClick={this.handleRegenerateCancel}>
+                            {t("summary.common.cancel")}
+                        </button>
+                        <button
+                            type="button"
+                            data-testid={summaryTestIds.regenerateSubmitBtn}
+                            className="summary-confirm-btn summary-confirm-btn--dark"
+                            disabled={this.state.regenerateSubmitting || (this.state.regenerateMode === "refine" && !this.hasRegenerateRefineBaseResult()) || !(this.state.regenerateMode === "refine"
+                                ? this.state.refineFeedback.trim()
+                                : this.state.regenerateTopic.trim())}
+                            onClick={this.handleRegenerateConfirm}
+                        >
+                            {this.state.regenerateSubmitting
+                                ? t("summary.create.submitting")
+                                : t(this.state.regenerateMode === "refine" ? "summary.detail.refineAction" : "summary.detail.regenerate")}
+                        </button>
+                    </div>
+                </Modal>
             </div>
         );
     }

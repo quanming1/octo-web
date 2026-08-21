@@ -4,6 +4,7 @@ import MessageBase from "../Base";
 import MessageTrail from "../Base/tail";
 import { MessageCell } from "../MessageCell";
 import WKApp from "../../App";
+import { I18nContext, t } from "../../i18n";
 
 import "./index.css";
 
@@ -22,11 +23,14 @@ export class JoinOrganizationContent extends MessageContent {
   }
 
   get conversationDigest() {
-    return "[邀请加入组织]";
+    return t("base.message.digest.joinOrganization");
   }
 }
 
 export class JoinOrganizationCell extends MessageCell {
+  static contextType = I18nContext;
+  declare context: React.ContextType<typeof I18nContext>;
+
   render() {
     const { message, context } = this.props;
     const content = message.content as JoinOrganizationContent;
@@ -46,16 +50,18 @@ export class JoinOrganizationCell extends MessageCell {
             <div>
               <img
                 src={WKApp.shared.avatarOrg(content.org_id)}
-                style={{ width: "64px", height: "64px", borderRadius: "50%" }}
+                style={{ width: "64px", height: "64px", borderRadius: "var(--wk-avatar-radius, 50%)" }}
                 alt=""
               />
             </div>
             <div className="wk-join-oraganization-content-name">
-              {content.inviter_name} 邀请加入 {content.org_name}
+              {this.context.t("base.message.joinOrganization.inviteText", {
+                values: { inviter: content.inviter_name, orgName: content.org_name },
+              })}
             </div>
           </div>
           <div className="wk-join-oraganization-bottom">
-            <div className="wk-join-oraganization-bottom-flag">加入组织</div>
+            <div className="wk-join-oraganization-bottom-flag">{this.context.t("base.message.joinOrganization.join")}</div>
             <div className="wk-join-oraganization-bottom-time">
               <MessageTrail message={message} timeStyle={{ color: "#999" }} />
             </div>

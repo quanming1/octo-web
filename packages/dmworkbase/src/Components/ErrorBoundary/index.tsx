@@ -1,4 +1,5 @@
 import React, { Component, ErrorInfo, ReactNode } from 'react';
+import { useI18n } from '../../i18n';
 import './index.css';
 
 export interface ErrorBoundaryProps {
@@ -71,7 +72,8 @@ export interface ErrorFallbackProps {
  * Default fallback UI displayed when an error is caught
  */
 export function ErrorFallback({ error, moduleName, onRetry }: ErrorFallbackProps): JSX.Element {
-    const displayName = moduleName || '模块';
+    const { t } = useI18n();
+    const displayName = moduleName || t('base.errorBoundary.module');
 
     return (
         <div className="wk-error-boundary">
@@ -92,16 +94,18 @@ export function ErrorFallback({ error, moduleName, onRetry }: ErrorFallbackProps
                         <line x1="12" y1="16" x2="12.01" y2="16" />
                     </svg>
                 </div>
-                <h3 className="wk-error-boundary-title">{displayName}加载出错</h3>
+                <h3 className="wk-error-boundary-title">
+                    {t('base.errorBoundary.title', { values: { module: displayName } })}
+                </h3>
                 <p className="wk-error-boundary-message">
-                    {error?.message || '发生了未知错误'}
+                    {error?.message || t('base.errorBoundary.unknownError')}
                 </p>
                 {onRetry && (
                     <button
                         className="wk-error-boundary-retry"
                         onClick={onRetry}
                     >
-                        重试
+                        {t('base.filePreview.retry')}
                     </button>
                 )}
             </div>

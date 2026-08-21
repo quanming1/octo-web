@@ -1,11 +1,12 @@
 import React from 'react'
 import './index.css'
-import SingleImage from './SingleImage'
+import SingleImage, { ImageTransferState } from './SingleImage'
 
 export interface ImageItem {
   src: string
   width: number
   height: number
+  transferState?: ImageTransferState
 }
 
 export interface MultiImageProps {
@@ -14,6 +15,9 @@ export interface MultiImageProps {
 
   /** 点击图片回调 */
   onImageClick?: (index: number) => void
+
+  /** 多图整体发送/上传状态 */
+  transferState?: ImageTransferState
 }
 
 /**
@@ -28,7 +32,8 @@ export interface MultiImageProps {
  */
 export default function MultiImage({
   images,
-  onImageClick
+  onImageClick,
+  transferState
 }: MultiImageProps) {
   return (
     <div className="wk-msg-multi-image">
@@ -38,7 +43,8 @@ export default function MultiImage({
           src={img.src}
           width={img.width}
           height={img.height}
-          onClick={() => onImageClick?.(index)}
+          transferState={img.transferState || transferState}
+          onClick={onImageClick ? () => onImageClick(index) : undefined}
         />
       ))}
     </div>

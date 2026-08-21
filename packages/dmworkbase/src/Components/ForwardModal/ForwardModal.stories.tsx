@@ -149,6 +149,8 @@ function Interactive(props: Partial<ForwardModalProps> & { initialItems?: Forwar
         }}
         onConfirm={() => {}}
         onCancel={props.onCancel}
+        activeTab={props.activeTab ?? "recent"}
+        onTabChange={props.onTabChange ?? (() => {})}
       />
     </div>
   )
@@ -241,6 +243,8 @@ export const Loading: Story = {
         onInputChange={() => {}}
         onToggleSelect={() => {}}
         onConfirm={() => {}}
+        activeTab="recent"
+        onTabChange={() => {}}
       />
     </div>
   ),
@@ -252,7 +256,7 @@ export const Loading: Story = {
 
 /** 树状展示：父群下子区缩进显示，群聊和子区独立勾选 */
 export const TreeView: Story = {
-  render: () => <Interactive initialItems={mockTreeItems} />,
+  render: () => <Interactive initialItems={mockTreeItems} activeTab="group" />,
   play: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
     const canvas = within(canvasElement)
 
@@ -279,7 +283,7 @@ export const TreeView: Story = {
 
 /** 树状连接线可见：父群下子区有 └─ 折角线 */
 export const TreeViewWithLines: Story = {
-  render: () => <Interactive initialItems={mockTreeItems} />,
+  render: () => <Interactive initialItems={mockTreeItems} activeTab="group" />,
   play: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
     const canvas = within(canvasElement)
     // 子区在列表里（连接线由 CSS 渲染，play function 验证结构正确即可）
@@ -289,11 +293,29 @@ export const TreeViewWithLines: Story = {
   },
 }
 
+/** 最近列表：平铺展示，子区不缩进，并显示目标类型 */
+export const RecentFlatView: Story = {
+  render: () => <Interactive initialItems={mockTreeItems} activeTab="recent" />,
+  play: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
+    const canvas = within(canvasElement)
+
+    const threadName = await canvas.findByText("需求讨论")
+    const threadRow = threadName.closest(".wk-fm-item")
+    if (!threadRow) throw new Error("Thread row not found")
+    await expect(threadRow).toHaveClass("wk-fm-item--flat")
+    await expect(threadRow).not.toHaveClass("wk-fm-item--child")
+
+    expect(canvas.getAllByText("群聊").length).toBeGreaterThan(0)
+    expect(canvas.getAllByText("子区").length).toBeGreaterThan(0)
+    expect(canvas.getAllByText("私聊").length).toBeGreaterThan(0)
+  },
+}
+
 // SelectedAreaBadges story removed — badge 角标已按设计稿去掉，不再区分群聊/子区
 
 /** 搜索方案 A：命中子区时带出父群 */
 export const SearchTreeViewA: Story = {
-  render: () => <Interactive initialItems={mockTreeItems} />,
+  render: () => <Interactive initialItems={mockTreeItems} activeTab="group" />,
   play: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
     const canvas = within(canvasElement)
 
@@ -372,4 +394,86 @@ export const ExternalGroupTag: Story = {
       aliceRow?.querySelector(".wk-conversationlist-item-external-tag")
     ).toBeNull()
   },
+}
+
+// ---- 授权区 + 右侧 Bot 联动（feature: user+Bot grants, Scope C/D） ----
+
+import type { ForwardBotSnapshot } from "./grant"
+
+/**
+ * 授权开关开启后：
+ *  - 底部授权区按人展开、逐个可取消其 Bot（默认全选）；
+ *  - 右侧「已选」区把每个人当前选中/默认选中的 Bot 嵌套展示在其名下；
+ *  - 两处共用同一个权威 ForwardBotSnapshot.toggleBot，取消/恢复即时同步（无重复选择态）。
+ * 群/Thread 目标不在右侧铺开成员/Bot。canGrant=false 时授权区显示锁定图标 + 提示（Scope D，
+ * 使用 WK 图标而非 emoji）。
+ */
+function GrantInteractive({ canGrant }: { canGrant: boolean }) {
+  const people: ForwardItem[] = [
+    { channelID: "user-001", channelType: 1, displayName: "Alice" },
+    { channelID: "group-001", channelType: 2, displayName: "前端开发群", hasThreads: true },
+  ]
+  const [enabled, setEnabled] = useState(true)
+  const [role, setRole] = useState<"reader" | "commenter" | "writer">("reader")
+  const [cancelled, setCancelled] = useState<Set<string>>(() => new Set())
+  const catalog = [
+    { creator: "user-001", uid: "b_1", name: "Writer Bot" },
+    { creator: "user-001", uid: "b_2", name: "Review Bot" },
+  ]
+  const toggleBot = (uid: string) =>
+    setCancelled((prev) => {
+      const next = new Set(prev)
+      if (next.has(uid)) next.delete(uid)
+      else next.add(uid)
+      return next
+    })
+  const groups = [
+    {
+      uid: "user-001",
+      name: "Alice",
+      bots: catalog
+        .filter((b) => b.creator === "user-001")
+        .map((b) => ({ uid: b.uid, name: b.name, selected: !cancelled.has(b.uid) })),
+    },
+  ]
+  const bots: ForwardBotSnapshot = {
+    ready: true,
+    peopleCount: 1,
+    botCount: groups[0].bots.filter((b) => b.selected).length,
+    groups,
+    toggleBot,
+  }
+  return (
+    <div style={{ width: 420, border: "1px solid #eee", borderRadius: 8, overflow: "hidden" }}>
+      <ForwardModal
+        items={people}
+        allItems={people}
+        selectedIDs={["user-001"]}
+        inputValue=""
+        onInputChange={() => {}}
+        onToggleSelect={() => {}}
+        onConfirm={() => {}}
+        activeTab="recent"
+        onTabChange={() => {}}
+        grant={{
+          canGrant,
+          enabled,
+          role,
+          onEnabledChange: setEnabled,
+          onRoleChange: setRole,
+          bots: canGrant ? bots : undefined,
+        }}
+      />
+    </div>
+  )
+}
+
+/** 授权可用：右侧 Alice 名下嵌套其默认选中的 Bot，取消一个即时反映（右侧 + 授权区同步）。 */
+export const GrantWithBots: Story = {
+  render: () => <GrantInteractive canGrant />,
+}
+
+/** 无授权权限：授权区显示锁定图标 + 提示（Scope D：WK 图标，非 emoji）。 */
+export const GrantDisabled: Story = {
+  render: () => <GrantInteractive canGrant={false} />,
 }
