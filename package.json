@@ -1,7 +1,7 @@
 {
   "name": "octo-web",
   "private": true,
-  "version": "1.5.1",
+  "version": "1.5.2",
   "scripts": {
     "dev": "turbo run dev --parallel --filter=!./apps/extension",
     "dev:all": "turbo run dev --parallel",
