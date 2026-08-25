@@ -404,6 +404,15 @@ export default defineConfig(({ mode }) => {
     server: {
       port: env.VITE_PORT ? Number(env.VITE_PORT) : 3000,
       host: env.VITE_HOST ?? true,
+      watch: {
+        // 静态二进制资产（wasm/字体/PDF cmap 等）不需要热更新，排除出 watch。
+        // Vite 8 初始化时对 public 目录树逐文件建立 FSWatcher，Windows 上
+        // Defender 实时保护/索引服务会短暂独占锁定这些大文件，撞上即 EBUSY
+        // 崩溃（@file-viewer 的 copyAssets 会把 ppt-font-cjk.otf 等复制到
+        // public/vendor/，dev server 因此无法启动）。
+        ignored: (path: string) =>
+          /\.(wasm|otf|ttf|woff2?|bcmap|cmap)$/i.test(path),
+      },
       proxy: {
         // Agent Mail uses one stable browser path in every environment. The
         // development proxy selects the OCTO server origin through
