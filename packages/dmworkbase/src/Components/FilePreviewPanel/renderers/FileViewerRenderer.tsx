@@ -77,7 +77,9 @@ const FileViewerRenderer: React.FC<BaseRendererProps> = ({ file, onError }) => {
         rendererMode: "replace",
         theme: "system",
         styleIsolation: "scoped",
-        toolbar: { position: "bottom-right" },
+        // 不渲染 file-viewer 自带工具栏（file-viewer-web-toolbar），
+        // 避免遮挡预览内容；下载/外开等操作由 FilePreviewPanel 头部提供。
+        toolbar: false,
         spreadsheet: {
           workerUrl: "/vendor/xlsx/sheet.worker.js",
         },
