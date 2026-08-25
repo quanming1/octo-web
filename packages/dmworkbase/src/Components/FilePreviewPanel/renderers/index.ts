@@ -8,8 +8,7 @@ export type { ImageRendererProps } from "./ImageRenderer";
 export { default as VideoRenderer } from "./VideoRenderer";
 export type { VideoRendererProps } from "./VideoRenderer";
 
-export { default as PdfRenderer } from "./PdfRenderer";
-export type { PdfRendererProps } from "./PdfRenderer";
+export { default as FileViewerRenderer } from "./FileViewerRenderer";
 
 export { default as MarkdownRenderer } from "./MarkdownRenderer";
 export type { MarkdownRendererProps } from "./MarkdownRenderer";
@@ -32,9 +31,6 @@ export type { FallbackRendererProps } from "./FallbackRenderer";
 
 export { default as HtmlRenderer } from "./HtmlRenderer";
 export type { HtmlRendererProps } from "./HtmlRenderer";
-
-export { default as ExcelRenderer } from "./ExcelRenderer";
-export type { ExcelRendererProps } from "./ExcelRenderer";
 
 export { default as JsonRenderer } from "./JsonRenderer";
 export type { JsonRendererProps } from "./JsonRenderer";

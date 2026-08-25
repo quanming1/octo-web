@@ -17,6 +17,33 @@ import {
   parseEnterpriseFsAllow,
   readEnterpriseHtmlHead,
 } from "./vite.enterpriseHtml";
+import { fileViewerRenderers } from "@file-viewer/vite-plugin";
+import { createRequire } from "module";
+
+// ESM-safe require: vite may load this config as ESM, where the bare `require`
+// reference is undefined. Plugins that still need CJS resolution (fix-xmldom-cjs
+// and the @file-viewer patches below) go through this instead of the global
+// `require`.
+const __require = createRequire(import.meta.url);
+
+/**
+ * Resolve a @file-viewer package's real path under pnpm's content-addressable
+ * store regardless of its installed version. The vite plugins below patch
+ * upstream files (spreadsheet worker / pptx chart), so hard-coding a version
+ * like `@file-viewer+renderer-spreadsheet@2.1.27` silently breaks on upgrades.
+ */
+function resolvePnpmPkgDir(packageName: string): string | null {
+  const fs = __require("fs");
+  const path = __require("path");
+  const pnpmDir = path.join(process.cwd(), "../../node_modules/.pnpm");
+  const prefix = packageName.replace("/", "+") + "@";
+  const matches = fs
+    .readdirSync(pnpmDir)
+    .filter((d) => d.startsWith(prefix) && !d.includes("(")); // skip peer-dep variants
+  if (matches.length === 0) return null;
+  matches.sort(); // latest version sorts last for sane version strings
+  return path.join(pnpmDir, matches[matches.length - 1], "node_modules", packageName);
+}
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "VITE_");
@@ -134,8 +161,178 @@ export default defineConfig(({ mode }) => {
       ),
       // TODO: remove after all require() calls are migrated to import (chore/migrate-require-to-import)
       commonjs(),
+      fileViewerRenderers({
+        copyAssets: true,
+        chunkStrategy: "renderer",
+      }),
       react(),
       tsconfigPaths({ root: "../../" }),
+      {
+        name: "fix-xmldom-cjs",
+        enforce: "pre",
+        buildStart() {
+          const { buildSync } = __require("esbuild");
+          const fs = __require("fs");
+          const path = __require("path");
+          const root = process.cwd();
+          const outDir = path.join(root, "node_modules", ".vite");
+          if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
+          const outFile = path.join(outDir, "xmldom-esm.js");
+          // @xmldom/xmldom is a transitive dep of @file-viewer/renderer-word and
+          // is NOT hoisted to the root node_modules under pnpm — resolve it via
+          // the content-addressable store instead of require.resolve.
+          const xmldomPkgDir = resolvePnpmPkgDir("@xmldom/xmldom");
+          if (!xmldomPkgDir) {
+            console.warn("[vite] @xmldom/xmldom not found, xmldom ESM bundle skipped");
+            return;
+          }
+          const xmldomPkg = JSON.parse(
+            fs.readFileSync(path.join(xmldomPkgDir, "package.json"), "utf-8")
+          );
+          const xmldomPath = path.join(xmldomPkgDir, xmldomPkg.main || "lib/index.js");
+          buildSync({
+            entryPoints: [xmldomPath],
+            bundle: true,
+            format: "esm",
+            outfile: outFile,
+            logLevel: "silent",
+          });
+          // esbuild only emits `export default require_index();` for CJS.
+          // Append named exports so `import { DOMParser }` works.
+          let code = fs.readFileSync(outFile, "utf-8");
+          const lastExport = "export default require_index();";
+          const idx = code.lastIndexOf(lastExport);
+          if (idx !== -1) {
+            const named = "var __xmldom = require_index();\nexport default __xmldom;\nexport const DOMParser = __xmldom.DOMParser;\nexport const XMLSerializer = __xmldom.XMLSerializer;\nexport const DOMImplementation = __xmldom.DOMImplementation;\nexport const DOMException = __xmldom.DOMException;\nexport const Node = __xmldom.Node;\nexport const Element = __xmldom.Element;\nexport const Document = __xmldom.Document;\nexport const Attr = __xmldom.Attr;\nexport const Text = __xmldom.Text;\nexport const Comment = __xmldom.Comment;\nexport const MIME_TYPE = __xmldom.MIME_TYPE;\nexport const NAMESPACE = __xmldom.NAMESPACE;\n";
+            code = code.slice(0, idx) + named;
+            fs.writeFileSync(outFile, code, "utf-8");
+          }
+        },
+        resolveId(id) {
+          const path = __require("path");
+          if (id === "@xmldom/xmldom" || (id.includes("@xmldom/xmldom/lib/index") && !id.includes("?") && !id.includes("xmldom-esm"))) {
+            return path.join(process.cwd(), "node_modules", ".vite", "xmldom-esm.js");
+          }
+        },
+      },
+      {
+        name: "bundle-spreadsheet-worker",
+        enforce: "pre",
+        buildStart() {
+          const { buildSync } = __require("esbuild");
+          const fs = __require("fs");
+          const path = __require("path");
+          const root = process.cwd();
+          const outDir = path.join(root, "public", "vendor", "xlsx");
+          if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
+          const outFile = path.join(outDir, "sheet.worker.js");
+          const ssPkgDir = resolvePnpmPkgDir("@file-viewer/renderer-spreadsheet");
+          if (!ssPkgDir) {
+            console.warn("[vite] @file-viewer/renderer-spreadsheet not found, spreadsheet worker/parser bundling skipped");
+            return;
+          }
+          const ssDir = path.join(ssPkgDir, "dist/spreadsheet");
+          const workerEntry = path.join(ssDir, "worker/sheetjs/sheet.worker.js");
+          // Create a minimal stream shim so styled-exceljs doesn't crash on
+          // `require('stream')` in the browser Worker environment.
+          const shimDir = path.join(root, "node_modules", ".vite", "shims");
+          if (!fs.existsSync(shimDir)) fs.mkdirSync(shimDir, { recursive: true });
+          const streamShim = path.join(shimDir, "stream-shim.js");
+          fs.writeFileSync(streamShim, [
+            "// Minimal stream shim for browser environment",
+            "export class Readable { constructor() {} pipe() { return this; } on() { return this; } destroy() {} }",
+            "export class Writable { constructor() {} write() { return true; } end() {} on() { return this; } destroy() {} }",
+            "export class Transform { constructor() {} pipe() { return this; } on() { return this; } write() { return true; } end() {} destroy() {} }",
+            "export class PassThrough { constructor() {} pipe() { return this; } on() { return this; } write() { return true; } end() {} destroy() {} }",
+            "export default { Readable, Writable, Transform, PassThrough };",
+          ].join("\n"));
+          const esbuildOpts = {
+            bundle: true,
+            format: "esm",
+            platform: "browser",
+            logLevel: "silent",
+            alias: { stream: streamShim },
+            define: {
+              "process.env.NODE_ENV": JSON.stringify("production"),
+              "process.browser": "true",
+              "global": "self",
+            },
+          };
+          // 1. Bundle the Worker entry → public/vendor/xlsx/sheet.worker.js
+          try {
+            buildSync({ ...esbuildOpts, entryPoints: [workerEntry], outfile: outFile });
+          } catch (e) {
+            console.warn("[vite] spreadsheet worker bundle failed:", e?.message);
+          }
+          // 2. Bundle the main-thread parser → node_modules/.vite/spreadsheet-parser.js
+          //    The AutoFallbackSpreadsheetWorker falls back to a dynamic
+          //    `import('./spreadsheet/worker/sheetjs/parser.js')` on the main
+          //    thread when the Worker is unavailable (e.g. CSV files). The raw
+          //    parser.js imports styled-exceljs (CJS, depends on Node `stream`),
+          //    which Vite cannot serve to the browser. Pre-bundle it so the
+          //    fallback path works.
+          const parserEntry = path.join(ssDir, "worker/sheetjs/parser.js");
+          const parserOut = path.join(root, "node_modules", ".vite", "spreadsheet-parser.js");
+          try {
+            buildSync({ ...esbuildOpts, entryPoints: [parserEntry], outfile: parserOut });
+          } catch (e) {
+            console.warn("[vite] spreadsheet parser bundle failed:", e?.message);
+          }
+        },
+        transform(code, id) {
+          if (/@file-viewer\+renderer-spreadsheet@/.test(id)) {
+            let patched = code.replace(
+              /import\((['"])(?:\.\/)?spreadsheet\/worker\/sheetjs\/parser\.js\1\)/g,
+              'import("/node_modules/.vite/spreadsheet-parser.js")',
+            );
+            if (id.includes("/dist/spreadsheet/view.js")) {
+              // Keep the row-number column fixed, but allow data columns to
+              // share the remaining viewport width. The upstream renderer
+              // disables width filling for both columns, which leaves narrow
+              // CSV sheets stranded on the left side of a wide preview.
+              patched = patched.replace(
+                /widthFillDisable: true,\s*renderType: 'both'/,
+                "widthFillDisable: false,\n            renderType: 'both'",
+              );
+            }
+            if (patched !== code) {
+              return { code: patched, map: null };
+            }
+          }
+        },
+      },
+      {
+        // Patch @file-viewer/pptx chart.js: billboard.js falls back to
+        // appending a new <div class="bb"> to document.body when the
+        // `bindto` selector (#chartID) doesn't match any element in the DOM.
+        // This happens because PPT slides use lazy loading — the chart
+        // placeholder isn't in the DOM yet when renderPptxPostProcessing runs.
+        // Guard bb.generate() so charts are only rendered when their
+        // placeholder element already exists.
+        name: "fix-pptx-chart-bindto",
+        enforce: "pre",
+        buildStart() {
+          const fs = __require("fs");
+          const path = __require("path");
+          const chartPkgDir = resolvePnpmPkgDir("@file-viewer/renderer-presentation");
+          if (!chartPkgDir) return;
+          const chartPath = path.join(
+            chartPkgDir,
+            "../pptx/dist/chart.js",
+          );
+          if (!fs.existsSync(chartPath)) return;
+          let code = fs.readFileSync(chartPath, "utf-8");
+          // 原代码是 `return bb.generate(chart);`，若只替换 `bb.generate(chart);`
+          // 会在前面残留 `return if (...) {...}`，产生非法 JS 语法（PARSE_ERROR）。
+          const target = "return bb.generate(chart);";
+          const replacement =
+            "if (document.querySelector(chart.bindto)) { return bb.generate(chart); }";
+          if (!code.includes(replacement) && code.includes(target)) {
+            code = code.replace(target, replacement);
+            fs.writeFileSync(chartPath, code, "utf-8");
+          }
+        },
+      },
       {
         name: "exclude-test-files",
         // enforce: "pre" 让本插件的 resolveId 早于 commonjs() 等其它插件执行。

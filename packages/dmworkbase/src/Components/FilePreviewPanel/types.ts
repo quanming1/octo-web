@@ -50,6 +50,7 @@ export type FileRenderer = ComponentType<BaseRendererProps>;
 export type FileType =
   | "image"
   | "pdf"
+  | "word"
   | "markdown"
   | "code"
   | "json"

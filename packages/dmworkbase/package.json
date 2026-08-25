@@ -14,13 +14,10 @@
     "@douyinfe/semi-icons": "^2.93.0",
     "@douyinfe/semi-ui": "^2.93.0",
     "@emotion/react": "^11.14.0",
+    "@file-viewer/core": "2.2.5",
+    "@file-viewer/preset-office": "2.2.5",
     "@floating-ui/dom": "^1.7.6",
     "@lottiefiles/lottie-player": "^1.5.5",
-    "@react-pdf-viewer/bookmark": "^3.12.0",
-    "@react-pdf-viewer/core": "^3.12.0",
-    "@react-pdf-viewer/page-navigation": "^3.12.0",
-    "@react-pdf-viewer/thumbnail": "^3.12.0",
-    "@react-pdf-viewer/zoom": "^3.12.0",
     "@tiptap/core": "3.22.2",
     "@tiptap/extension-mention": "^3.22.2",
     "@tiptap/extension-placeholder": "^3.22.4",
@@ -67,7 +64,6 @@
     "tippy.js": "^6.3.7",
     "unist-util-visit": "^5.1.0",
     "wukongimjssdk": "^1.2.11",
-    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "yet-another-react-lightbox": "^3.30.0"
   },
   "devDependencies": {

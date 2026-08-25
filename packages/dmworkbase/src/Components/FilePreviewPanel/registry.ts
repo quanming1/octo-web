@@ -4,13 +4,12 @@ import {
   RendererRegistryItem,
   getExtension,
 } from "./types";
-import PdfRenderer from "./renderers/PdfRenderer";
+import FileViewerRenderer from "./renderers/FileViewerRenderer";
 import MarkdownRenderer from "./renderers/MarkdownRenderer";
 import CodeRenderer from "./renderers/CodeRenderer";
 import TextRenderer from "./renderers/TextRenderer";
 import HtmlRenderer from "./renderers/HtmlRenderer";
 import FallbackRenderer from "./renderers/FallbackRenderer";
-import ExcelRenderer from "./renderers/ExcelRenderer";
 import JsonRenderer from "./renderers/JsonRenderer";
 import JsonlRenderer from "./renderers/JsonlRenderer";
 import ImageRenderer from "./renderers/ImageRenderer";
@@ -20,9 +19,8 @@ import VideoRenderer from "./renderers/VideoRenderer";
  * 文件渲染器注册表
  * 策略模式核心：根据文件扩展名选择对应的渲染器
  *
- * 注意：以下文件类型明确不支持预览，走 FallbackRenderer：
- * - .docx / .pptx / .ppt（Word / PowerPoint）
- * - 音频（对话流内已渲染，不进入面板）
+ * Office 文档（pdf / word / ppt / excel）统一由 FileViewerRenderer
+ * （@file-viewer，Flyfish File Viewer）渲染；其余格式保留原渲染器。
  */
 class FileRendererRegistry {
   private registry: Map<string, RendererRegistryItem> = new Map();
@@ -50,11 +48,27 @@ class FileRendererRegistry {
       needsFetch: false,
     });
 
-    // PDF
+    // PDF（@file-viewer renderer-pdf）
     this.register({
       type: "pdf",
       extensions: ["pdf"],
-      renderer: PdfRenderer,
+      renderer: FileViewerRenderer,
+      needsFetch: false,
+    });
+
+    // Word（@file-viewer renderer-word）
+    this.register({
+      type: "word",
+      extensions: ["docx", "doc", "docm", "dotx", "dotm", "rtf", "odt", "wps"],
+      renderer: FileViewerRenderer,
+      needsFetch: false,
+    });
+
+    // PPT（@file-viewer renderer-presentation）
+    this.register({
+      type: "ppt",
+      extensions: ["pptx", "ppt", "pptm", "potx", "ppsx", "odp", "dps"],
+      renderer: FileViewerRenderer,
       needsFetch: false,
     });
 
@@ -132,12 +146,12 @@ class FileRendererRegistry {
       needsFetch: true,
     });
 
-    // Excel/CSV 表格（xlsx, xls, xlsb, xlsm, csv）
+    // Excel/CSV 表格（@file-viewer renderer-spreadsheet：xlsx, xls, xlsb, xlsm, csv, et）
     this.register({
       type: "excel",
-      extensions: ["xlsx", "xls", "xlsb", "xlsm", "csv"],
-      renderer: ExcelRenderer,
-      needsFetch: true,
+      extensions: ["xlsx", "xls", "xlsb", "xlsm", "csv", "et"],
+      renderer: FileViewerRenderer,
+      needsFetch: false,
     });
   }
 

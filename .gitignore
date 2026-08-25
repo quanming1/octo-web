@@ -94,3 +94,5 @@ docs/loop-v1/
 .omx
 .idea/
 .ftre/
+# @file-viewer spreadsheet worker (generated at build time by bundle-spreadsheet-worker)  
+apps/web/public/vendor/  
